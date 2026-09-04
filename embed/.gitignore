@@ -1,0 +1,3 @@
+# build outputs (regenerate with build_embed.py)
+dist/
+_work/
