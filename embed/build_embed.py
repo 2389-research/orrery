@@ -271,7 +271,23 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
               if e["scope"] == "collection" and e["source"] in nodeset and e["target"] in nodeset]
 
     nodes = stars + colls
-    tax = [{**t, "document_count": dom_docs.get(t["path"], 0)}
+    # Domains are sized by their in-slice ENTITY count, not doc count — the same
+    # problem the repos had, worse. Domains are kept because ENTITIES are members of
+    # them (entities carry multi-domain memberships from the full graph), so the
+    # slice's 178 docs land in only ~40 of the 246 kept domains: 168 of them have a
+    # document_count of 0 and the median is 0. state.js sizes every domain as
+    # radius = 120 + sqrt(document_count)*35, so two thirds pin to the floor and the
+    # galaxy goes uniform and sparse. Entity count has real spread (1 / 10 / 275).
+    #
+    # Caveat: the tooltip labels this field "docs", so it now reads as the domain's
+    # weight in this slice rather than a literal document count. Sizing on the
+    # honest doc count is what produced a flat map of nothing.
+    dom_ents = defaultdict(int)
+    for n in stars:
+        for m in n["memberships"]:
+            if m["container_type"] == "domain":
+                dom_ents[m["id"]] += 1
+    tax = [{**t, "document_count": dom_ents.get(t["path"], dom_docs.get(t["path"], 0))}
            for t in p["taxonomy"] if t["path"] in kept_dom]
     sub = {
         # Only what the renderer reads. The full snapshot's meta carried the whole
