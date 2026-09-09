@@ -55,14 +55,17 @@ export function ScreensaverSettingsPanel({ settings, update }: Props) {
     try {
       const info = await getExportInfo();
       if (!info.viz_assets_available) throw new Error("viz assets unavailable on the server");
-      // Report the number that SHIPPED, not the render count: when we cap, `entities`
-      // is the uncapped figure and quoting it overstates the download.
-      const shipped = info.exportable ? info.entities : Math.min(info.entities, info.limit);
-      await downloadGalaxyExport(info.exportable ? undefined : { maxEntities: info.limit });
+      // The count comes back from the server, not from arithmetic here: the
+      // per-collection quota can overshoot max_entities, so predicting it would put a
+      // number in front of the user that the zip does not contain.
+      const shipped = await downloadGalaxyExport(
+        info.exportable ? undefined : { maxEntities: info.limit },
+      ) ?? info.entities;
+      const stale = info.stale ? " · snapshot is stale, a rebuild is pending" : "";
       setExportNote(
         shipped < info.entities_total
-          ? `Exported the top ${shipped} of ${info.entities_total} entities — a slice, not the whole graph`
-          : `Exported ${shipped} entities` + (info.stale ? " (snapshot is stale — a rebuild is pending)" : ""),
+          ? `Exported the top ${shipped} of ${info.entities_total} entities — a slice, not the whole graph${stale}`
+          : `Exported ${shipped} entities${stale}`,
       );
     } catch (e) {
       setExportNote(e instanceof Error ? e.message : "Export failed");

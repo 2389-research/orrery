@@ -20,6 +20,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The export suite runs `node --check` on the patched viz module — the only
+      # guard against an export that returns 200 and renders a blank page. Without
+      # this the test SKIPS silently if the runner image ever drops node.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install uv
         run: pip install uv
 

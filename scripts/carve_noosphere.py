@@ -34,8 +34,10 @@ What travels, and why:
                                   snapshot, not a live feed, and a re-scan here would
                                   ingest the parent's whole source into the child
 
-Stored document_count on domains/collections is RECOUNTED against the carried document
-set rather than copied, or every body would render at the parent's magnitude.
+Stored counters are RECOUNTED against what actually travelled rather than copied, or
+the child would carry the parent's magnitudes: document_count on domains/collections
+(the viz sizes bodies from it) and relationships.weight for derived `co_occurs` edges
+(the star pages order by it).
 
 What deliberately does not:
 
@@ -194,6 +196,11 @@ def carve(src_path: Path, dst_path: Path, repo_depth: str, dry_run: bool) -> Non
     # relationships.
     cset = set(coll_ids)
     ce_cols = [r[1] for r in src.execute("PRAGMA table_info(collection_edges)")]
+    if "target" not in ce_cols:
+        # A pre-migration source DB still has repo_edges/from_repo/to_repo (db.py's
+        # _LEGACY_* tables). Say so instead of raising ValueError from .index().
+        sys.exit("source DB predates the collections migration (no collection_edges."
+                 "target) — open it once with the current orchestrator to migrate it.")
     ce_target = ce_cols.index("target")
     coll_edges = [r for r in _fetch_in(src, "collection_edges", "source", coll_ids)
                   if r[ce_target] in cset] if coll_ids else []
@@ -241,7 +248,27 @@ def carve(src_path: Path, dst_path: Path, repo_depth: str, dry_run: bool) -> Non
                        SELECT COUNT(*) FROM document_domains dd WHERE dd.domain_path = domains.path)""")
     dst.execute("""UPDATE collections SET document_count = (
                        SELECT COUNT(*) FROM document_collections dc WHERE dc.collection_id = collections.id)""")
-    print("  rescaled document_count on domains + collections to the carved doc set")
+
+    # relationships.weight is the same kind of stale counter: cooccurrence.py counts
+    # the CHUNKS a pair shares, so an edge weighing 40 in the parent arrives as 40 even
+    # if 39 of those chunks stayed behind. graph_v5's trade routes recompute live and
+    # entity_detail recomputes its own, so the galaxy and the export are unaffected —
+    # but get_star_graph and get_neighborhood order by SUM(r.weight), so the carved
+    # noosphere's own star pages would rank by the parent's corpus. Only 'co_occurs' is
+    # derived; any asserted type keeps the weight it was given.
+    dst.execute("""UPDATE relationships SET weight = (
+                       SELECT COUNT(DISTINCT a.chunk_id)
+                         FROM entity_sources a
+                         JOIN entity_sources b ON b.chunk_id = a.chunk_id
+                        WHERE a.entity_id = relationships.from_entity
+                          AND b.entity_id = relationships.to_entity
+                          AND a.chunk_id IS NOT NULL)
+                   WHERE type = 'co_occurs'""")
+    # A co_occurs edge that now weighs 0 asserts a co-occurrence this corpus does not
+    # contain — the pair's shared chunks all stayed behind.
+    gone = dst.execute("DELETE FROM relationships WHERE type = 'co_occurs' AND COALESCE(weight, 0) = 0").rowcount
+    print(f"  rescaled document_count (domains + collections) and co_occurs weights "
+          f"to the carved corpus; dropped {gone} now-empty co-occurrence edge(s)")
 
     # Derived: make the child build its own rather than serve the parent's.
     dst.execute("DELETE FROM graph_snapshot")

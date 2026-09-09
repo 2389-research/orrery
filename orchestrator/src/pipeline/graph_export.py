@@ -13,12 +13,13 @@ This module is the canonical implementation of that, used by the route
 `sqlite3` connection plus an already-built snapshot dict, so a script can load a DB
 by file path without dragging in the FastAPI app.
 
-`embed/build_embed.py` (the offline CLI) carries its OWN copy of the panel and the
-patches, because it must also produce the single-file build. That duplication is not
-free — the two `PANEL_JS` bodies have already drifted cosmetically — and
-`tests/test_carve.py::test_export_panel_copies_have_not_drifted` is what keeps the
-drift from becoming behavioural. The document SELECTION is genuinely shared:
-`select_subject_docs` has one definition, imported by path.
+`embed/build_embed.py` (the offline CLI) **imports** `PANEL_CSS` / `PANEL_JS` from
+here by file path rather than keeping copies. It did keep copies, and they drifted —
+an HTML-escaping fix landed in one and not the other — so the duplication is gone.
+What the CLI still owns is its own `_patch_index`, because the single-file build
+bakes the payload into a window global instead of fetching `./graph.json`. The
+document SELECTION travels the other way: `select_subject_docs` is defined in the
+CLI and imported by `scripts/carve_noosphere.py`, again by path.
 
 Two things do NOT survive going static, and are substituted here:
 
@@ -218,6 +219,9 @@ def build_export_payload(
     # document id anyway. If the viz gains a document layer, select them here on
     # `memberships`, not on an id intersection.
     render = ents + colls
+    # Collection-scope edges are keyed by NODE id, so they must be filtered against
+    # what actually shipped or the payload carries edges to nodes it does not contain.
+    kept_ids = {n["id"] for n in render}
 
     edges = [
         e for e in snapshot.get("edges", ())

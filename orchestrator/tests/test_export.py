@@ -68,8 +68,12 @@ def _snapshot(n_entities=3, n_colls=1):
         "taxonomy": [{"id": "d1", "path": "a/b", "document_count": 4}],
         "nodes": nodes,
         "node_index": {n["id"]: n for n in nodes},
+        # A collection-scope edge is REQUIRED here: `or` short-circuits, so a fixture
+        # of domain-scope edges alone never evaluates the collection branch — and a
+        # NameError in it passed 568 tests.
         "edges": [{"source": "a/b", "target": "a/c", "scope": "domain", "weight": 3},
-                  {"source": "a/b", "target": "a/d", "scope": "domain", "weight": 1}],
+                  {"source": "a/b", "target": "a/d", "scope": "domain", "weight": 1},
+                  {"source": "c0", "target": "e0", "scope": "collection", "weight": 2}],
         "layout": {"positions": {"a/b": {"x": 0.5, "y": 0.5}}, "palette": {"a/b": "#abc"}},
     }
 
@@ -91,7 +95,8 @@ def test_payload_drops_whole_graph_telemetry(test_store):
 
 def test_min_route_weight_prunes_routes(test_store):
     p = build_export_payload(test_store.conn, _snapshot(), min_route_weight=2, detail_neighbours=0)
-    assert [e["weight"] for e in p["edges"]] == [3]      # the weight-1 route is gone
+    routes = [e for e in p["edges"] if e["scope"] == "domain"]
+    assert [e["weight"] for e in routes] == [3]          # the weight-1 route is gone
 
 
 def test_cap_reserves_a_quota_per_collection(test_store):
@@ -298,9 +303,12 @@ def test_export_info_reports_snapshot_freshness(test_client, test_store):
     assert isinstance(body["stale"], bool)
 
 
-def test_offline_cli_uses_the_canonical_panel():
+def test_offline_cli_loads_the_canonical_panel_by_path():
     """The panel used to be duplicated in embed/build_embed.py and the copies drifted —
-    an HTML-escaping fix landed in one and not the other. One definition, imported."""
+    an HTML-escaping fix landed in one and not the other. The CLI now *assigns* from
+    this module, so equality is structural rather than an invariant under test; what
+    this actually guards is that the by-path load still resolves and that the CLI's own
+    patcher still finds its anchors in the current viz."""
     import importlib.util
     import sys as _sys
     from pathlib import Path as _P
@@ -316,3 +324,55 @@ def test_offline_cli_uses_the_canonical_panel():
     # distinct module object. What must hold is that the text is the same text.
     assert be._PANEL_CSS == ge.PANEL_CSS
     assert be._PANEL_HELPER == ge.PANEL_JS
+
+    # The part that CAN regress: build_embed keeps its own patcher (the single-file
+    # build bakes a window global instead of fetching ./graph.json), and it has no
+    # equivalent of test_patch_rejects_a_missing_anchor.
+    viz = viz_asset_dir()
+    patched = be._patch_index((viz / "index.html").read_text())
+    assert "window.__ORRERY_DETAIL__" in patched and "renderPanel(" in patched
+    assert "${API_URL}/graph`" not in patched
+
+
+def test_collection_edges_are_filtered_to_what_shipped(test_store):
+    """Collection-scope edges are keyed by NODE id, so they need filtering against the
+    render set. The filter is also the ONLY place `kept_ids` is read: `or`
+    short-circuits past it whenever every fixture edge is domain-scope, so a NameError
+    here once passed the whole suite and 500'd on any noosphere with two collections
+    sharing an entity — i.e. every repo-ingested one."""
+    snap = _snapshot(n_entities=1, n_colls=1)
+    snap["edges"] = [
+        {"source": "c0", "target": "e0", "scope": "collection", "weight": 2},
+        {"source": "c0", "target": "gone", "scope": "collection", "weight": 9},
+    ]
+    p = build_export_payload(test_store.conn, snap, detail_neighbours=0)
+    shipped = {n["id"] for n in p["nodes"]}
+    assert [(e["source"], e["target"]) for e in p["edges"]] == [("c0", "e0")]
+    assert all(e["source"] in shipped and e["target"] in shipped
+               for e in p["edges"] if e["scope"] != "domain")
+
+
+def test_export_info_stale_follows_the_dirty_bit(test_store, test_client):
+    """Asserting only that `stale` is a bool would pass a hardcoded value."""
+    c = test_store.conn
+    c.execute("UPDATE graph_snapshot SET dirty = 0 WHERE id = 'current'")
+    c.commit()
+    assert test_client.get("/export/info").json()["stale"] is False
+
+    c.execute("UPDATE graph_snapshot SET dirty = 1 WHERE id = 'current'")
+    c.commit()
+    assert test_client.get("/export/info").json()["stale"] is True
+
+
+def test_export_reports_the_entity_count_it_actually_shipped(test_client, monkeypatch):
+    """The UI used to compute min(entities, limit) client-side, but the per-collection
+    quota can overshoot max_entities — so the number shown could exceed the zip's
+    contents. The server states it instead."""
+    import src.routes.export as ex
+    snap = _snapshot(n_entities=4, n_colls=0)
+    monkeypatch.setattr(ex, "get_or_build", lambda store: snap)
+
+    r = test_client.get("/export/html?max_entities=2")
+    shipped = int(r.headers["X-Orrery-Exported-Entities"])
+    payload = json.loads(zipfile.ZipFile(io.BytesIO(r.content)).read("graph.json"))
+    assert shipped == sum(1 for n in payload["nodes"] if n["type"] == "entity")

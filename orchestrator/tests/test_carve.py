@@ -88,12 +88,17 @@ def _parent(path):
       ('e2', 'UMAP',   'Technique'),
       ('e-out', 'Elsewhere', 'Concept');
 
-    INSERT INTO entity_sources (entity_id, document_id) VALUES
-      ('e1', 'd-post'), ('e2', 'd-post'), ('e1', 'd-repo'), ('e-out', 'd-other');
+    INSERT INTO chunks (id, document_id, chunk_index) VALUES
+      ('ch-post', 'd-post', 0), ('ch-repo', 'd-repo', 0), ('ch-other', 'd-other', 0);
 
-    INSERT INTO relationships (id, from_entity, to_entity, type) VALUES
-      ('r-in',  'e1', 'e2',    'relates_to'),
-      ('r-out', 'e1', 'e-out', 'relates_to');        -- one end absent -> must drop
+    INSERT INTO entity_sources (entity_id, document_id, chunk_id) VALUES
+      ('e1', 'd-post', 'ch-post'), ('e2', 'd-post', 'ch-post'),
+      ('e1', 'd-repo', 'ch-repo'), ('e-out', 'd-other', 'ch-other');
+
+    INSERT INTO relationships (id, from_entity, to_entity, type, weight) VALUES
+      ('r-in',  'e1', 'e2',    'co_occurs',  40),    -- parent-scale weight
+      ('r-kept','e1', 'e2',    'relates_to', 40),    -- asserted: keep the given weight
+      ('r-out', 'e1', 'e-out', 'co_occurs',  9);     -- one end absent -> must drop
 
     INSERT INTO merge_map (from_name, to_entity_id) VALUES
       ('orrery-project', 'e1'),
@@ -141,7 +146,7 @@ def test_no_edge_dangles(carve_mod, parent, child):
     """An edge pointing at an entity the noosphere lacks renders as a route to
     nowhere, so both endpoint filters must actually bite."""
     carve_mod.carve(parent, child, "root", False)
-    assert [r[0] for r in _q(child, "SELECT id FROM relationships")] == ["r-in"]
+    assert sorted(r[0] for r in _q(child, "SELECT id FROM relationships")) == ["r-in", "r-kept"]
     assert _q(child, """SELECT COUNT(*) FROM relationships r
                          WHERE r.from_entity NOT IN (SELECT id FROM entities)
                             OR r.to_entity   NOT IN (SELECT id FROM entities)""")[0][0] == 0
@@ -266,3 +271,28 @@ def test_empty_selection_refuses_instead_of_damaging_the_destination(carve_mod, 
 
     assert _q(child, "SELECT enabled FROM watched_sources WHERE id='mine'")[0][0] == 1
     assert _q(child, "SELECT payload FROM graph_snapshot WHERE id='current'")[0][0] is not None
+
+
+def test_cooccurrence_weights_are_recounted_not_inherited(carve_mod, parent, child):
+    """relationships.weight counts the CHUNKS a pair shares. Copied verbatim it is the
+    parent's count (40 here for a pair sharing exactly 1 carved chunk), and the carved
+    noosphere's own star pages order by SUM(r.weight)."""
+    carve_mod.carve(parent, child, "root", False)
+    w = dict(_q(child, "SELECT id, weight FROM relationships"))
+    assert w["r-in"] == 1, "co_occurs weight must reflect the carved corpus, not 40"
+    assert w["r-kept"] == 40, "an asserted relationship keeps the weight it was given"
+
+
+def test_cooccurrence_edges_with_nothing_left_to_support_them_are_dropped(carve_mod, parent, child):
+    """A co_occurs edge recounting to 0 asserts a co-occurrence this corpus does not
+    contain — its shared chunks all stayed behind."""
+    c = sqlite3.connect(str(parent))
+    # e1 and e2 both travel, but this pair shares no CARRIED chunk
+    c.execute("INSERT INTO entities (id, canonical_name, type) VALUES ('e3','Lonely','Concept')")
+    c.execute("INSERT INTO entity_sources (entity_id, document_id, chunk_id) VALUES ('e3','d-post',NULL)")
+    c.execute("INSERT INTO relationships (id, from_entity, to_entity, type, weight) "
+              "VALUES ('r-zero','e1','e3','co_occurs',12)")
+    c.commit(); c.close()
+
+    carve_mod.carve(parent, child, "root", False)
+    assert "r-zero" not in {r[0] for r in _q(child, "SELECT id FROM relationships")}

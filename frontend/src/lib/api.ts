@@ -49,10 +49,13 @@ export async function getExportInfo(): Promise<ExportInfo> {
 /** Download this noosphere's galaxy as a zip that runs with no services behind it.
  *  `maxEntities` caps the render set (entities cost framerate); `minRouteWeight`
  *  prunes domain trade routes (they are most of the bytes but cost no framerate). */
+/** Resolves to the number of entities the server actually put in the zip, or null
+ *  if it did not say. Not derivable client-side: the per-collection quota can
+ *  overshoot `max_entities`. */
 export async function downloadGalaxyExport(opts?: {
   maxEntities?: number;
   minRouteWeight?: number;
-}): Promise<void> {
+}): Promise<number | null> {
   const q = new URLSearchParams();
   if (opts?.maxEntities) q.set("max_entities", String(opts.maxEntities));
   if (opts?.minRouteWeight) q.set("min_route_weight", String(opts.minRouteWeight));
@@ -72,6 +75,7 @@ export async function downloadGalaxyExport(opts?: {
     }
     throw new Error(msg);
   }
+  const shipped = res.headers.get("X-Orrery-Exported-Entities");
   const url = URL.createObjectURL(await res.blob());
   const a = document.createElement("a");
   a.href = url;
@@ -80,6 +84,7 @@ export async function downloadGalaxyExport(opts?: {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  return shipped === null ? null : Number(shipped);
 }
 
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {

@@ -50,20 +50,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 VIZ = REPO / "frontend" / "public" / "viz"
 
-# ── subset config: the SUBJECT of the sample, not a single source ───────────────
-# The slice is "2389, its blogs, and its products", which spans THREE sources:
-#   1. the website itself (content/posts + content/products)
-#   2. the repos for those products
-#   3. the obsidian docs written about those products
-# The product list is not hardcoded — it is derived from the website's own
-# content/products/* pages, so the sample tracks the site.
-#
-# Repos are included at codesum ROOT depth by default (one repo-summary doc each).
-# That matters: those 20 repos hold 2,667 docs and 2,305 of them are per-file
-# leaves, which drag in ~16k entities — every implementation detail in the
-# codebase. Root depth represents each product's repo without that explosion.
-REPO = Path(__file__).resolve().parents[1]
-
 
 def _load_module(name, path):
     """Import a module by file path.
@@ -78,7 +64,18 @@ def _load_module(name, path):
     spec.loader.exec_module(mod)
     return mod
 
-
+# ── subset config: the SUBJECT of the sample, not a single source ───────────────
+# The slice is "2389, its blogs, and its products", which spans THREE sources:
+#   1. the website itself (content/posts + content/products)
+#   2. the repos for those products
+#   3. the obsidian docs written about those products
+# The product list is not hardcoded — it is derived from the website's own
+# content/products/* pages, so the sample tracks the site.
+#
+# Repos are included at codesum ROOT depth by default (one repo-summary doc each).
+# That matters: those 20 repos hold 2,667 docs and 2,305 of them are per-file
+# leaves, which drag in ~16k entities — every implementation detail in the
+# codebase. Root depth represents each product's repo without that explosion.
 WEBSITE_SILOS = (
     "f39e1b88-4a3f-410a-8c39-46adf2b2627c",  # 2389.ai
     "d9e3ccf1-5284-45ac-880f-990a26b04ba9",  # 2389.dev

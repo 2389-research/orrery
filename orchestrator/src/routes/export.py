@@ -180,8 +180,16 @@ def export_html(
                    "or embed it: <iframe src=\"path/to/index.html\">\n\n"
                    "Everything is self-contained; it makes no requests back to Orrery.\n"
                    "Galaxy level only — drill-in and search need the running app.\n")
+    # The caller cannot derive this: the per-collection quota in build_export_payload
+    # can overshoot max_entities, so a client-side min(entities, limit) is a guess.
+    # Report the real number so the UI can state it rather than predict it.
+    shipped = sum(1 for n in payload["nodes"] if n.get("type") == "entity")
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="orrery-galaxy-export.zip"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="orrery-galaxy-export.zip"',
+            "X-Orrery-Exported-Entities": str(shipped),
+            "Access-Control-Expose-Headers": "X-Orrery-Exported-Entities",
+        },
     )
