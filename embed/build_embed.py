@@ -50,35 +50,92 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 VIZ = REPO / "frontend" / "public" / "viz"
 
-# ── subset config: which entities become the galaxy's stars ─────────────────────
-# Default slice = 2389 "blogs + products": entities extracted from the website repos'
-# content/posts + content/products docs. These ids are the 2389.ai / 2389.dev watched
-# sources in the reference clone; adjust for another corpus.
-SILOS = (
+# ── subset config: the SUBJECT of the sample, not a single source ───────────────
+# The slice is "2389, its blogs, and its products", which spans THREE sources:
+#   1. the website itself (content/posts + content/products)
+#   2. the repos for those products
+#   3. the obsidian docs written about those products
+# The product list is not hardcoded — it is derived from the website's own
+# content/products/* pages, so the sample tracks the site.
+#
+# Repos are included at codesum ROOT depth by default (one repo-summary doc each).
+# That matters: those 20 repos hold 2,667 docs and 2,305 of them are per-file
+# leaves, which drag in ~16k entities — every implementation detail in the
+# codebase. Root depth represents each product's repo without that explosion.
+WEBSITE_SILOS = (
     "f39e1b88-4a3f-410a-8c39-46adf2b2627c",  # 2389.ai
     "d9e3ccf1-5284-45ac-880f-990a26b04ba9",  # 2389.dev
 )
-TITLE_PREDICATE = "(d.title LIKE 'content/posts/%' OR d.title LIKE 'content/products/%')"
+WEBSITE_PREDICATE = "(title LIKE 'content/posts/%' OR title LIKE 'content/products/%')"
 
 
 def subset(db_path: Path, out_path: Path, max_entities: int = 0,
-           with_collections: bool = True) -> None:
+           with_collections: bool = True, repo_depth: str = "root") -> None:
     import sqlite3
 
+    import os
     conn = sqlite3.connect(str(db_path))
-    ph = ",".join("?" * len(SILOS))
-    ids = {
-        r[0]
-        for r in conn.execute(
-            f"""SELECT DISTINCT es.entity_id
-                FROM entity_sources es
-                JOIN documents d ON es.document_id = d.id
-                JOIN entities  e ON e.id = es.entity_id
-                WHERE d.silo_id IN ({ph}) AND {TITLE_PREDICATE}
-                  AND e.invalid_at IS NULL""",
-            SILOS,
-        )
-    }
+    wph = ",".join("?" * len(WEBSITE_SILOS))
+
+    # (1) the website's own blog + product pages
+    web_docs = [r[0] for r in conn.execute(
+        f"SELECT id FROM documents WHERE silo_id IN ({wph}) AND {WEBSITE_PREDICATE}", WEBSITE_SILOS)]
+
+    # product slugs, derived from the site's content/products/* pages
+    slugs = set()
+    for (t,) in conn.execute(
+            f"SELECT title FROM documents WHERE silo_id IN ({wph}) AND title LIKE 'content/products/%'",
+            WEBSITE_SILOS):
+        m = re.match(r"content/products/([^/]+)", t or "")
+        if m:
+            sl = m.group(1).replace(".md", "")
+            if sl and not sl.startswith("_"):
+                slugs.add(sl)
+
+    sources = list(conn.execute("SELECT id, type, uri FROM watched_sources"))
+    slugs_low = {x.lower() for x in slugs}
+    repo_ids = [i for (i, t, u) in sources
+                if t == "repo" and os.path.basename((u or "").rstrip("/")).lower() in slugs_low]
+    vault_ids = [i for (i, t, u) in sources if t == "vault"]
+
+    # (2) those products' repos, at the requested codesum depth
+    repo_docs = []
+    if repo_ids:
+        rph = ",".join("?" * len(repo_ids))
+        if repo_depth == "all":
+            repo_docs = [r[0] for r in conn.execute(
+                f"SELECT id FROM documents WHERE silo_id IN ({rph})", repo_ids)]
+        else:
+            roles = ("root",) if repo_depth == "root" else ("root", "group")
+            rl = ",".join("?" * len(roles))
+            repo_docs = [r[0] for r in conn.execute(
+                f"""SELECT d.id FROM documents d
+                     JOIN document_collections dc ON dc.document_id = d.id
+                     WHERE d.silo_id IN ({rph}) AND dc.role IN ({rl})""", repo_ids + list(roles))]
+
+    # (3) obsidian docs written about those products (word-boundary match, so short
+    #     slugs like 'ish' / 'mux' / 'jeff' don't match inside unrelated words)
+    pats = [re.compile(r"(?<![a-z0-9])" + re.escape(x).replace(r"\-", "[- ]?") + r"(?![a-z0-9])", re.I)
+            for x in slugs]
+    vault_docs = []
+    if vault_ids:
+        vph = ",".join("?" * len(vault_ids))
+        vault_docs = [r[0] for r in conn.execute(
+            f"SELECT id, title FROM documents WHERE silo_id IN ({vph})", vault_ids)
+            if any(pt.search(r[1] or "") for pt in pats)]
+
+    doc_ids = list({*web_docs, *repo_docs, *vault_docs})
+    print(f"slice: {len(web_docs)} website + {len(repo_docs)} repo({repo_depth}) + "
+          f"{len(vault_docs)} vault = {len(doc_ids)} docs over {len(slugs)} products / {len(repo_ids)} repos")
+
+    ids = set()
+    for k in range(0, len(doc_ids), 400):
+        b = doc_ids[k:k + 400]
+        dp = ",".join("?" * len(b))
+        ids |= {r[0] for r in conn.execute(
+            f"""SELECT DISTINCT es.entity_id FROM entity_sources es
+                 JOIN entities e ON e.id = es.entity_id
+                 WHERE es.document_id IN ({dp}) AND e.invalid_at IS NULL""", b)}
     row = conn.execute("SELECT payload FROM graph_snapshot WHERE payload IS NOT NULL LIMIT 1").fetchone()
     if not row:
         sys.exit("No materialized graph_snapshot in that DB — open /graph once to build it.")
@@ -103,12 +160,15 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
         stars = stars[:max_entities]
 
     # Collections (repos) the stars belong to — positions live in layout.positions by id.
-    coll_ids = {
-        m["id"]
-        for n in stars
-        for m in n.get("memberships", [])
-        if m["container_type"] == "collection" and m["weight"] > 0 and m["id"] in all_coll and m["id"] in posmap
-    } if with_collections else set()
+    # Collections = the PRODUCTS' repos. Matched on the collection node's own label
+    # so it stays aligned with the site's product list rather than pulling in every
+    # repo the slice's entities happen to appear in.
+    coll_ids = set()
+    if with_collections:
+        for cid, node in all_coll.items():
+            lab = (node.get("label") or node.get("path") or "").lower()
+            if lab in slugs_low and cid in posmap:
+                coll_ids.add(cid)
     colls = [all_coll[c] for c in coll_ids]
 
     # Domains referenced (weight>0) by any kept star or collection — keep their REAL UMAP
@@ -302,13 +362,17 @@ def main() -> None:
     s1.add_argument("--max-entities", type=int, default=0,
                     help="cap entities, keeping the best-connected (0 = no cap)")
     s1.add_argument("--no-collections", action="store_true",
-                    help="drop the repo/collection layer — a smaller, cleaner sample")
+                    help="drop the product-repo layer")
+    s1.add_argument("--repo-depth", choices=("root", "group", "all"), default="root",
+                    help="codesum depth for the product repos: root=one summary per repo "
+                         "(default), group=module level, all=every file (~16k entities)")
     s2 = sub.add_parser("build", help="bundle the viz + a graph.json into an embed")
     s2.add_argument("--graph", required=True, type=Path)
     s2.add_argument("--out", default=REPO / "embed" / "dist", type=Path)
     a = ap.parse_args()
     if a.cmd == "subset":
-        subset(a.db, a.out, max_entities=a.max_entities, with_collections=not a.no_collections)
+        subset(a.db, a.out, max_entities=a.max_entities,
+               with_collections=not a.no_collections, repo_depth=a.repo_depth)
     else:
         build(a.graph, a.out)
 
