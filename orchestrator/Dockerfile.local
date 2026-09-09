@@ -21,6 +21,11 @@ RUN uv sync --frozen --no-cache --no-install-project
 # Copy application code + specs, then install the project itself
 COPY orchestrator/src/ src/
 COPY orchestrator/specs/ specs/
+
+# The canonical galaxy viz, for GET /export/html. Copied rather than referenced so
+# the export works in the image (which has no frontend checkout). pipeline/
+# graph_export.viz_asset_dir() looks here first, then at a dev checkout.
+COPY frontend/public/viz/ viz/
 RUN uv sync --frozen --no-cache
 
 EXPOSE 8000

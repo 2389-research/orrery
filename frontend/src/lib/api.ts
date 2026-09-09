@@ -15,6 +15,78 @@ function buildHeaders(options?: RequestInit): Record<string, string> {
   return headers;
 }
 
+// ── Static HTML export ──────────────────────────────────────────────────────────
+// The galaxy viz is already a static Canvas app whose only backend call is GET
+// /graph, so a noosphere can be exported as a self-contained site. The download
+// goes through fetch() rather than a plain <a href> because workspace scope
+// travels as an X-Workspace-Id HEADER, which a link cannot set.
+
+export interface ExportInfo {
+  /** Entities that would actually ship — the snapshot's render set. */
+  entities: number;
+  /** Entities the noosphere holds. Larger than `entities` when the snapshot was
+   *  pruned to the render cap, i.e. the export is a top-N slice, not the whole graph. */
+  entities_total: number;
+  pruned: boolean;
+  collections: number;
+  domains: number;
+  routes: number;
+  limit: number;
+  exportable: boolean;
+  viz_assets_available: boolean;
+  /** When the shipped snapshot was materialized, and whether a rebuild is pending.
+   *  The export ships the snapshot as-is, so a stale one predates recent ingests. */
+  built_at: string | null;
+  stale: boolean;
+  /** Present when pruned: a plain-language warning that this is a slice. */
+  note?: string;
+}
+
+export async function getExportInfo(): Promise<ExportInfo> {
+  return fetchAPI<ExportInfo>("/export/info");
+}
+
+/** Download this noosphere's galaxy as a zip that runs with no services behind it.
+ *  `maxEntities` caps the render set (entities cost framerate); `minRouteWeight`
+ *  prunes domain trade routes (they are most of the bytes but cost no framerate). */
+/** Resolves to the number of entities the server actually put in the zip, or null
+ *  if it did not say. Not derivable client-side: the per-collection quota can
+ *  overshoot `max_entities`. */
+export async function downloadGalaxyExport(opts?: {
+  maxEntities?: number;
+  minRouteWeight?: number;
+}): Promise<number | null> {
+  const q = new URLSearchParams();
+  if (opts?.maxEntities) q.set("max_entities", String(opts.maxEntities));
+  if (opts?.minRouteWeight) q.set("min_route_weight", String(opts.minRouteWeight));
+  const qs = q.toString();
+  const res = await fetch(`/api/export/html${qs ? `?${qs}` : ""}`, {
+    headers: buildHeaders(),
+  });
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`;
+    try {
+      const body = await res.json();
+      const d = body?.detail;
+      if (d?.error) msg = `${d.error}: ${d.entities} entities (limit ${d.limit})`;
+      else if (typeof d === "string") msg = d;
+    } catch {
+      /* non-JSON error body — keep the status message */
+    }
+    throw new Error(msg);
+  }
+  const shipped = res.headers.get("X-Orrery-Exported-Entities");
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "orrery-galaxy-export.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return shipped === null ? null : Number(shipped);
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, { ...options, headers: buildHeaders(options) });
   if (!res.ok) throw new Error(`API error: ${res.status} ${await res.text()}`);

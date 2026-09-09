@@ -1,8 +1,15 @@
 "use client";
 
-// Gear button + popover for the device-local screensaver settings: idle timer,
-// Magos Lex commentary, FPS meter, render scale, and beat speed.
+// Gear button + popover for the Orrery view's settings: the device-local screensaver
+// controls (idle timer, Magos Lex commentary, FPS meter, render scale, beat speed) and
+// exporting this noosphere's galaxy as a static site.
+//
+// Export lives here rather than in the noosphere switcher: that menu SELECTS a
+// noosphere, so putting an action on the already-selected one there meant opening the
+// same dropdown twice in a row. This is the settings surface on the page the export
+// actually depicts.
 import { useEffect, useRef, useState } from "react";
+import { downloadGalaxyExport, getExportInfo } from "@/lib/api";
 import type { CSSProperties } from "react";
 import type { ScreensaverSettings } from "@/lib/screensaver-settings";
 
@@ -18,6 +25,8 @@ const NUM = (v: string, fallback: number) => {
 
 export function ScreensaverSettingsPanel({ settings, update }: Props) {
   const [open, setOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -33,12 +42,43 @@ export function ScreensaverSettingsPanel({ settings, update }: Props) {
     display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "7px 0",
   };
   const labelStyle: CSSProperties = { fontSize: 12.5, color: "#dfe3ef" };
+  const headStyle: CSSProperties = {
+    fontSize: 10.5, letterSpacing: "0.18em", textTransform: "uppercase",
+    color: "#e0a93b", marginBottom: 6,
+  };
+
+  // A whole large graph makes a page nobody can load, so ask what the export would
+  // contain and cap rather than handing back something unusable.
+  async function handleExport() {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const info = await getExportInfo();
+      if (!info.viz_assets_available) throw new Error("viz assets unavailable on the server");
+      // The count comes back from the server, not from arithmetic here: the
+      // per-collection quota can overshoot max_entities, so predicting it would put a
+      // number in front of the user that the zip does not contain.
+      const shipped = await downloadGalaxyExport(
+        info.exportable ? undefined : { maxEntities: info.limit },
+      ) ?? info.entities;
+      const stale = info.stale ? " · snapshot is stale, a rebuild is pending" : "";
+      setExportNote(
+        shipped < info.entities_total
+          ? `Exported the top ${shipped} of ${info.entities_total} entities — a slice, not the whole graph${stale}`
+          : `Exported ${shipped} entities${stale}`,
+      );
+    } catch (e) {
+      setExportNote(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div ref={ref} style={{ position: "fixed", top: 14, right: 14, zIndex: 60 }}>
       <button
         onClick={() => setOpen((o) => !o)}
-        aria-label="Screensaver settings"
+        aria-label="Orrery settings"
         aria-expanded={open}
         style={{
           cursor: "pointer", background: "rgba(14,17,28,0.75)", color: "#dfe3ef",
@@ -60,9 +100,7 @@ export function ScreensaverSettingsPanel({ settings, update }: Props) {
             fontFamily: "ui-monospace, Menlo, monospace",
           }}
         >
-          <div style={{ fontSize: 10.5, letterSpacing: "0.18em", textTransform: "uppercase", color: "#e0a93b", marginBottom: 6 }}>
-            Screensaver
-          </div>
+          <div style={headStyle}>Screensaver</div>
 
           <label style={rowStyle}>
             <span style={labelStyle}>Idle before start</span>
@@ -112,6 +150,25 @@ export function ScreensaverSettingsPanel({ settings, update }: Props) {
 
           <div style={{ fontSize: 10.5, color: "#6d7ba0", marginTop: 6, lineHeight: 1.4 }}>
             Saved on this device. Scale changes reload the view.
+          </div>
+
+          <div style={{ borderTop: "1px solid rgba(150,170,220,0.18)", margin: "12px 0 10px" }} />
+          <div style={headStyle}>Export</div>
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            style={{
+              width: "100%", cursor: exporting ? "default" : "pointer",
+              background: "#0b0e18", color: "#dfe3ef",
+              border: "1px solid rgba(150,170,220,0.3)", borderRadius: 6,
+              padding: "6px 8px", fontSize: 12.5, opacity: exporting ? 0.6 : 1,
+              fontFamily: "inherit", textAlign: "left",
+            }}
+          >
+            {exporting ? "Building export…" : "⤓  Export noosphere as HTML"}
+          </button>
+          <div style={{ fontSize: 10.5, color: "#6d7ba0", marginTop: 6, lineHeight: 1.4 }}>
+            {exportNote ?? "A zip of this noosphere's galaxy that runs with no server."}
           </div>
         </div>
       )}
