@@ -69,23 +69,17 @@ WEBSITE_SILOS = (
 WEBSITE_PREDICATE = "(title LIKE 'content/posts/%' OR title LIKE 'content/products/%')"
 
 
-def _chunks(seq, n=400):
-    """SQLite caps bound parameters (999 before 3.32), so every dynamic IN (...)
-    list that can grow with the graph is chunked."""
-    seq = list(seq)
-    for i in range(0, len(seq), n):
-        yield seq[i:i + n]
+def select_subject_docs(conn, *, repo_depth: str = "root"):
+    """The SUBJECT of the sample — "2389, its blogs, its products" — as doc ids.
 
+    Shared with scripts/carve_noosphere.py so these predicates live in ONE place:
+    carving a dedicated noosphere and building an embed must agree on what the
+    subject is, or the two silently drift apart.
 
-def subset(db_path: Path, out_path: Path, max_entities: int = 0,
-           with_collections: bool = True, repo_depth: str = "root",
-           per_repo_min: int = 8, min_route_weight: int = 2,
-           detail_neighbours: int = 12) -> None:
+    Returns (doc_ids, slugs, repo_ids, parts).
+    """
     import os
-    import sqlite3
-    from collections import defaultdict
 
-    conn = sqlite3.connect(str(db_path))
     wph = ",".join("?" * len(WEBSITE_SILOS))
 
     # (1) the website's own blog + product pages
@@ -157,8 +151,33 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
     # sorted(): set iteration order varies with PYTHONHASHSEED, and the cap below
     # breaks ties — without this the same DB + flags produce different samples.
     doc_ids = sorted({*web_docs, *repo_docs, *vault_docs})
-    print(f"slice: {len(web_docs)} website + {len(repo_docs)} repo({repo_depth}) + "
-          f"{len(vault_docs)} vault = {len(doc_ids)} docs over {len(slugs)} products / {len(repo_ids)} repos")
+    parts = {"website": len(web_docs), "repo": len(repo_docs), "vault": len(vault_docs)}
+    return doc_ids, slugs, repo_ids, parts
+
+
+def _chunks(seq, n=400):
+    """SQLite caps bound parameters (999 before 3.32), so every dynamic IN (...)
+    list that can grow with the graph is chunked."""
+    seq = list(seq)
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def subset(db_path: Path, out_path: Path, max_entities: int = 0,
+           with_collections: bool = True, repo_depth: str = "root",
+           per_repo_min: int = 8, min_route_weight: int = 2,
+           detail_neighbours: int = 12) -> None:
+    import os
+    import sqlite3
+    from collections import defaultdict
+
+    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path))
+    doc_ids, slugs, repo_ids, parts = select_subject_docs(conn, repo_depth=repo_depth)
+    slugs_low = {x.lower() for x in slugs}
+
+    print(f"slice: {parts['website']} website + {parts['repo']} repo({repo_depth}) + "
+          f"{parts['vault']} vault = {len(doc_ids)} docs over {len(slugs)} products / {len(repo_ids)} repos")
 
     # doc -> entities, and the in-slice source count per entity
     doc_ents = defaultdict(set)
