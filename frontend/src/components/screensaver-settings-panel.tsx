@@ -159,7 +159,7 @@ export function ScreensaverSettingsPanel({ settings, update }: Props) {
               fontFamily: "inherit", textAlign: "left",
             }}
           >
-            {exporting ? "Building export…" : "⤓  Export galaxy as HTML"}
+            {exporting ? "Building export…" : "⤓  Export noosphere as HTML"}
           </button>
           <div style={{ fontSize: 10.5, color: "#6d7ba0", marginTop: 6, lineHeight: 1.4 }}>
             {exportNote ?? "A zip of this noosphere's galaxy that runs with no server."}

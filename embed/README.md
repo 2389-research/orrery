@@ -1,7 +1,8 @@
 # Galaxy embed (offline CLI)
 
 > **The app can do this now.** `GET /export/html` exports the active noosphere as a
-> zip that runs offline — surfaced as **Export as HTML** in the noosphere menu. See
+> zip that runs offline — surfaced as **Export noosphere as HTML** under the ⚙
+> settings panel on the Orrery page. See
 > `orchestrator/src/pipeline/graph_export.py`, which is the canonical implementation.
 >
 > This CLI remains for the two things the endpoint deliberately doesn't do: **carving
