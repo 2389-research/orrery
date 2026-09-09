@@ -22,13 +22,20 @@ function buildHeaders(options?: RequestInit): Record<string, string> {
 // travels as an X-Workspace-Id HEADER, which a link cannot set.
 
 export interface ExportInfo {
+  /** Entities that would actually ship — the snapshot's render set. */
   entities: number;
+  /** Entities the noosphere holds. Larger than `entities` when the snapshot was
+   *  pruned to the render cap, i.e. the export is a top-N slice, not the whole graph. */
+  entities_total: number;
+  pruned: boolean;
   collections: number;
   domains: number;
   routes: number;
   limit: number;
   exportable: boolean;
   viz_assets_available: boolean;
+  /** Present when pruned: a plain-language warning that this is a slice. */
+  note?: string;
 }
 
 export async function getExportInfo(): Promise<ExportInfo> {
