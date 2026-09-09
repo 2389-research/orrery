@@ -44,6 +44,7 @@ python embed/build_embed.py build --graph embed/sample/graph.json --out embed/di
 | `--max-entities N` | Cap entities, keeping those best connected **within the slice**. **Default 0 (no cap)** — see "Why there is no entity cap". |
 | `--per-repo-min N` | When capping, entities each repo keeps before the cap is filled globally (default 8). A flat cap starves repos. |
 | `--min-route-weight N` | Drop domain trade routes below this slice weight (default 2). This is the **size** dial. |
+| `--detail-neighbours N` | Co-occurring entities baked per entity for the offline panel (default 12). |
 | `--repo-depth root\|group\|all` | codesum depth for the product repos. **`root`** (default) = one summary doc per repo. `group` = module level. `all` = every file. |
 | `--no-collections` | Drop the product-repo layer entirely. |
 
@@ -117,14 +118,19 @@ Output is deterministic: identical DB + flags produce a byte-identical
 
 - pan / zoom / hover tooltip
 - **layer bars** L0 domains · L1 + repos · L2 + entities · auto
-- **click** a node → left detail panel (entity / domain / repository)
+- **click** a node → left detail panel (entity / domain / repository). For an
+  entity: type, in-slice sources, its domains, its **connected entities**
+  (clickable, so the panel is navigable) and the **documents it appears in** —
+  baked from `entity_detail`, since the app gets these from
+  `/entities/{id}/cooccurrences` and `entity.sources`.
 - **double-click** → fly-and-zoom into a star, repo, or domain
 
 ## Known limits
 
-- **Entity↔entity edges are not baked in.** The app fetches
-  `/entities/{id}/cooccurrences` on click; offline that's disabled, so
-  click-to-light-a-neighborhood is inert. The domain trade routes *are* present.
+- **Drill-in views are not included.** The app's sector / system / star levels are
+  separate pages (`star.html`, `collection.html`) that fetch their own APIs, so the
+  export is galaxy-level only: double-click flies and zooms locally instead of
+  navigating into a star. Snippets (`/documents/{id}/reader`) are also not baked.
 - **Drill-in and search are shell-side.** `star.html` / `collection.html` and the
   app's search bar fetch their own APIs, so the export is galaxy-level only.
 - **It's a point-in-time snapshot** — refreshing means re-running both steps.

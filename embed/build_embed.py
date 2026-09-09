@@ -79,7 +79,8 @@ def _chunks(seq, n=400):
 
 def subset(db_path: Path, out_path: Path, max_entities: int = 0,
            with_collections: bool = True, repo_depth: str = "root",
-           per_repo_min: int = 8, min_route_weight: int = 2) -> None:
+           per_repo_min: int = 8, min_route_weight: int = 2,
+           detail_neighbours: int = 12) -> None:
     import os
     import sqlite3
     from collections import defaultdict
@@ -294,6 +295,49 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
     edges += [e for e in p["edges"]
               if e["scope"] == "collection" and e["source"] in nodeset and e["target"] in nodeset]
 
+    # ── per-entity detail, so the offline panel isn't a stub ─────────────────────
+    # The app's entity panel is rich because it makes three API calls per click
+    # (/entities/{id}/cooccurrences, entity.sources, /documents/{id}/reader). Two of
+    # those are just data we already have here, so bake them: which slice documents
+    # an entity appears in, and which entities it co-occurs with inside the slice.
+    # This also restores neighbourhood highlighting, which was inert offline.
+    kept_ent = {n["id"] for n in stars}
+    titles = {}
+    for b in _chunks(doc_ids):
+        dp = ",".join("?" * len(b))
+        for did, t in conn.execute(f"SELECT id, title FROM documents WHERE id IN ({dp})", b):
+            titles[did] = t
+    def _pretty(t):
+        """Doc titles are raw source paths; this panel is public-facing."""
+        t = (t or "").strip()
+        for pre in ("content/posts/", "content/products/"):
+            if t.startswith(pre):
+                t = t[len(pre):]
+        for suf in ("/index.md", "/index.en.md", ".md"):
+            if t.endswith(suf):
+                t = t[: -len(suf)]
+        return t.replace("-", " ").replace("/", " / ") or "(untitled)"
+
+    ent_docs = defaultdict(list)
+    for did, ents in doc_ents.items():
+        for e in ents:
+            if e in kept_ent:
+                ent_docs[e].append(did)
+    co = defaultdict(lambda: defaultdict(int))
+    for did, ents in doc_ents.items():
+        inside = sorted(ents & kept_ent)
+        for a in inside:
+            for b2 in inside:
+                if a != b2:
+                    co[a][b2] += 1
+    detail = {}
+    for eid in sorted(kept_ent):
+        nbrs = sorted(co.get(eid, {}).items(), key=lambda kv: (-kv[1], kv[0]))[:detail_neighbours]
+        detail[eid] = {
+            "docs": sorted({_pretty(titles.get(d))[:120] for d in ent_docs.get(eid, [])})[:12],
+            "nbrs": [[n, w] for n, w in nbrs],
+        }
+
     nodes = stars + colls
     # Domains are sized by their in-slice ENTITY count, not doc count — the same
     # problem the repos had, worse. Domains are kept because ENTITIES are members of
@@ -327,6 +371,9 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
         "node_index": {n["id"]: {"id": n["id"], "type": n["type"], "label": n.get("label")}
                        for n in nodes},
         "edges": edges,
+        # Not part of the v5 contract; the renderer ignores unknown keys. Consumed
+        # by the embed's local panel and its neighbourhood highlighting.
+        "entity_detail": detail,
         "layout": {
             **p["layout"],
             "positions": {k: v for k, v in sorted(posmap.items()) if k in kept_dom or k in coll_ids},
@@ -359,6 +406,10 @@ _PANEL_CSS = """
 #detail .d-h { font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(140,200,255,0.5); margin: 14px 0 6px; }
 #detail .d-dom { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #c8d2ea; padding: 2px 0; }
 #detail .d-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 6px currentColor; }
+#detail .d-link { cursor: pointer; border-radius: 4px; padding: 2px 4px; margin: 0 -4px; }
+#detail .d-link:hover { background: rgba(100,180,255,0.10); }
+#detail .d-w { margin-left: auto; font-size: 10px; color: rgba(140,200,255,0.55); }
+#detail .d-doc { font-size: 11px; color: #aab6cc; padding: 2px 0 2px 15px; text-indent: -15px; line-height: 1.45; }
 """
 
 _PANEL_HELPER = """
@@ -378,6 +429,21 @@ function renderPanel(payload){
     if (doms.length){ html += '<div class="d-h">Domains</div>';
       for (const [p] of doms){ const leaf=p.split('/').pop().replace(/-/g,' ');
         html += `<div class="d-dom"><span class="d-dot" style="color:${_domColor(p)};background:${_domColor(p)}"></span>${_esc(leaf)}</div>`; } }
+    // Baked detail: the app gets these from /entities/{id}/cooccurrences and
+    // entity.sources; offline they come from entity_detail in the payload.
+    const det = (window.__ORRERY_DETAIL__ || {})[d.id] || {};
+    if ((det.nbrs || []).length) {
+      html += '<div class="d-h">Connected</div>';
+      for (const [nid, w] of det.nbrs) {
+        const nn = _entName(nid);
+        if (!nn) continue;
+        html += `<div class="d-dom d-link" data-eid="${_esc(nid)}"><span class="d-dot" style="color:#7aa0d8;background:#7aa0d8"></span>${_esc(nn)}<span class="d-w">${w}</span></div>`;
+      }
+    }
+    if ((det.docs || []).length) {
+      html += '<div class="d-h">Appears in</div>';
+      for (const t of det.docs) html += `<div class="d-doc">${_esc(t)}</div>`;
+    }
   } else if (payload.nodeType === 'domain') {
     html += `<div class="d-kind">Domain</div><div class="d-name">${_esc(d.name)}</div>`;
     html += `<div class="d-meta">${_esc(d.path||'')}<br>${Number(d.document_count||0)} documents</div>`;
@@ -388,6 +454,25 @@ function renderPanel(payload){
   _dbody.innerHTML = html; _detail.classList.add('show');
 }
 function hidePanel(){ _detail.classList.remove('show'); }
+function _entName(id){
+  const e = state.entities.get(id);
+  if (e) return e.label || e.name;
+  const r = state.nodeIndex && state.nodeIndex.get(id);
+  return r ? (r.label || r.name) : null;
+}
+// Clicking a connected entity selects it, so the panel is navigable offline.
+_dbody.addEventListener('click', ev => {
+  const row = ev.target.closest('.d-link');
+  if (!row) return;
+  const id = row.dataset.eid;
+  const e = state.entities.get(id);
+  if (!e) return;
+  state.pinnedId = id;
+  state.attractNeighbors = new Set([id, ...(((window.__ORRERY_DETAIL__||{})[id]||{}).nbrs||[]).map(x=>x[0])]);
+  renderPanel({ type:'node_selected', nodeType:'entity', data:{
+    id, name: e.label || e.name, entityType: e.type,
+    source_count: e.sourceCount, domain_weights: e.domainWeights } });
+});
 """
 
 
@@ -404,12 +489,15 @@ def _patch_index(src: str) -> str:
     # own try/catch already tolerates co=[] — neighbor lines simply don't draw offline)
     s = rep(s,
             "    const resp = await fetch(`${API_URL}/entities/${encodeURIComponent(ent.id)}/cooccurrences?limit=20`, { headers: fetchHeaders, signal: coFetchCtrl.signal });\n    if (resp.ok) co = await resp.json();",
-            "    co = [];  // offline embed: no live cooccurrence fetch")
+            "    co = (((window.__ORRERY_DETAIL__ || {})[ent.id] || {}).nbrs || [])\n"
+            "           .map(([id, weight]) => ({ id, weight }));  // baked, not fetched")
     # detail panel: css, markup, helper, wiring
     s = rep(s, "</style>", _PANEL_CSS + "</style>")
     s = rep(s, '<div id="hud"></div>',
             '<div id="detail"><span class="d-close" id="d-close">✕</span><div id="d-body"></div></div>\n<div id="hud"></div>')
     s = rep(s, "const state = new WorldState();", "const state = new WorldState();\n" + _PANEL_HELPER)
+    s = rep(s, "  state.loadGraphData(data);",
+            "  window.__ORRERY_DETAIL__ = data.entity_detail || {};\n  state.loadGraphData(data);")
     s = rep(s,
             "        window.parent.postMessage(payload, '*');\n      } else {\n        window.parent.postMessage({ type: 'node_cleared' }, '*');\n      }",
             "        window.parent.postMessage(payload, '*');\n        renderPanel(payload);\n      } else {\n        window.parent.postMessage({ type: 'node_cleared' }, '*');\n        hidePanel();\n      }")
@@ -487,6 +575,8 @@ def main() -> None:
                     help="cap entities (0 = no cap, the default). Entities are what cost "
                          "framerate; the app itself renders up to 3000, more than this "
                          "whole slice, so a cap is only for low-end target devices")
+    s1.add_argument("--detail-neighbours", type=int, default=12,
+                    help="co-occurring entities baked per entity for the offline panel")
     s1.add_argument("--min-route-weight", type=int, default=2,
                     help="drop domain trade routes below this slice weight. Routes are "
                          "~3/4 of the payload BYTES but cost no framerate (the renderer "
@@ -506,7 +596,8 @@ def main() -> None:
     if a.cmd == "subset":
         subset(a.db, a.out, max_entities=a.max_entities,
                with_collections=not a.no_collections, repo_depth=a.repo_depth,
-               per_repo_min=a.per_repo_min, min_route_weight=a.min_route_weight)
+               per_repo_min=a.per_repo_min, min_route_weight=a.min_route_weight,
+               detail_neighbours=a.detail_neighbours)
     else:
         build(a.graph, a.out)
 
