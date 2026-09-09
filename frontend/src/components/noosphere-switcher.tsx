@@ -6,12 +6,15 @@ import { useAuth } from "@/lib/auth-context";
 import { useWorkspaces } from "@/lib/hooks/use-workspaces";
 import { CreateNoosphereModal } from "./create-noosphere-modal";
 import { switchNoosphere } from "@/lib/navigation";
+import { downloadGalaxyExport, getExportInfo } from "@/lib/api";
 
 const MAGOS_ID = process.env.NEXT_PUBLIC_MAGOS_WORKSPACE_ID;
 
 export function NoosphereSwitcher({ currentId }: { currentId: string }) {
   const [open, setOpen] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
   const { session } = useAuth();
   const { workspaces } = useWorkspaces();
   const router = useRouter();
@@ -33,6 +36,28 @@ export function NoosphereSwitcher({ currentId }: { currentId: string }) {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
+
+  // Export the current noosphere's galaxy as a self-contained static site. A whole
+  // large graph makes a page nobody can load, so ask first and cap rather than
+  // handing back something unusable.
+  async function handleExport() {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const info = await getExportInfo();
+      if (!info.viz_assets_available) throw new Error("viz assets unavailable on the server");
+      await downloadGalaxyExport(info.exportable ? undefined : { maxEntities: info.limit });
+      setExportNote(
+        info.exportable
+          ? `Exported ${info.entities} entities`
+          : `Capped to ${info.limit} of ${info.entities} entities so the page stays usable`,
+      );
+    } catch (e) {
+      setExportNote(e instanceof Error ? e.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   function handleSwitch(id: string) {
     setOpen(false);
@@ -82,6 +107,22 @@ export function NoosphereSwitcher({ currentId }: { currentId: string }) {
               )}
             </button>
           ))}
+
+          {/* Export the galaxy as a static site */}
+          <div className="border-t border-border/30 my-1" />
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground hover:bg-accent/30 hover:text-foreground transition-colors disabled:opacity-50"
+          >
+            <span>⤓</span>
+            <span>{exporting ? "Building export…" : "Export as HTML"}</span>
+          </button>
+          {exportNote && (
+            <div className="px-3 pb-2 text-[10px] leading-snug text-muted-foreground/70">
+              {exportNote}
+            </div>
+          )}
 
           {/* Create new (admin only) */}
           {isAdmin && (

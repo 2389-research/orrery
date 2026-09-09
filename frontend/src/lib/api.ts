@@ -15,6 +15,62 @@ function buildHeaders(options?: RequestInit): Record<string, string> {
   return headers;
 }
 
+// ── Static HTML export ──────────────────────────────────────────────────────────
+// The galaxy viz is already a static Canvas app whose only backend call is GET
+// /graph, so a noosphere can be exported as a self-contained site. The download
+// goes through fetch() rather than a plain <a href> because workspace scope
+// travels as an X-Workspace-Id HEADER, which a link cannot set.
+
+export interface ExportInfo {
+  entities: number;
+  collections: number;
+  domains: number;
+  routes: number;
+  limit: number;
+  exportable: boolean;
+  viz_assets_available: boolean;
+}
+
+export async function getExportInfo(): Promise<ExportInfo> {
+  return fetchAPI<ExportInfo>("/export/info");
+}
+
+/** Download this noosphere's galaxy as a zip that runs with no services behind it.
+ *  `maxEntities` caps the render set (entities cost framerate); `minRouteWeight`
+ *  prunes domain trade routes (they are most of the bytes but cost no framerate). */
+export async function downloadGalaxyExport(opts?: {
+  maxEntities?: number;
+  minRouteWeight?: number;
+}): Promise<void> {
+  const q = new URLSearchParams();
+  if (opts?.maxEntities) q.set("max_entities", String(opts.maxEntities));
+  if (opts?.minRouteWeight) q.set("min_route_weight", String(opts.minRouteWeight));
+  const qs = q.toString();
+  const res = await fetch(`/api/export/html${qs ? `?${qs}` : ""}`, {
+    headers: buildHeaders(),
+  });
+  if (!res.ok) {
+    let msg = `Export failed (${res.status})`;
+    try {
+      const body = await res.json();
+      const d = body?.detail;
+      if (d?.error) msg = `${d.error}: ${d.entities} entities (limit ${d.limit})`;
+      else if (typeof d === "string") msg = d;
+    } catch {
+      /* non-JSON error body — keep the status message */
+    }
+    throw new Error(msg);
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "orrery-galaxy-export.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, { ...options, headers: buildHeaders(options) });
   if (!res.ok) throw new Error(`API error: ${res.status} ${await res.text()}`);
