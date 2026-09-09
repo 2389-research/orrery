@@ -29,8 +29,7 @@ so a failure can't leave `dist/` half-updated.
 #    (open /graph once against that DB so graph_snapshot is populated)
 python embed/build_embed.py subset \
     --db ~/orrery-data/<clone>/workspaces/default/orrery.db \
-    --out embed/sample/graph.json \
-    --max-entities 300
+    --out embed/sample/graph.json
 
 # 2) bundle the real viz + that payload (needs esbuild via npx, once)
 python embed/build_embed.py build --graph embed/sample/graph.json --out embed/dist
@@ -50,8 +49,7 @@ python embed/build_embed.py build --graph embed/sample/graph.json --out embed/di
 
 `--repo-depth` is the load-bearing choice. The 20 product repos hold 2,667 docs and
 2,305 of those are per-file leaves; `all` pulls in **~17k entities** — every
-implementation detail in every codebase. `root` is 20 docs / ~1.8k entities before
-capping.
+implementation detail in every codebase. `root` is 20 docs / ~1.8k entities.
 
 ## The slice
 
