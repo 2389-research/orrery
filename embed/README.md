@@ -42,7 +42,9 @@ python embed/build_embed.py build --graph embed/sample/graph.json --out embed/di
 
 | Flag | Effect |
 |---|---|
-| `--max-entities N` | Cap entities, keeping those best connected **within the slice** (co-occurrence via shared slice documents). `0` = no cap. |
+| `--max-entities N` | Cap entities, keeping those best connected **within the slice**. **Default 0 (no cap)** — see "Why there is no entity cap". |
+| `--per-repo-min N` | When capping, entities each repo keeps before the cap is filled globally (default 8). A flat cap starves repos. |
+| `--min-route-weight N` | Drop domain trade routes below this slice weight (default 2). This is the **size** dial. |
 | `--repo-depth root\|group\|all` | codesum depth for the product repos. **`root`** (default) = one summary doc per repo. `group` = module level. `all` = every file. |
 | `--no-collections` | Drop the product-repo layer entirely. |
 
@@ -70,9 +72,29 @@ docs are matched by title on a word-boundary regex, so short slugs (`ish`, `mux`
 Change `WEBSITE_SILOS` / `WEBSITE_PREDICATE` at the top of `build_embed.py` to point
 at a different corpus.
 
-**Current sample** (`--max-entities 300`): 178 docs (115 website + 20 repo roots + 43
-vault) → **300 entities · 20 product repos · 246 domains**, 2.7 MB single file /
-**180 KB gzipped**.
+**Current sample** (uncapped): 178 docs (115 website + 20 repo roots + 43 vault) →
+**1,762 entities · 20 product repos · 257 domains**, 4.7 MB single file /
+**390 KB gzipped**. Every repo has 5–134 entities around it.
+
+## Why there is no entity cap
+
+Measured, not assumed. Entities and edges cost different things:
+
+| | framerate | payload bytes |
+|---|---|---|
+| entities | **yes** — 300 → 1,762 costs ~30% FPS | 19–39% |
+| domain trade routes | **no** — pruning 17k → 10k changed FPS 0 | **~76%** |
+
+Trade routes are free at rest because `drawTradeRoutes` early-returns unless a node
+is hovered or pinned, so they only matter for download size (`--min-route-weight`).
+
+The cap was dropped because the app itself renders up to 3,000 entities
+(`DEFAULT_MAX_RENDER_NODES`), more than this whole slice contains — so 1,762 is
+inside normal operating range rather than an extrapolation. `--max-entities` remains
+for anyone targeting low-end devices; if you use it, keep `--per-repo-min`, because a
+flat global cap crowds out repo-specific entities (website entities recur across 115
+docs and dominate any connectivity ranking): at cap=300 eight repos fell to ≤2
+entities and three rendered with **zero**.
 
 ## Magnitudes are rescaled to the slice
 

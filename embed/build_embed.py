@@ -78,7 +78,8 @@ def _chunks(seq, n=400):
 
 
 def subset(db_path: Path, out_path: Path, max_entities: int = 0,
-           with_collections: bool = True, repo_depth: str = "root") -> None:
+           with_collections: bool = True, repo_depth: str = "root",
+           per_repo_min: int = 8, min_route_weight: int = 2) -> None:
     import os
     import sqlite3
     from collections import defaultdict
@@ -191,15 +192,6 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
     # is on_demand, never inline), so every score was 0 and the sort silently fell
     # through to each entity's GLOBAL degree in the 97k graph — selecting the
     # hubbiest generic vocabulary instead of the core of this slice.
-    if max_entities and len(stars) > max_entities:
-        nbrs = defaultdict(set)
-        for ents in doc_ents.values():
-            for e in ents:
-                nbrs[e] |= ents
-        stars.sort(key=lambda n: (-(len(nbrs.get(n["id"], ())) - 1),
-                                  -slice_src.get(n["id"], 0), n["id"]))
-        stars = stars[:max_entities]
-
     # Collections = the PRODUCTS' repos, matched on the collection's own label.
     coll_ids = set()
     if with_collections:
@@ -208,6 +200,38 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
             if lab in slugs_low and cid in posmap:
                 coll_ids.add(cid)
     colls = [all_coll[c] for c in sorted(coll_ids)]
+
+    if max_entities and len(stars) > max_entities:
+        nbrs = defaultdict(set)
+        for ents in doc_ents.values():
+            for e in ents:
+                nbrs[e] |= ents
+
+        def score(n):
+            return (-(len(nbrs.get(n["id"], ())) - 1), -slice_src.get(n["id"], 0), n["id"])
+
+        # A FLAT global cap starves the repos. Website entities recur across the 115
+        # web docs, so they dominate any in-slice connectivity ranking and crowd out
+        # entities specific to one repo: at cap=300 eight repos fell to <=2 entities
+        # and three rendered with ZERO — a marker with nothing around it. Uncapped,
+        # every repo has 5-134. So reserve a quota per repo first, then fill the
+        # remainder globally.
+        by_coll = defaultdict(list)
+        for n in stars:
+            for m in n.get("memberships", []):
+                if m["container_type"] == "collection" and m["weight"] > 0 and m["id"] in coll_ids:
+                    by_coll[m["id"]].append(n)
+        kept = {}
+        if per_repo_min and by_coll:
+            quota = max(1, min(per_repo_min, max_entities // max(len(by_coll), 1)))
+            for cid in sorted(by_coll):
+                for n in sorted(by_coll[cid], key=score)[:quota]:
+                    kept[n["id"]] = n
+        for n in sorted(stars, key=score):
+            if len(kept) >= max_entities:
+                break
+            kept.setdefault(n["id"], n)
+        stars = sorted(kept.values(), key=score)[:max(max_entities, len(kept))]
 
     kept_dom = {
         m["id"]
@@ -265,7 +289,7 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
             for b2 in range(a + 1, len(ds)):
                 pair[(ds[a], ds[b2])] += 1
     edges = [{"source": s, "target": t, "type": "cooccurrence", "scope": "domain", "weight": w}
-             for (s, t), w in sorted(pair.items()) if w > 1]
+             for (s, t), w in sorted(pair.items()) if w >= min_route_weight]
     nodeset = {n["id"] for n in stars + colls}
     edges += [e for e in p["edges"]
               if e["scope"] == "collection" and e["source"] in nodeset and e["target"] in nodeset]
@@ -460,9 +484,18 @@ def main() -> None:
     s1.add_argument("--db", required=True, type=Path)
     s1.add_argument("--out", required=True, type=Path)
     s1.add_argument("--max-entities", type=int, default=0,
-                    help="cap entities, keeping the best-connected (0 = no cap)")
+                    help="cap entities (0 = no cap, the default). Entities are what cost "
+                         "framerate; the app itself renders up to 3000, more than this "
+                         "whole slice, so a cap is only for low-end target devices")
+    s1.add_argument("--min-route-weight", type=int, default=2,
+                    help="drop domain trade routes below this slice weight. Routes are "
+                         "~3/4 of the payload BYTES but cost no framerate (the renderer "
+                         "only draws them on hover/select), so this is the size dial")
     s1.add_argument("--no-collections", action="store_true",
                     help="drop the product-repo layer")
+    s1.add_argument("--per-repo-min", type=int, default=8,
+                    help="entities each repo keeps before the cap is filled globally "
+                         "(0 = flat global cap, which starves repos)")
     s1.add_argument("--repo-depth", choices=("root", "group", "all"), default="root",
                     help="codesum depth for the product repos: root=one summary per repo "
                          "(default), group=module level, all=every file (~16k entities)")
@@ -472,7 +505,8 @@ def main() -> None:
     a = ap.parse_args()
     if a.cmd == "subset":
         subset(a.db, a.out, max_entities=a.max_entities,
-               with_collections=not a.no_collections, repo_depth=a.repo_depth)
+               with_collections=not a.no_collections, repo_depth=a.repo_depth,
+               per_repo_min=a.per_repo_min, min_route_weight=a.min_route_weight)
     else:
         build(a.graph, a.out)
 
