@@ -61,7 +61,8 @@ SILOS = (
 TITLE_PREDICATE = "(d.title LIKE 'content/posts/%' OR d.title LIKE 'content/products/%')"
 
 
-def subset(db_path: Path, out_path: Path) -> None:
+def subset(db_path: Path, out_path: Path, max_entities: int = 0,
+           with_collections: bool = True) -> None:
     import sqlite3
 
     conn = sqlite3.connect(str(db_path))
@@ -89,13 +90,25 @@ def subset(db_path: Path, out_path: Path) -> None:
 
     stars = [render_by_id.get(i) or ni.get(i) for i in ids if (i in render_by_id or i in ni)]
 
+    # Optional cap: keep the best-connected entities by degree WITHIN the slice, so a
+    # smaller sample still reads as a graph instead of scattered dust.
+    if max_entities and len(stars) > max_entities:
+        kept = {n["id"] for n in stars}
+        deg = {n["id"]: 0 for n in stars}
+        for e in p["edges"]:
+            if e.get("scope") == "collection":
+                if e["source"] in deg and e["target"] in kept: deg[e["source"]] += 1
+                if e["target"] in deg and e["source"] in kept: deg[e["target"]] += 1
+        stars.sort(key=lambda n: (-deg.get(n["id"], 0), -(n.get("degree") or 0)))
+        stars = stars[:max_entities]
+
     # Collections (repos) the stars belong to — positions live in layout.positions by id.
     coll_ids = {
         m["id"]
         for n in stars
         for m in n.get("memberships", [])
         if m["container_type"] == "collection" and m["weight"] > 0 and m["id"] in all_coll and m["id"] in posmap
-    }
+    } if with_collections else set()
     colls = [all_coll[c] for c in coll_ids]
 
     # Domains referenced (weight>0) by any kept star or collection — keep their REAL UMAP
@@ -286,12 +299,16 @@ def main() -> None:
     s1 = sub.add_parser("subset", help="extract a subset graph.json from a workspace DB snapshot")
     s1.add_argument("--db", required=True, type=Path)
     s1.add_argument("--out", required=True, type=Path)
+    s1.add_argument("--max-entities", type=int, default=0,
+                    help="cap entities, keeping the best-connected (0 = no cap)")
+    s1.add_argument("--no-collections", action="store_true",
+                    help="drop the repo/collection layer — a smaller, cleaner sample")
     s2 = sub.add_parser("build", help="bundle the viz + a graph.json into an embed")
     s2.add_argument("--graph", required=True, type=Path)
     s2.add_argument("--out", default=REPO / "embed" / "dist", type=Path)
     a = ap.parse_args()
     if a.cmd == "subset":
-        subset(a.db, a.out)
+        subset(a.db, a.out, max_entities=a.max_entities, with_collections=not a.no_collections)
     else:
         build(a.graph, a.out)
 
