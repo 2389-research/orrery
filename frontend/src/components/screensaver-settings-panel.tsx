@@ -55,11 +55,14 @@ export function ScreensaverSettingsPanel({ settings, update }: Props) {
     try {
       const info = await getExportInfo();
       if (!info.viz_assets_available) throw new Error("viz assets unavailable on the server");
+      // Report the number that SHIPPED, not the render count: when we cap, `entities`
+      // is the uncapped figure and quoting it overstates the download.
+      const shipped = info.exportable ? info.entities : Math.min(info.entities, info.limit);
       await downloadGalaxyExport(info.exportable ? undefined : { maxEntities: info.limit });
       setExportNote(
-        info.pruned
-          ? `Exported the top ${info.entities} of ${info.entities_total} entities — a slice, not the whole graph`
-          : `Exported ${info.entities} entities`,
+        shipped < info.entities_total
+          ? `Exported the top ${shipped} of ${info.entities_total} entities — a slice, not the whole graph`
+          : `Exported ${shipped} entities` + (info.stale ? " (snapshot is stale — a rebuild is pending)" : ""),
       );
     } catch (e) {
       setExportNote(e instanceof Error ? e.message : "Export failed");

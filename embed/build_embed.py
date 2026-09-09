@@ -62,6 +62,23 @@ VIZ = REPO / "frontend" / "public" / "viz"
 # That matters: those 20 repos hold 2,667 docs and 2,305 of them are per-file
 # leaves, which drag in ~16k entities — every implementation detail in the
 # codebase. Root depth represents each product's repo without that explosion.
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _load_module(name, path):
+    """Import a module by file path.
+
+    Same device carve_noosphere.py uses to import `select_subject_docs` from here:
+    neither `embed/` nor `orchestrator/src` is an installed package from the other's
+    point of view, and one definition beats two that agree only by luck.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 WEBSITE_SILOS = (
     "f39e1b88-4a3f-410a-8c39-46adf2b2627c",  # 2389.ai
     "d9e3ccf1-5284-45ac-880f-990a26b04ba9",  # 2389.dev
@@ -171,7 +188,6 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
     import sqlite3
     from collections import defaultdict
 
-    conn = sqlite3.connect(str(db_path))
     conn = sqlite3.connect(str(db_path))
     doc_ids, slugs, repo_ids, parts = select_subject_docs(conn, repo_depth=repo_depth)
     slugs_low = {x.lower() for x in slugs}
@@ -412,93 +428,22 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
 # The three source edits below turn the app viz into a standalone embed. They are exact
 # string patches against frontend/public/viz/index.html; each asserts, so a viz change
 # that moves them fails loudly here instead of shipping a broken embed.
-_PANEL_CSS = """
-#detail { position: fixed; top: 60px; left: 14px; z-index: 25; width: 300px; max-height: calc(100vh - 90px);
-  overflow-y: auto; display: none; background: rgba(6,13,34,0.94); border: 1px solid rgba(100,180,255,0.22);
-  border-radius: 8px; padding: 16px 18px; backdrop-filter: blur(8px); }
-#detail.show { display: block; }
-#detail .d-close { position: absolute; top: 10px; right: 12px; cursor: pointer; color: rgba(140,200,255,0.6); font-size: 14px; }
-#detail .d-close:hover { color: #eef0f8; }
-#detail .d-kind { font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(140,200,255,0.6); }
-#detail .d-name { color: #eef0f8; font-size: 17px; font-weight: bold; margin: 6px 0 4px; line-height: 1.25; word-break: break-word; }
-#detail .d-meta { color: rgba(140,200,255,0.7); font-size: 11px; line-height: 1.7; }
-#detail .d-h { font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase; color: rgba(140,200,255,0.5); margin: 14px 0 6px; }
-#detail .d-dom { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #c8d2ea; padding: 2px 0; }
-#detail .d-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 6px currentColor; }
-#detail .d-link { cursor: pointer; border-radius: 4px; padding: 2px 4px; margin: 0 -4px; }
-#detail .d-link:hover { background: rgba(100,180,255,0.10); }
-#detail .d-w { margin-left: auto; font-size: 10px; color: rgba(140,200,255,0.55); }
-#detail .d-doc { font-size: 11px; color: #aab6cc; padding: 2px 0 2px 15px; text-indent: -15px; line-height: 1.45; }
-"""
-
-_PANEL_HELPER = """
-// ---- local detail panel (standalone embed; mirrors the shell's galaxy-panel) ----
-const _detail = document.getElementById('detail');
-const _dbody = document.getElementById('d-body');
-document.getElementById('d-close').addEventListener('click', () => { _detail.classList.remove('show'); state.pinnedId = null; });
-function _esc(x){ return String(x==null?'':x).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
-function _domColor(path){ try { return (state.domainColors && state.domainColors[path]) || '#7aa0d8'; } catch(_) { return '#7aa0d8'; } }
-function renderPanel(payload){
-  const d = payload.data || {}; let html = '';
-  if (payload.nodeType === 'entity') {
-    html += `<div class="d-kind">${_esc(d.entityType||'entity')}</div><div class="d-name">${_esc(d.name)}</div>`;
-    html += `<div class="d-meta">${Number(d.source_count||0)} source${Number(d.source_count)===1?'':'s'}</div>`;
-    const dw = d.domain_weights || {};
-    const doms = Object.entries(dw).filter(([,w])=>w>0).sort((a,b)=>b[1]-a[1]).slice(0,8);
-    if (doms.length){ html += '<div class="d-h">Domains</div>';
-      for (const [p] of doms){ const leaf=p.split('/').pop().replace(/-/g,' ');
-        html += `<div class="d-dom"><span class="d-dot" style="color:${_domColor(p)};background:${_domColor(p)}"></span>${_esc(leaf)}</div>`; } }
-    // Baked detail: the app gets these from /entities/{id}/cooccurrences and
-    // entity.sources; offline they come from entity_detail in the payload.
-    const det = (window.__ORRERY_DETAIL__ || {})[d.id] || {};
-    if ((det.nbrs || []).length) {
-      html += '<div class="d-h">Connected</div>';
-      for (const [nid, w] of det.nbrs) {
-        const nn = _entName(nid);
-        if (!nn) continue;
-        html += `<div class="d-dom d-link" data-eid="${_esc(nid)}"><span class="d-dot" style="color:#7aa0d8;background:#7aa0d8"></span>${_esc(nn)}<span class="d-w">${w}</span></div>`;
-      }
-    }
-    if ((det.docs || []).length) {
-      html += '<div class="d-h">Appears in</div>';
-      for (const t of det.docs) html += `<div class="d-doc">${_esc(t)}</div>`;
-    }
-  } else if (payload.nodeType === 'domain') {
-    html += `<div class="d-kind">Domain</div><div class="d-name">${_esc(d.name)}</div>`;
-    html += `<div class="d-meta">${_esc(d.path||'')}<br>${Number(d.document_count||0)} documents</div>`;
-  } else if (payload.nodeType === 'collection') {
-    html += `<div class="d-kind">Repository</div><div class="d-name">▣ ${_esc(d.name)}</div>`;
-    html += `<div class="d-meta">${Number(d.document_count||0)} documents${d.domain?` · ${_esc(String(d.domain).split('/').pop())}`:''}</div>`;
-  }
-  _dbody.innerHTML = html; _detail.classList.add('show');
-}
-function hidePanel(){ _detail.classList.remove('show'); }
-function _entName(id){
-  const e = state.entities.get(id);
-  if (e) return e.label || e.name;
-  const r = state.nodeIndex && state.nodeIndex.get(id);
-  return r ? (r.label || r.name) : null;
-}
-// Clicking a connected entity selects it, so the panel is navigable offline.
-_dbody.addEventListener('click', ev => {
-  const row = ev.target.closest('.d-link');
-  if (!row) return;
-  const id = row.dataset.eid;
-  const e = state.entities.get(id);
-  if (!e) return;
-  state.pinnedId = id;
-  state.attractNeighbors = new Set([id, ...(((window.__ORRERY_DETAIL__||{})[id]||{}).nbrs||[]).map(x=>x[0])]);
-  renderPanel({ type:'node_selected', nodeType:'entity', data:{
-    id, name: e.label || e.name, entityType: e.type,
-    source_count: e.sourceCount, domain_weights: e.domainWeights } });
-});
-"""
+# The panel is NOT duplicated here. It was, and the copies drifted: an HTML-escaping
+# fix landed in the orchestrator's copy and never reached this one. graph_export.py is
+# the canonical definition; this CLI keeps its own `_patch_index` only because it must
+# also produce the single-file build, whose data patch differs.
+_ge = _load_module("graph_export", REPO / "orchestrator" / "src" / "pipeline" / "graph_export.py")
+_PANEL_CSS = _ge.PANEL_CSS
+_PANEL_HELPER = _ge.PANEL_JS
 
 
 def _patch_index(src: str) -> str:
     def rep(s, a, b):
+        # RuntimeError, not assert: `python -O` strips asserts, and a patch that
+        # silently misses produces a page that loads and then renders nothing.
         n = s.count(a)
-        assert n == 1, f"patch anchor found {n}x (want exactly 1): {a[:60]!r}"
+        if n != 1:
+            raise RuntimeError(f"patch anchor found {n}x (want exactly 1): {a[:60]!r}")
         return s.replace(a, b, 1)
 
     # data load → baked payload (folder build fetches ./graph.json; single-file overrides window global)

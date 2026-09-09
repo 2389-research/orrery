@@ -8,11 +8,17 @@ backend call is one `GET /graph`. So an "export as HTML" is not a second
 visualization — it is the SAME renderer with the payload baked in and the few
 shell-provided behaviours substituted locally.
 
-This module is the canonical implementation of that, shared by the route
-(`routes/export.py`) and the offline CLI (`embed/build_embed.py`). It deliberately
-imports **stdlib only** and takes a plain `sqlite3` connection plus an
-already-built snapshot dict, so the CLI can load it by file path without dragging
-in the FastAPI app.
+This module is the canonical implementation of that, used by the route
+(`routes/export.py`). It deliberately imports **stdlib only** and takes a plain
+`sqlite3` connection plus an already-built snapshot dict, so a script can load a DB
+by file path without dragging in the FastAPI app.
+
+`embed/build_embed.py` (the offline CLI) carries its OWN copy of the panel and the
+patches, because it must also produce the single-file build. That duplication is not
+free — the two `PANEL_JS` bodies have already drifted cosmetically — and
+`tests/test_carve.py::test_export_panel_copies_have_not_drifted` is what keeps the
+drift from becoming behavioural. The document SELECTION is genuinely shared:
+`select_subject_docs` has one definition, imported by path.
 
 Two things do NOT survive going static, and are substituted here:
 
@@ -45,7 +51,6 @@ Sizing, measured rather than assumed — the two costs are independent:
 from __future__ import annotations
 
 import json
-import re
 from collections import defaultdict
 
 # Entities above this render badly and download badly. NOTE: the snapshot's render
@@ -99,6 +104,15 @@ def _pretty_title(t: str | None) -> str:
     return t.replace("-", " ").replace("/", " / ") or "(untitled)"
 
 
+# A document mentioning more exported entities than this contributes no pairs. The
+# pair count is quadratic in per-document fan-out, and this runs inside a request
+# handler: at 3000 exported entities an unbounded pass can build millions of nested
+# dict entries before the top-N trim below discards nearly all of them. A long note
+# naming 400 entities also says almost nothing about which two belong together, so the
+# cap costs little signal.
+MAX_DOC_FANOUT_FOR_COOCCURRENCE = 60
+
+
 def entity_detail(conn, entity_ids, *, neighbours: int = 12) -> dict:
     """Per-entity `{docs, nbrs}` for the offline panel.
 
@@ -134,7 +148,10 @@ def entity_detail(conn, entity_ids, *, neighbours: int = 12) -> dict:
     for did, ents in doc_ents.items():
         inside = sorted(ents & kept)
         for a in inside:
-            ent_docs[a].add(did)
+            ent_docs[a].add(did)          # the doc list is NOT capped, only the pairs
+        if len(inside) > MAX_DOC_FANOUT_FOR_COOCCURRENCE:
+            continue
+        for a in inside:
             for b in inside:
                 if a != b:
                     co[a][b] += 1
@@ -195,9 +212,12 @@ def build_export_payload(
             keep.setdefault(n["id"], n)
         ents = sorted(keep.values(), key=rank)
 
-    kept_ids = {n["id"] for n in ents} | {n["id"] for n in colls}
-    docs = [n for n in nodes if n.get("type") == "document" and n["id"] in kept_ids]
-    render = ents + colls + docs
+    # Entities + collections only. Document nodes are deliberately not carried: the
+    # viz has no document branch (nothing in core/state.js or renderers/galaxy.js reads
+    # one), and a filter keyed on entity/collection ids could never have matched a
+    # document id anyway. If the viz gains a document layer, select them here on
+    # `memberships`, not on an id intersection.
+    render = ents + colls
 
     edges = [
         e for e in snapshot.get("edges", ())
@@ -259,7 +279,7 @@ PANEL_JS = """
 const _detail = document.getElementById('detail');
 const _dbody = document.getElementById('d-body');
 document.getElementById('d-close').addEventListener('click', () => { _detail.classList.remove('show'); state.pinnedId = null; });
-function _esc(x){ return String(x==null?'':x).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function _esc(x){ return String(x==null?'':x).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function _domColor(path){ try { return (state.domainColors && state.domainColors[path]) || '#7aa0d8'; } catch(_) { return '#7aa0d8'; } }
 function _entName(id){
   const e = state.entities.get(id);

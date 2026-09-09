@@ -203,3 +203,116 @@ def test_export_info_says_when_it_is_only_a_slice(test_client, monkeypatch):
     assert body["pruned"] is True and body["entities_total"] == 50000
     assert body["exportable"] is True          # a top-N export is still allowed
     assert "not the whole graph" in body["note"]
+
+
+# ── the zip has to be COMPLETE and the patched page has to PARSE ───────────────
+
+def _module_specifiers(text):
+    """Relative import specifiers in an ES module."""
+    import re
+    return set(re.findall(r"""(?:import|export)[^;'"]*?from\s+['"](\./[^'"]+)['"]""", text)) | \
+           set(re.findall(r"""import\s+['"](\./[^'"]+)['"]""", text))
+
+
+def test_zip_contains_every_module_the_page_imports(test_client, test_store):
+    """A missing member is a blank page with a 404 in the console — an export that
+    "succeeded". The viz tree is flat today, so nothing would catch a nested module
+    being dropped except this."""
+    z = zipfile.ZipFile(io.BytesIO(test_client.get("/export/html").content))
+    names = set(z.namelist())
+
+    pending = _module_specifiers(z.read("index.html").decode())
+    seen = set()
+    while pending:
+        spec = pending.pop()
+        member = spec[2:] if spec.startswith("./") else spec
+        # index.html imports './core/x.js'; core/x.js imports './y.js' beside itself
+        cands = [member] + [f"{p}/{member}" for p in ("core", "renderers")]
+        hit = next((c for c in cands if c in names), None)
+        assert hit, f"index.html (or a module) imports {spec!r}, absent from the zip: {sorted(names)}"
+        if hit in seen:
+            continue
+        seen.add(hit)
+        base = hit.rsplit("/", 1)[0] if "/" in hit else ""
+        for nxt in _module_specifiers(z.read(hit).decode()):
+            n = nxt[2:] if nxt.startswith("./") else nxt
+            pending.add(f"./{base}/{n}" if base else f"./{n}")
+    assert seen, "no modules resolved — the walk itself is broken"
+
+
+def test_patched_index_is_valid_javascript(test_client, test_store):
+    """The tests otherwise only assert substrings, so a patch that lands textually but
+    leaves an unbalanced brace exports 200 OK and renders nothing — the exact failure
+    the design exists to prevent."""
+    import re as _re
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+
+    index = zipfile.ZipFile(io.BytesIO(test_client.get("/export/html").content)) \
+        .read("index.html").decode()
+    scripts = _re.findall(r"<script type=\"module\">(.*?)</script>", index, _re.S)
+    assert scripts, "no module script found in the patched index"
+    for body in scripts:
+        r = subprocess.run([node, "--input-type=module", "--check"], input=body,
+                           capture_output=True, text=True)
+        assert r.returncode == 0, f"patched module does not parse:\n{r.stderr}"
+
+
+def test_patch_rejects_a_missing_anchor():
+    """The n==0 case shares a branch with n==2 but is the likelier one in practice —
+    a refactor deletes or renames a line rather than duplicating it."""
+    viz = viz_asset_dir()
+    src = (viz / "index.html").read_text()
+    gutted = src.replace("const state = new WorldState();", "const state = makeWorld();", 1)
+    with pytest.raises(RuntimeError, match="found 0x"):
+        patch_viz_index(gutted)
+
+
+def test_force_bypasses_the_size_guard(test_client, monkeypatch):
+    """force= is the flag that disables the only size guard, so it needs a test that
+    says what it does."""
+    import src.routes.export as ex
+    big = {"meta": {"schema_version": "5.1.0"}, "taxonomy": [], "node_index": {},
+           "edges": [], "layout": {},
+           "nodes": [{"id": f"e{i}", "type": "entity", "label": f"e{i}",
+                      "degree": i, "memberships": []} for i in range(5)]}
+    monkeypatch.setattr(ex, "get_or_build", lambda store: big)
+    monkeypatch.setattr(ex, "MAX_EXPORTABLE_ENTITIES", 2)
+
+    assert test_client.get("/export/html").status_code == 413
+    ok = test_client.get("/export/html?force=true")
+    assert ok.status_code == 200
+    payload = json.loads(zipfile.ZipFile(io.BytesIO(ok.content)).read("graph.json"))
+    assert sum(1 for n in payload["nodes"] if n["type"] == "entity") == 5   # nothing capped
+
+
+def test_export_info_reports_snapshot_freshness(test_client, test_store):
+    """The export ships the snapshot as-is and does not rebuild a dirty one, so the
+    caller has to be able to see that."""
+    body = test_client.get("/export/info").json()
+    assert "stale" in body and "built_at" in body
+    assert isinstance(body["stale"], bool)
+
+
+def test_offline_cli_uses_the_canonical_panel():
+    """The panel used to be duplicated in embed/build_embed.py and the copies drifted —
+    an HTML-escaping fix landed in one and not the other. One definition, imported."""
+    import importlib.util
+    import sys as _sys
+    from pathlib import Path as _P
+    from src.pipeline import graph_export as ge
+
+    root = _P(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("_be_panel", root / "embed" / "build_embed.py")
+    be = importlib.util.module_from_spec(spec)
+    _sys.modules["_be_panel"] = be
+    spec.loader.exec_module(be)
+
+    # Equality, not identity: the CLI loads graph_export by file path, so it holds a
+    # distinct module object. What must hold is that the text is the same text.
+    assert be._PANEL_CSS == ge.PANEL_CSS
+    assert be._PANEL_HELPER == ge.PANEL_JS

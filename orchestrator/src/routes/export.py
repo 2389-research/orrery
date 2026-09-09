@@ -24,6 +24,10 @@ unusable page. In practice that rarely fires, because the snapshot is ALREADY pr
 to `graph_render_max_nodes` — so a 97k-entity noosphere exports as its top 3000 by
 degree and succeeds. `/export/info` reports `entities_total` and `pruned` so the UI
 can say the export is a slice rather than implying it is complete.
+
+Freshness: the export ships the materialized snapshot as-is and does not rebuild a
+dirty one (see the note in `_payload`), so `/export/info` also reports `built_at` and
+`stale`.
 """
 
 import io
@@ -50,8 +54,11 @@ def _payload(auth: AuthStore, max_entities: int, per_repo_min: int,
              min_route_weight: int, detail_neighbours: int, force: bool):
     store = auth.store
     try:
-        # Build if the snapshot is dirty — exporting a stale galaxy silently is worse
-        # than waiting for it.
+        # NOTE: get_or_build does NOT rebuild a dirty snapshot — the background task
+        # owns that, and only a completely missing snapshot builds inline. So an export
+        # taken right after a large ingest can predate it. Rebuilding inline here would
+        # make the request take as long as a full graph build, so instead /export/info
+        # reports `stale` + `built_at` and the caller can wait.
         snapshot = get_or_build(store)
         # Guard on the RENDER set — that is what actually ships. It is normally
         # already <= graph_render_max_nodes, so this fires only if that cap was
@@ -89,11 +96,17 @@ def export_info(auth: AuthStore = Depends(get_auth_store)):
     store = auth.store
     try:
         counts = export_counts(get_or_build(store))
+        row = store.conn.execute(
+            "SELECT built_at, dirty FROM graph_snapshot WHERE id = 'current'").fetchone()
         out = {
             **counts,
             "limit": MAX_EXPORTABLE_ENTITIES,
             "exportable": counts["entities"] <= MAX_EXPORTABLE_ENTITIES,
             "viz_assets_available": viz_asset_dir() is not None,
+            # The export ships the snapshot as-is; say when that predates recent work
+            # instead of letting the zip look current.
+            "built_at": row["built_at"] if row else None,
+            "stale": bool(row["dirty"]) if row else True,
         }
         if counts["pruned"]:
             # Say it plainly: this is not the whole noosphere.
@@ -115,7 +128,7 @@ def export_graph_json(
     per_repo_min: int = Query(8, ge=0),
     min_route_weight: int = Query(2, ge=1),
     detail_neighbours: int = Query(12, ge=0),
-    force: bool = False,
+    force: bool = Query(False, description="bypass the size guard and export anyway"),
 ):
     """The export payload on its own — for someone assembling their own page."""
     return _payload(auth, max_entities, per_repo_min, min_route_weight,
@@ -129,7 +142,7 @@ def export_html(
     per_repo_min: int = Query(8, ge=0),
     min_route_weight: int = Query(2, ge=1),
     detail_neighbours: int = Query(12, ge=0),
-    force: bool = False,
+    force: bool = Query(False, description="bypass the size guard and export anyway"),
 ):
     """A zip that renders this noosphere's galaxy offline."""
     viz = viz_asset_dir()
@@ -156,8 +169,11 @@ def export_html(
             d = viz / sub
             if not d.is_dir():
                 continue
-            for f in sorted(d.glob("*.js")):
-                z.writestr(f"{sub}/{f.name}", f.read_text())
+            # rglob, not glob("*.js"): the tree is flat today, but a nested module or a
+            # non-.js asset added to the viz would be silently dropped and the export
+            # would be a blank page with a 404 in the console.
+            for f in sorted(x for x in d.rglob("*") if x.is_file()):
+                z.writestr(f"{sub}/{f.relative_to(d).as_posix()}", f.read_bytes())
         z.writestr("README.txt",
                    "Orrery galaxy export\n\n"
                    "Open index.html from a web server (ES modules need http://, not file://),\n"

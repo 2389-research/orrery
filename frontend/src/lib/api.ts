@@ -34,6 +34,10 @@ export interface ExportInfo {
   limit: number;
   exportable: boolean;
   viz_assets_available: boolean;
+  /** When the shipped snapshot was materialized, and whether a rebuild is pending.
+   *  The export ships the snapshot as-is, so a stale one predates recent ingests. */
+  built_at: string | null;
+  stale: boolean;
   /** Present when pruned: a plain-language warning that this is a slice. */
   note?: string;
 }
