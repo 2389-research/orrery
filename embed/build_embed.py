@@ -34,8 +34,8 @@ Usage
       --graph embed/sample/graph.json --out embed/dist
 
 `build` needs esbuild once, fetched via `npx esbuild` (network at build time only).
-The subset filter is configured by SILOS + a title-prefix predicate below; change those to
-slice a different corpus.
+The slice is a SUBJECT spanning three sources (website + product repos + vault docs);
+see WEBSITE_SILOS / WEBSITE_PREDICATE below and embed/README.md.
 """
 from __future__ import annotations
 
@@ -69,11 +69,20 @@ WEBSITE_SILOS = (
 WEBSITE_PREDICATE = "(title LIKE 'content/posts/%' OR title LIKE 'content/products/%')"
 
 
+def _chunks(seq, n=400):
+    """SQLite caps bound parameters (999 before 3.32), so every dynamic IN (...)
+    list that can grow with the graph is chunked."""
+    seq = list(seq)
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
 def subset(db_path: Path, out_path: Path, max_entities: int = 0,
            with_collections: bool = True, repo_depth: str = "root") -> None:
-    import sqlite3
-
     import os
+    import sqlite3
+    from collections import defaultdict
+
     conn = sqlite3.connect(str(db_path))
     wph = ",".join("?" * len(WEBSITE_SILOS))
 
@@ -94,48 +103,76 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
 
     sources = list(conn.execute("SELECT id, type, uri FROM watched_sources"))
     slugs_low = {x.lower() for x in slugs}
-    repo_ids = [i for (i, t, u) in sources
-                if t == "repo" and os.path.basename((u or "").rstrip("/")).lower() in slugs_low]
+    repo_ids, matched_slugs = [], set()
+    for (i, t, u) in sources:
+        if t != "repo":
+            continue
+        base = os.path.basename((u or "").rstrip("/")).lower()
+        if base in slugs_low:
+            repo_ids.append(i)
+            matched_slugs.add(base)
     vault_ids = [i for (i, t, u) in sources if t == "vault"]
 
+    # Products with no matching repo are reported, not silently dropped: repos are
+    # matched on exact basename, so a repo synced under a suffixed name (coven ->
+    # coven-app / coven-gateway) would otherwise vanish with no signal.
+    missing = sorted(slugs_low - matched_slugs)
+    if missing:
+        print(f"  note: {len(missing)} product(s) with no exact-basename repo match: {', '.join(missing)}")
+
     # (2) those products' repos, at the requested codesum depth
-    repo_docs = []
+    repo_docs = set()
     if repo_ids:
-        rph = ",".join("?" * len(repo_ids))
         if repo_depth == "all":
-            repo_docs = [r[0] for r in conn.execute(
-                f"SELECT id FROM documents WHERE silo_id IN ({rph})", repo_ids)]
+            for b in _chunks(repo_ids):
+                ph = ",".join("?" * len(b))
+                repo_docs |= {r[0] for r in conn.execute(
+                    f"SELECT id FROM documents WHERE silo_id IN ({ph})", b)}
         else:
             roles = ("root",) if repo_depth == "root" else ("root", "group")
             rl = ",".join("?" * len(roles))
-            repo_docs = [r[0] for r in conn.execute(
-                f"""SELECT d.id FROM documents d
-                     JOIN document_collections dc ON dc.document_id = d.id
-                     WHERE d.silo_id IN ({rph}) AND dc.role IN ({rl})""", repo_ids + list(roles))]
+            for b in _chunks(repo_ids):
+                ph = ",".join("?" * len(b))
+                repo_docs |= {r[0] for r in conn.execute(
+                    f"""SELECT DISTINCT d.id FROM documents d
+                         JOIN document_collections dc ON dc.document_id = d.id
+                         WHERE d.silo_id IN ({ph}) AND dc.role IN ({rl})""", list(b) + list(roles))}
 
-    # (3) obsidian docs written about those products (word-boundary match, so short
-    #     slugs like 'ish' / 'mux' / 'jeff' don't match inside unrelated words)
-    pats = [re.compile(r"(?<![a-z0-9])" + re.escape(x).replace(r"\-", "[- ]?") + r"(?![a-z0-9])", re.I)
-            for x in slugs]
-    vault_docs = []
+    # (3) obsidian docs written about those products. The alternation is built from
+    #     the UNESCAPED slug parts so the '-' -> '[- ]?' relaxation is explicit,
+    #     rather than depending on re.escape() choosing to escape '-'. Word
+    #     boundaries keep short slugs (ish / mux / jeff) out of unrelated words.
+    pats = [re.compile(r"(?<![a-z0-9])" + r"[-_ ]?".join(re.escape(part) for part in x.split("-"))
+                       + r"(?![a-z0-9])", re.I) for x in slugs]
+    vault_docs = set()
     if vault_ids:
-        vph = ",".join("?" * len(vault_ids))
-        vault_docs = [r[0] for r in conn.execute(
-            f"SELECT id, title FROM documents WHERE silo_id IN ({vph})", vault_ids)
-            if any(pt.search(r[1] or "") for pt in pats)]
+        for b in _chunks(vault_ids):
+            ph = ",".join("?" * len(b))
+            vault_docs |= {r[0] for r in conn.execute(
+                f"SELECT id, title FROM documents WHERE silo_id IN ({ph})", b)
+                if any(pt.search(r[1] or "") for pt in pats)}
 
-    doc_ids = list({*web_docs, *repo_docs, *vault_docs})
+    # sorted(): set iteration order varies with PYTHONHASHSEED, and the cap below
+    # breaks ties — without this the same DB + flags produce different samples.
+    doc_ids = sorted({*web_docs, *repo_docs, *vault_docs})
     print(f"slice: {len(web_docs)} website + {len(repo_docs)} repo({repo_depth}) + "
           f"{len(vault_docs)} vault = {len(doc_ids)} docs over {len(slugs)} products / {len(repo_ids)} repos")
 
-    ids = set()
-    for k in range(0, len(doc_ids), 400):
-        b = doc_ids[k:k + 400]
+    # doc -> entities, and the in-slice source count per entity
+    doc_ents = defaultdict(set)
+    for b in _chunks(doc_ids):
         dp = ",".join("?" * len(b))
-        ids |= {r[0] for r in conn.execute(
-            f"""SELECT DISTINCT es.entity_id FROM entity_sources es
-                 JOIN entities e ON e.id = es.entity_id
-                 WHERE es.document_id IN ({dp}) AND e.invalid_at IS NULL""", b)}
+        for did, eid in conn.execute(
+                f"""SELECT es.document_id, es.entity_id FROM entity_sources es
+                     JOIN entities e ON e.id = es.entity_id
+                     WHERE es.document_id IN ({dp}) AND e.invalid_at IS NULL""", b):
+            doc_ents[did].add(eid)
+    slice_src = defaultdict(int)
+    for ents in doc_ents.values():
+        for e in ents:
+            slice_src[e] += 1
+    ids = set(slice_src)
+
     row = conn.execute("SELECT payload FROM graph_snapshot WHERE payload IS NOT NULL LIMIT 1").fetchone()
     if not row:
         sys.exit("No materialized graph_snapshot in that DB — open /graph once to build it.")
@@ -145,73 +182,121 @@ def subset(db_path: Path, out_path: Path, max_entities: int = 0,
     all_coll = {n["id"]: n for n in p["nodes"] if n["type"] == "collection"}
     posmap = p["layout"]["positions"]
 
-    stars = [render_by_id.get(i) or ni.get(i) for i in ids if (i in render_by_id or i in ni)]
+    stars = [render_by_id.get(i) or ni.get(i) for i in sorted(ids)
+             if (i in render_by_id or i in ni)]
 
-    # Optional cap: keep the best-connected entities by degree WITHIN the slice, so a
-    # smaller sample still reads as a graph instead of scattered dust.
+    # Cap by REAL in-slice connectivity: two entities are connected here if they
+    # share a slice document. The previous version ranked on collection-scope
+    # edges, but every such edge is collection<->collection (entity co-occurrence
+    # is on_demand, never inline), so every score was 0 and the sort silently fell
+    # through to each entity's GLOBAL degree in the 97k graph — selecting the
+    # hubbiest generic vocabulary instead of the core of this slice.
     if max_entities and len(stars) > max_entities:
-        kept = {n["id"] for n in stars}
-        deg = {n["id"]: 0 for n in stars}
-        for e in p["edges"]:
-            if e.get("scope") == "collection":
-                if e["source"] in deg and e["target"] in kept: deg[e["source"]] += 1
-                if e["target"] in deg and e["source"] in kept: deg[e["target"]] += 1
-        stars.sort(key=lambda n: (-deg.get(n["id"], 0), -(n.get("degree") or 0)))
+        nbrs = defaultdict(set)
+        for ents in doc_ents.values():
+            for e in ents:
+                nbrs[e] |= ents
+        stars.sort(key=lambda n: (-(len(nbrs.get(n["id"], ())) - 1),
+                                  -slice_src.get(n["id"], 0), n["id"]))
         stars = stars[:max_entities]
 
-    # Collections (repos) the stars belong to — positions live in layout.positions by id.
-    # Collections = the PRODUCTS' repos. Matched on the collection node's own label
-    # so it stays aligned with the site's product list rather than pulling in every
-    # repo the slice's entities happen to appear in.
+    # Collections = the PRODUCTS' repos, matched on the collection's own label.
     coll_ids = set()
     if with_collections:
         for cid, node in all_coll.items():
             lab = (node.get("label") or node.get("path") or "").lower()
             if lab in slugs_low and cid in posmap:
                 coll_ids.add(cid)
-    colls = [all_coll[c] for c in coll_ids]
+    colls = [all_coll[c] for c in sorted(coll_ids)]
 
-    # Domains referenced (weight>0) by any kept star or collection — keep their REAL UMAP
-    # positions so the slice sits exactly where it does in the full galaxy.
     kept_dom = {
         m["id"]
         for n in stars + colls
         for m in n.get("memberships", [])
         if m["container_type"] == "domain" and m["weight"] > 0
     }
-    # Drop memberships pointing outside the kept sets (dangling refs).
+    # Drop dangling AND zero-weight memberships. A weight-0 collection membership
+    # still makes state.js take the collection branch, where tw = 0**3 = 0 and the
+    # node is discarded — so the payload would advertise entities the viz silently
+    # never renders.
     for n in stars + colls:
         n["memberships"] = [
-            m
-            for m in n.get("memberships", [])
-            if (m["container_type"] == "domain" and m["id"] in kept_dom)
-            or (m["container_type"] == "collection" and m["id"] in coll_ids)
+            m for m in n.get("memberships", [])
+            if m["weight"] > 0 and (
+                (m["container_type"] == "domain" and m["id"] in kept_dom)
+                or (m["container_type"] == "collection" and m["id"] in coll_ids))
         ]
 
+    # ── rescale magnitudes to the SLICE ──────────────────────────────────────────
+    # Everything the renderer sizes/labels off was the full graph's: a domain read
+    # "1121 documents" inside a 178-document slice, and state.js sizes domain radius
+    # from that count. Recount against the slice so the artifact describes itself.
+    dom_docs, coll_docs = defaultdict(int), defaultdict(int)
+    for b in _chunks(doc_ids):
+        dp = ",".join("?" * len(b))
+        for (path,) in conn.execute(
+                f"SELECT domain_path FROM document_domains WHERE document_id IN ({dp})", b):
+            dom_docs[path] += 1
+        for (cid,) in conn.execute(
+                f"SELECT collection_id FROM document_collections WHERE document_id IN ({dp})", b):
+            coll_docs[cid] += 1
+    for n in stars:
+        n["degree"] = slice_src.get(n["id"], 0)
+    # Repos are sized by how many SLICE ENTITIES belong to them, not by doc count:
+    # at root depth every repo contributes exactly one doc, so a doc-count rescale
+    # would flatten every repo marker to the same size and destroy the signal.
+    coll_ents = defaultdict(int)
+    for n in stars:
+        for m in n["memberships"]:
+            if m["container_type"] == "collection":
+                coll_ents[m["id"]] += 1
+    for n in colls:
+        n["degree"] = coll_ents.get(n["id"], coll_docs.get(n["id"], 0))
+
+    # ── domain trade routes, recomputed FROM the slice ───────────────────────────
+    # Previously any edge whose endpoints were both kept survived, carrying its
+    # full-graph weight: 24,820 of 25,545 routes (97%) and two thirds of the bytes,
+    # describing co-occurrence among 97k entities the viewer cannot see. Recompute
+    # from the kept entities: weight = how many of THEM share both domains.
+    pair = defaultdict(int)
+    for n in stars:
+        ds = sorted({m["id"] for m in n["memberships"] if m["container_type"] == "domain"})
+        for a in range(len(ds)):
+            for b2 in range(a + 1, len(ds)):
+                pair[(ds[a], ds[b2])] += 1
+    edges = [{"source": s, "target": t, "type": "cooccurrence", "scope": "domain", "weight": w}
+             for (s, t), w in sorted(pair.items()) if w > 1]
+    nodeset = {n["id"] for n in stars + colls}
+    edges += [e for e in p["edges"]
+              if e["scope"] == "collection" and e["source"] in nodeset and e["target"] in nodeset]
+
     nodes = stars + colls
-    nodeset = {n["id"] for n in nodes}
+    tax = [{**t, "document_count": dom_docs.get(t["path"], 0)}
+           for t in p["taxonomy"] if t["path"] in kept_dom]
     sub = {
-        "meta": {**p["meta"], "subset": "custom"},
-        "taxonomy": [t for t in p["taxonomy"] if t["path"] in kept_dom],
+        # Only what the renderer reads. The full snapshot's meta carried the whole
+        # graph's shape (97,220 entities, pruning stats) into a public artifact.
+        "meta": {"schema_version": p["meta"].get("schema_version"),
+                 "subset": "custom",
+                 "counts": {"nodes_included": len(nodes), "nodes_total": len(nodes)}},
+        "taxonomy": tax,
         "nodes": nodes,
-        "node_index": {n["id"]: n for n in nodes},
-        "edges": [
-            e
-            for e in p["edges"]
-            if (e["scope"] == "domain" and e["source"] in kept_dom and e["target"] in kept_dom)
-            or (e["scope"] == "collection" and e["source"] in nodeset and e["target"] in nodeset)
-        ],
+        # node_index exists for hydrating nodes OUTSIDE the render set; here the
+        # render set is the whole payload, so a slim id/label map is enough and
+        # avoids serializing every node twice.
+        "node_index": {n["id"]: {"id": n["id"], "type": n["type"], "label": n.get("label")}
+                       for n in nodes},
+        "edges": edges,
         "layout": {
             **p["layout"],
-            "positions": {k: v for k, v in posmap.items() if k in kept_dom or k in coll_ids},
-            "palette": {k: v for k, v in p["layout"]["palette"].items() if k in kept_dom},
+            "positions": {k: v for k, v in sorted(posmap.items()) if k in kept_dom or k in coll_ids},
+            "palette": {k: v for k, v in sorted(p["layout"]["palette"].items()) if k in kept_dom},
         },
     }
-    sub["meta"]["counts"] = {"nodes_included": len(nodes), "nodes_total": len(nodes)}
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(sub, separators=(",", ":")))
-    dom_e = sum(1 for e in sub["edges"] if e["scope"] == "domain")
-    coll_e = sum(1 for e in sub["edges"] if e["scope"] == "collection")
+    out_path.write_text(json.dumps(sub, separators=(",", ":"), sort_keys=False))
+    dom_e = sum(1 for e in edges if e["scope"] == "domain")
+    coll_e = sum(1 for e in edges if e["scope"] == "collection")
     print(f"subset → {out_path}: {len(stars)} entities, {len(colls)} collections, "
           f"{len(kept_dom)} domains, {dom_e} trade routes, {coll_e} collection edges")
 
@@ -268,8 +353,9 @@ function hidePanel(){ _detail.classList.remove('show'); }
 
 def _patch_index(src: str) -> str:
     def rep(s, a, b):
-        assert a in s, f"patch anchor not found: {a[:60]!r}"
-        return s.replace(a, b)
+        n = s.count(a)
+        assert n == 1, f"patch anchor found {n}x (want exactly 1): {a[:60]!r}"
+        return s.replace(a, b, 1)
 
     # data load → baked payload (folder build fetches ./graph.json; single-file overrides window global)
     s = rep(src, "const graphUrl = `${API_URL}/graph`;",
@@ -310,25 +396,12 @@ def build(graph_path: Path, out_dir: Path) -> None:
     index = _patch_index((VIZ / "index.html").read_text())
     graph = graph_path.read_text()
 
-    # --- folder build (fetches ./graph.json; ideal for hosting on a static site) ---
-    folder = out_dir / "folder"
-    if folder.exists():
-        shutil.rmtree(folder)
-    folder.mkdir()
-    shutil.copytree(VIZ / "core", folder / "core")
-    shutil.copytree(VIZ / "renderers", folder / "renderers")
-    (folder / "index.html").write_text(index)
-    (folder / "graph.json").write_text(graph)
-
     # --- single-file build (inlines data + a bundled IIFE; zero network) ---
     m = re.search(r'<script type="module">(.*?)</script>', index, re.S)
-    module = m.group(1).replace(
-        "Promise.resolve(window.__ORRERY_GRAPH__)",  # idempotent if already patched
-        "Promise.resolve(window.__ORRERY_GRAPH__)",
-    ).replace(
-        "fetch(graphUrl, { headers: fetchHeaders }).then(r => r.json()).then(data => {",
-        "Promise.resolve(window.__ORRERY_GRAPH__).then(data => {",
-    )
+    assert m, "no <script type=\"module\"> found in the viz index.html"
+    _load = "fetch(graphUrl, { headers: fetchHeaders }).then(r => r.json()).then(data => {"
+    assert m.group(1).count(_load) == 1, "data-load call not found (or not unique) in the viz module"
+    module = m.group(1).replace(_load, "Promise.resolve(window.__ORRERY_GRAPH__).then(data => {", 1)
     (work / "entry.mjs").write_text(module)
     bundle_path = work / "bundle.js"
     npx = shutil.which("npx") or "npx"
@@ -345,10 +418,21 @@ def build(graph_path: Path, out_dir: Path) -> None:
         "<script>" + bundle + "</script>"
     )
     single = shell.replace("__SLOT__", inject)
-    (out_dir / "orrery-galaxy.html").write_text(single)
     shutil.rmtree(work)
 
+    # Validate BEFORE writing anything, so a failure can't leave dist/ half-updated.
     assert "fetch(" not in single, "single-file build still contains a live fetch()"
+
+    # --- folder build (fetches ./graph.json; ideal for hosting on a static site) ---
+    folder = out_dir / "folder"
+    if folder.exists():
+        shutil.rmtree(folder)
+    folder.mkdir()
+    shutil.copytree(VIZ / "core", folder / "core")
+    shutil.copytree(VIZ / "renderers", folder / "renderers")
+    (folder / "index.html").write_text(index)
+    (folder / "graph.json").write_text(graph)
+    (out_dir / "orrery-galaxy.html").write_text(single)
     print(f"build → {out_dir}/orrery-galaxy.html ({len(single)//1024} KB, single file)")
     print(f"build → {folder}/  (folder: index.html + core/ + renderers/ + graph.json)")
 
