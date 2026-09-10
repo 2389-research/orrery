@@ -298,11 +298,13 @@ function buildStarView(graph) {
     d.r = d.rTarget;
   }
   // Spring embedder: each doc pulled toward EACH co-entity it connects to (kCo, fixed
-  // rim anchors) → settles at the real balance of its connections; repulsion spreads;
-  // radius stays relevance-banded. This is what makes a doc's spot its NATURAL point.
+  // rim anchors) → settles at the real balance of its connections. The spring DOMINATES;
+  // repulsion is short-range (repelR small) so it only stops dots overlapping, it does
+  // NOT scatter docs away from where their connections put them. A doc whose co-entities
+  // are all on the right lands on the right.
   const placed = { points: simulate(docs0, coAll, {
-    maxTicks: 260, kAnchor: 0, kLink: 0.015, kCo: 0.06, coPos, docCo,
-    kRepel: 900, repelR: 220, kBand: 0.05, dotR: 8, pad: 3,
+    maxTicks: 340, kAnchor: 0, kLink: 0.02, kCo: 0.28, coPos, docCo,
+    kRepel: 140, repelR: 46, kBand: 0.12, dotR: 8, pad: 3,
   }) };
   for (const pd of placed.points) {
     const dx = cx + cos(pd.theta) * pd.r;
