@@ -58,7 +58,8 @@ import { Camera } from './core/camera.js';
 import { sin, cos, hexRGB, rgba, sqrt, clamp, random, hypot, TAU, PI } from './core/utils.js';
 import { drawBackground } from './renderers/galaxy.js';
 import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar } from './renderers/star-original.js';
-import { resolveDocs, seed, simulate, fiedlerOrder } from './core/segmentum-layout.js';
+// Placement uses the galaxy method (cube-weighted centroid); deterministic hash for jitter.
+function hash01(str){let h=2166136261>>>0;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0)/4294967296;}
 
 const canvas = document.getElementById('c');
 const camera = new Camera();
@@ -253,79 +254,43 @@ function buildStarView(graph) {
   // Doc ID → doc object (for linking co-entities to docs)
   const docById = {};
 
-  // Place documents by RELEVANCE (radius, value-normalized so only the least-relevant
-  // sits at the rim; ties share a radius) and CONNECTIVITY (angle, from the force sim).
-  // No domains, no segmentum — just the existing entity viz with better 2D placement.
-  // Force layout over a SET area (max radius = RMAX; the least-relevant doc reaches the
-  // rim). Radius = value-normalized relevance; angle/spread come from a real force sim —
-  // NO domain anchors (kAnchor 0), so each doc is pulled only by its OWN co-entity links
-  // (kLink) and pushed apart by repulsion (kRepel) to FILL the area. A loose radial band
-  // + hashed jitter break the relevance ties so no two docs share an exact position.
-  const RMIN = 130, RMAX = 900;
-  const docs0 = resolveDocs(graph.documents || [], { radiusMode: 'value', r0: RMIN, r1: RMAX, band: 260 });
-  for (const d of docs0) { const jz = (parseInt(d.id.replace(/\D/g,'').slice(-4)||'0',10)%200)/200 - 0.5; d.rTarget = Math.max(RMIN, Math.min(RMAX, d.rTarget + jz*90)); d.band=[Math.max(RMIN,d.rTarget-130), Math.min(RMAX,d.rTarget+130)]; }
-
-  // ANGLE by co-entity MEMBERSHIP MEAN (the galaxy's mechanic: an entity sits at the
-  // weighted mean of its domains; here a doc sits at the mean of its CO-ENTITIES). A doc
-  // tied to co-entities on opposite sides lands between them, so docs with different
-  // co-entity mixes fan out into 2D instead of collapsing onto one radial spoke.
+  // THE GALAXY METHOD (state.js _makeEntityNode): co-entities are fixed CONTAINERS at
+  // their real galaxy positions; a doc is the cube-weighted CENTROID of its co-entities'
+  // positions + jitter. No force sim, no tuning — the doc falls to the gravitational
+  // balance of the co-entities it connects to, exactly like an entity falls to its
+  // domains' centroid on the galaxy map.
+  const RIM = 900;
   const coAll = (graph.co_entities || []).filter(c => c.type !== 'Domain');
-  const RIM = RMAX + 80;
-  const docCo = new Map();                              // docId -> [coId...]
-  for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
-    if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push(c.id);
-  }
-  // Order co-entities by their OWN co-occurrence (which co-entities share docs), via
-  // Fiedler — so related co-entities sit ADJACENT on the rim and a doc's connections
-  // point to a coherent arc, not scattered all over. Fixed rim anchors the docs spring to.
-  const coIds = coAll.map(c => c.id), coIdx = new Map(coIds.map((id, i) => [id, i]));
-  const cw = coIds.map(() => coIds.map(() => 0));
-  for (const [, cids] of docCo) for (let a = 0; a < cids.length; a++) for (let b = a + 1; b < cids.length; b++) {
-    const i = coIdx.get(cids[a]), j = coIdx.get(cids[b]); cw[i][j]++; cw[j][i]++;
-  }
-  const coOrder = (coIds.length > 2 && fiedlerOrder(coIds, cw)) || coIds;
-  const coAngle = new Map(), coPos = new Map();
-  coOrder.forEach((id, i) => {
-    const a = -Math.PI / 2 + (i / coOrder.length) * TAU;
-    coAngle.set(id, a); coPos.set(id, { x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
+  // Fix each co-entity on the rim at its BEARING from the core's galaxy position, so its
+  // direction preserves where it sits on the galaxy map (galaxy layout isn't even — it's
+  // the domain UMAP). Co-entities with no galaxy position fall back to an even spread.
+  const cgx = graph.entity?.gx ?? 0.5, cgy = graph.entity?.gy ?? 0.5;
+  const coPos = new Map();
+  coAll.forEach((c, i) => {
+    const a = (c.gx != null && c.gy != null && (c.gx !== cgx || c.gy !== cgy))
+      ? Math.atan2(c.gy - cgy, c.gx - cgx)
+      : (-Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU);
+    coPos.set(c.id, { angle: a, x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
   });
-  // Seed each doc at the circular MEAN of its co-entities' rim angles.
-  for (const d of docs0) {
-    const cos_ = docCo.get(d.id) || [];
-    let sx = 0, sy = 0;
-    for (const cid of cos_) { const a = coAngle.get(cid); sx += Math.cos(a); sy += Math.sin(a); }
-    d.theta = (sx * sx + sy * sy > 1e-6) ? Math.atan2(sy, sx) : (Math.random() * TAU);
-    d.r = d.rTarget;
+  const docCo = new Map();                              // docId -> [{id, w}]
+  for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
+    if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push({ id: c.id, w: c.weight || 1 });
   }
-  // Spring embedder: each doc pulled toward EACH co-entity it connects to (kCo, fixed
-  // rim anchors) → settles at the real balance of its connections. The spring DOMINATES;
-  // repulsion is short-range (repelR small) so it only stops dots overlapping, it does
-  // NOT scatter docs away from where their connections put them. A doc whose co-entities
-  // are all on the right lands on the right.
-  const placed = { points: simulate(docs0, coAll, {
-    maxTicks: 340, kAnchor: 0, kLink: 0.02, kCo: 0.28, coPos, docCo,
-    kRepel: 140, repelR: 46, kBand: 0.12, dotR: 8, pad: 3,
-  }) };
-  for (const pd of placed.points) {
-    const dx = cx + cos(pd.theta) * pd.r;
-    const dy = cy + sin(pd.theta) * pd.r;
+  // Doc position = cube-weighted centroid of its co-entities' rim positions + jitter.
+  for (const d of (graph.documents || [])) {
+    const cs = docCo.get(d.id) || [];
+    let sx = 0, sy = 0, tw = 0;
+    for (const { id, w } of cs) { const p = coPos.get(id); if (!p) continue; const cw = w * w * w; sx += p.x * cw; sy += p.y * cw; tw += cw; }
+    let dx, dy;
+    if (tw > 0) { dx = sx / tw; dy = sy / tw; }
+    else { const a = hash01(d.id) * TAU; const r = 200 + hash01(d.id + 'r') * 300; dx = cx + Math.cos(a) * r; dy = cy + Math.sin(a) * r; }
+    const jx = dx + (hash01(d.id + 'x') * 60 - 30), jy = dy + (hash01(d.id + 'y') * 60 - 30);
     const doc = {
-      id: pd.id,
-      kind: 'document',
-      title: pd.title || 'Untitled',
-      content_type: pd.content_type || 'text',
-      radius: 8,
-      x: dx, y: dy,
-      _px: dx, _py: dy,
-      angle: pd.theta,
-      orbitPhase: random() * TAU,
-      orbitSpeed: 0.5 + random() * 0.5,
-      orbitDrift: 4 + random() * 6,
-      activityGlow: 0,
+      id: d.id, kind: 'document', title: d.title || 'Untitled', content_type: d.content_type || 'text',
+      radius: 8, x: jx, y: jy, _px: jx, _py: jy, angle: Math.atan2(jy - cy, jx - cx),
+      orbitPhase: random() * TAU, orbitSpeed: 0.5 + random() * 0.5, orbitDrift: 4 + random() * 6, activityGlow: 0,
     };
-    docs.push(doc);
-    docById[pd.id] = doc;
-    docIndex.set(pd.id, doc);
+    docs.push(doc); docById[d.id] = doc; docIndex.set(d.id, doc);
   }
 
   // Place co-entities — filter out Domain types, position near their shared docs
@@ -338,10 +303,11 @@ function buildStarView(graph) {
 
   for (let i = 0; i < sortedCo.length; i++) {
     const co = sortedCo[i];
-    // Fixed Fiedler rim position — the SAME anchor the docs sprang toward, so a doc's
-    // hover-lines point straight at the co-entities it actually connects to.
-    const angle = coAngle.has(co.id) ? coAngle.get(co.id) : (i * 2.399963);
-    const r = RIM + 40 + (i % 2) * 22;   // slight ring thickness so labels don't collide
+    // Same rim position the docs were pulled toward — its BEARING from the core's galaxy
+    // position, so a co-entity sits where it is on the galaxy map (+ tiny ring thickness).
+    const p0 = coPos.get(co.id);
+    const angle = p0 ? p0.angle : (i * 2.399963);
+    const r = RIM + 60 + (i % 3) * 26;
 
     coEntities.push({
       id: co.id,

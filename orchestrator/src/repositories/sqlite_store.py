@@ -627,10 +627,41 @@ class SQLiteRelationshipRepository(RelationshipRepository):
             for r in shared_rows:
                 shared_docs.setdefault(r["entity_id"], []).append(r["document_id"])
 
+        # Galaxy positions: where each co-entity (and the core) sits on the galaxy map —
+        # the cube-weighted centroid of its domains' UMAP positions (domain_layout), the
+        # same membership-centroid the galaxy uses (state.js _makeEntityNode). Lets the
+        # star view preserve galaxy spatial nuance instead of arbitrary placement.
+        dom_pos = {r["domain_path"]: (r["x"], r["y"]) for r in
+                   self._conn.execute("SELECT domain_path, x, y FROM domain_layout WHERE x IS NOT NULL").fetchall()}
+
+        def _galaxy_pos(ids):
+            if not ids or not dom_pos:
+                return {}
+            acc = {}
+            for chunk in (ids[i:i + 400] for i in range(0, len(ids), 400)):
+                ph = ",".join("?" * len(chunk))
+                for r in self._conn.execute(f"""
+                    SELECT es.entity_id AS eid, dd.domain_path AS dp, COUNT(*) AS w
+                    FROM entity_sources es
+                    JOIN document_domains dd ON dd.document_id = es.document_id
+                    WHERE es.entity_id IN ({ph}) GROUP BY es.entity_id, dd.domain_path
+                """, list(chunk)):
+                    p = dom_pos.get(r["dp"])
+                    if not p:
+                        continue
+                    cw = r["w"] ** 3
+                    a = acc.setdefault(r["eid"], [0.0, 0.0, 0.0])
+                    a[0] += p[0] * cw; a[1] += p[1] * cw; a[2] += cw
+            return {eid: {"gx": a[0] / a[2], "gy": a[1] / a[2]} for eid, a in acc.items() if a[2] > 0}
+
+        co_pos = _galaxy_pos(co_entity_ids)
+        core_pos = _galaxy_pos([entity_id]).get(entity_id)
+
         co_entities = [{
             "id": r["id"], "canonical_name": r["canonical_name"], "type": r["type"],
             "weight": r["total_weight"],
             "shared_doc_ids": list(set(shared_docs.get(r["id"], []))),
+            **(co_pos.get(r["id"]) or {}),   # gx, gy: galaxy position (absent if no positioned domain)
         } for r in co_rows]
 
         from ..pipeline.graph_snapshot import domain_palette
@@ -641,7 +672,8 @@ class SQLiteRelationshipRepository(RelationshipRepository):
 
         return {
             "entity": {"id": entity["id"], "canonical_name": entity["canonical_name"],
-                        "type": entity["type"], "source_count": len(doc_ids)},
+                        "type": entity["type"], "source_count": len(doc_ids),
+                        **(core_pos or {})},   # gx, gy: the core's galaxy position
             "documents": documents,
             "co_entities": co_entities,
             "palette": palette,
