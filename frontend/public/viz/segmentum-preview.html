@@ -1,0 +1,84 @@
+<meta charset="utf-8">
+<title>Segmentum placement preview</title>
+<style>
+  html,body{margin:0;height:100%;background:#05070d;color:#c0c8e0;font:12px 'Courier New',monospace;overflow:hidden}
+  canvas{display:block}
+  #hud{position:fixed;top:10px;left:12px;z-index:2;line-height:1.6;color:#8aa0c8}
+  #hud b{color:#cfe0ff}
+</style>
+<div id="hud">loading…</div>
+<canvas id="c"></canvas>
+<script type="module">
+// Standalone PREVIEW of the segmentum pipeline's PLACEMENT (Stages 0-2). Does not touch
+// the live star page. Draws docs as points: radius = relevance band, angle = domain
+// anchor pull + connectivity. Domain anchor rays + labels shown so you can read structure.
+import { placeDocs, R0, R1, midLevel, MISC_COLOR } from './core/segmentum-layout.js';
+
+const q = new URLSearchParams(location.search);
+const entityId = q.get('entity') || '';
+const API = q.get('api') || 'http://localhost:8100';
+const WS = q.get('workspace') || '';
+const headers = {}; if (WS) headers['X-Workspace-Id'] = WS;
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+function size(){ cv.style.width=innerWidth+'px'; cv.style.height=innerHeight+'px'; cv.width = innerWidth*devicePixelRatio; cv.height = innerHeight*devicePixelRatio; ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); }
+size(); addEventListener('resize', ()=>{ size(); if(window.__P) draw(window.__P); });
+
+// sector colour: mid-path hex if present in palette, else first present leaf under it.
+function sectorColor(mid, palette){
+  if (mid === 'misc') return MISC_COLOR;
+  if (palette[mid]) return palette[mid];
+  const leaves = Object.keys(palette).filter(p=>p.startsWith(mid+'/')).sort();
+  return leaves.length ? palette[leaves[0]] : MISC_COLOR;
+}
+
+function draw(P){
+  const { points, anchors, palette, entity } = P;
+  const W = innerWidth, H = innerHeight, cx = W/2, cy = H/2;
+  const scale = Math.min(W,H)/2 / (R1+70) * 0.92;
+  ctx.clearRect(0,0,W,H);
+
+  // faint radius guides
+  ctx.strokeStyle='rgba(120,150,200,.10)'; ctx.lineWidth=1;
+  for (const r of [R0, R0+(R1-R0)*0.33, R0+(R1-R0)*0.66, R1]){ ctx.beginPath(); ctx.arc(cx,cy,r*scale,0,Math.PI*2); ctx.stroke(); }
+
+  // domain anchor rays + labels
+  ctx.textAlign='left';
+  for (const [dom,th] of Object.entries(anchors)){
+    const col = sectorColor(dom, palette);
+    ctx.strokeStyle = col+'44'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(th)*(R1+30)*scale, cy+Math.sin(th)*(R1+30)*scale); ctx.stroke();
+    const lx=cx+Math.cos(th)*(R1+40)*scale, ly=cy+Math.sin(th)*(R1+40)*scale;
+    ctx.fillStyle=col+'cc'; ctx.font="11px 'Courier New',monospace";
+    ctx.textAlign = Math.cos(th)<0 ? 'right':'left';
+    ctx.fillText(dom.split('/').pop(), lx, ly);
+  }
+
+  // documents as points, coloured by domain
+  for (const p of points){
+    const col = sectorColor(p.domain, palette);
+    const x=cx+Math.cos(p.theta)*p.r*scale, y=cy+Math.sin(p.theta)*p.r*scale;
+    ctx.beginPath(); ctx.arc(x,y,2.6,0,Math.PI*2); ctx.fillStyle=col+'dd'; ctx.fill();
+  }
+
+  // core star
+  ctx.beginPath(); ctx.arc(cx,cy,5,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill();
+
+  const doms = new Set(points.map(p=>p.domain));
+  document.getElementById('hud').innerHTML =
+    `<b>${entity}</b> — segmentum PLACEMENT preview (Stages 0–2)<br>`+
+    `${points.length} docs · ${doms.size} domains · radius = relevance band · angle = domain anchor + connectivity<br>`+
+    `<span style="color:#556">rays = domain anchors (local Fiedler order) · not yet rasterized into sectors</span>`;
+}
+
+(async ()=>{
+  try{
+    const graph = await fetch(`${API}/entities/${entityId}/star-graph?co_limit=150`, {headers}).then(r=>r.json());
+    const { points, anchors } = placeDocs(graph, { maxTicks: 260 });
+    window.__P = { points, anchors, palette: graph.palette||{}, entity: graph.entity?.canonical_name || entityId };
+    window.__SEG_PREVIEW__ = { docs: points.length, domains: Object.keys(anchors).length };
+    console.log(`Preview loaded: ${points.length} docs, ${Object.keys(anchors).length} domain anchors`);
+    draw(window.__P);
+  }catch(e){ document.getElementById('hud').textContent = 'error: '+e.message; console.error(e); }
+})();
+</script>
