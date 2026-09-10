@@ -404,16 +404,25 @@ canvas.addEventListener('mousemove', e => {
   hoveredId = hit ? hit.id : null;
   canvas.style.cursor = hit ? 'pointer' : 'grab';
 
-  // Sector hover: a hovered document lights its whole domain; otherwise the raw
-  // pointer angle picks the slot it falls in (so hovering the empty arc works too).
+  // Sector hover: a hovered document lights its whole domain; otherwise pick the
+  // ring nearest the pointer's radius, then the sector in that ring holding its angle.
   let hd = (hit && hit.domain) ? hit.domain : null;
   const layout = window.__STAR_LAYOUT__;
-  if (!hd && layout && layout.slots) {
-    let ang = Math.atan2(w.y - 2500, w.x - 2500);
+  if (!hd && layout && layout.rings) {
+    const dist = Math.hypot(w.x - 2500, w.y - 2500);
+    const ang = Math.atan2(w.y - 2500, w.x - 2500);
     const norm = a => { while (a < -Math.PI) a += TAU; while (a > Math.PI) a -= TAU; return a; };
-    for (const s of layout.slots) {
-      const d0 = norm(ang - s.start), d1 = norm(ang - s.end);
-      if (d0 >= 0 && d1 <= 0) { hd = s.domain; break; }   // angle within [start,end]
+    // nearest ring band
+    let best = null, bd = Infinity;
+    for (const rr of layout.rings) {
+      const d = Math.abs(dist - SL.RING_RADII[rr.ring]);
+      if (d < bd) { bd = d; best = rr; }
+    }
+    if (best && bd < SL.RING_BAND * 1.5) {
+      for (const s of best.sectors) {
+        const d0 = norm(ang - s.startAngle), d1 = norm(ang - s.endAngle);
+        if (d0 >= 0 && d1 <= 0) { hd = s.domain; break; }
+      }
     }
   }
   window.__STAR_HOVER__ = hd;

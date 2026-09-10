@@ -5,7 +5,7 @@
 
 import { sin, cos, TAU, PI, hexRGB, rgba, clamp, min, max, sqrt } from '../core/utils.js';
 import { docGlowSprite, coEntityGlowSprite, DOC_R0, CO_R0 } from './sprites.js';
-import { sectorColor, MISC_COLOR, RING_RADII } from '../core/star-layout.js';
+import { sectorColor, MISC_COLOR, RING_RADII, RING_BAND } from '../core/star-layout.js';
 
 // palette + layout are stashed on window by star.html's buildStarView
 function palette() { return (typeof window !== 'undefined' && window.__STAR_PALETTE__) || {}; }
@@ -157,86 +157,85 @@ export function drawDocuments(ctx, docs, tick, hoveredId, view) {
   }
 }
 
-// Inner edge of ring r's band (ring 0 starts just outside the central star).
-function ringInner(r) { return r === 0 ? 70 : RING_RADII[r - 1] + 6; }
-function ringOuter(r) { return RING_RADII[r] - 6; }
+// Radial band a ring's docs occupy: RING_RADII[r] ± RING_BAND/2 (+ a little pad so
+// the tint reads as a filled area behind the dots).
+function bandInner(r) { return RING_RADII[r] - RING_BAND / 2 - 8; }
+function bandOuter(r) { return RING_RADII[r] + RING_BAND / 2 + 8; }
 
 /** Draw domain sectors behind the documents (the 40k galactic-sector look).
  *
- *  Each domain owns a FIXED angular slot (layout.slots) that is the same on every
- *  ring, so a sector is a CONTINUOUS radial wedge you can trace inner→outer. Its
- *  FILL breathes: per ring the domain's docs occupy `half` of the slot, centred, so
- *  the tinted body bulges on strong rings and pinches on weak ones — the "cut into
- *  one another" effect, now with continuity. Hovering a sector (window.__STAR_HOVER__,
- *  set by star.html from the pointer angle or a hovered doc) brightens it and dims
- *  the rest. */
+ *  Organic packing: each ring fills its own crescent with ONLY the domains present in
+ *  it, so there is no reserved dead space. Each sector's FULL wedge is tinted across
+ *  the ring band, so the colour marks the whole domain area (not a sliver) and the
+ *  docs sit inside it. Global order + centred crescents keep a domain in the same
+ *  neighbourhood ring to ring; hover (window.__STAR_HOVER__, set by star.html from a
+ *  hovered doc or the pointer's ring+angle) brightens a domain across all its rings
+ *  and dims the rest. */
 export function drawSectors(ctx, layout, cx, cy, view) {
   if (!layout) return;
 
   // Faint concentric ring guides (both modes).
-  ctx.strokeStyle = 'rgba(120,150,200,0.10)';
+  ctx.strokeStyle = 'rgba(120,150,200,0.09)';
   ctx.lineWidth = 1;
   for (const rr of RING_RADII) {
     ctx.beginPath();
     ctx.arc(cx, cy, rr, 0, TAU);
     ctx.stroke();
   }
-  if (layout.mode !== 'rings' || !layout.slots) return;
+  if (layout.mode !== 'rings') return;
 
   const pal = palette();
   const hovered = (typeof window !== 'undefined' && window.__STAR_HOVER__) || null;
 
-  // per-domain: fill half-width at each ring (0 where absent), for the bulge polygon
-  const fillByDomain = new Map();   // domain -> [halfPerRing...]
+  // widest-ring label anchor per domain
+  const widest = new Map();
+
   for (const ring of layout.rings) {
+    const rIn = bandInner(ring.ring), rOut = bandOuter(ring.ring);
     for (const s of ring.sectors) {
-      if (!fillByDomain.has(s.domain)) fillByDomain.set(s.domain, Array(RING_RADII.length).fill(0));
-      fillByDomain.get(s.domain)[ring.ring] = s.half;
+      const isMisc = s.domain === 'misc';
+      const active = !hovered || hovered === s.domain;
+      const col = sectorColor(s.domain, pal) || MISC_COLOR;
+      const [r, g, b] = hexRGB(col);
+
+      // Full wedge tint across the whole sector arc + ring band.
+      const tint = (isMisc ? 0.06 : 0.16) * (active ? 1 : 0.2);
+      ctx.fillStyle = `rgba(${r},${g},${b},${tint})`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rOut, s.startAngle, s.endAngle);
+      ctx.arc(cx, cy, rIn, s.endAngle, s.startAngle, true);
+      ctx.closePath();
+      ctx.fill();
+
+      // Boundary lines at the wedge edges (radial spokes across this ring band).
+      const bAlpha = (active ? 0.30 : 0.07) * (isMisc ? 0.6 : 1);
+      ctx.strokeStyle = `rgba(${r},${g},${b},${bAlpha})`;
+      ctx.lineWidth = active && hovered ? 1.6 : 1;
+      for (const a of [s.startAngle, s.endAngle]) {
+        ctx.beginPath();
+        ctx.moveTo(cx + cos(a) * rIn, cy + sin(a) * rIn);
+        ctx.lineTo(cx + cos(a) * rOut, cy + sin(a) * rOut);
+        ctx.stroke();
+      }
+
+      const prev = widest.get(s.domain);
+      if (!prev || s.arc > prev.arc) widest.set(s.domain, { arc: s.arc, angle: s.center, rOut });
     }
   }
 
-  const outerMost = RING_RADII[RING_RADII.length - 1];
-  for (const slot of layout.slots) {
-    const isMisc = slot.domain === 'misc';
-    const active = !hovered || hovered === slot.domain;
-    const col = sectorColor(slot.domain, pal) || MISC_COLOR;
+  // One label per domain, at its widest ring, just outside that band.
+  ctx.textAlign = 'center';
+  for (const [domain, w] of widest) {
+    const isMisc = domain === 'misc';
+    const active = !hovered || hovered === domain;
+    const col = sectorColor(domain, pal) || MISC_COLOR;
     const [r, g, b] = hexRGB(col);
-    const halfs = fillByDomain.get(slot.domain) || [];
-
-    // Bulging body: for each ring band, fill the slot up to that ring's fill width.
-    for (let ri = 0; ri < RING_RADII.length; ri++) {
-      const half = halfs[ri] || 0;
-      if (half <= 0) continue;
-      const a0 = slot.center - half, a1 = slot.center + half;
-      const rIn = ringInner(ri), rOut = ringOuter(ri);
-      const tint = (isMisc ? 0.05 : 0.13) * (active ? 1 : 0.25);
-      ctx.fillStyle = `rgba(${r},${g},${b},${tint})`;
-      ctx.beginPath();
-      ctx.arc(cx, cy, rOut, a0, a1);
-      ctx.arc(cx, cy, rIn, a1, a0, true);
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    // Continuous radial slot boundary lines (full extent, so the sector reads as one).
-    const bAlpha = (active ? 0.30 : 0.08) * (isMisc ? 0.6 : 1);
-    ctx.strokeStyle = `rgba(${r},${g},${b},${bAlpha})`;
-    ctx.lineWidth = active && hovered ? 1.6 : 1;
-    for (const a of [slot.start, slot.end]) {
-      ctx.beginPath();
-      ctx.moveTo(cx + cos(a) * ringInner(0), cy + sin(a) * ringInner(0));
-      ctx.lineTo(cx + cos(a) * outerMost, cy + sin(a) * outerMost);
-      ctx.stroke();
-    }
-
-    // Label once at the slot centre, just outside the outer ring.
-    const lr = outerMost + 26;
-    const lx = cx + cos(slot.center) * lr, ly = cy + sin(slot.center) * lr;
-    const name = isMisc ? 'misc' : slot.domain.split('/').pop();
-    const lAlpha = active ? (isMisc ? 0.6 : 0.9) : 0.3;
+    const lr = w.rOut + 20;
+    const lx = cx + cos(w.angle) * lr, ly = cy + sin(w.angle) * lr;
+    const name = isMisc ? 'misc' : domain.split('/').pop();
+    const lAlpha = active ? (isMisc ? 0.6 : 0.9) : 0.28;
     ctx.fillStyle = isMisc ? `rgba(160,168,185,${lAlpha})` : `rgba(${r},${g},${b},${lAlpha})`;
     ctx.font = `${isMisc ? 11 : 13}px 'Courier New', monospace`;
-    ctx.textAlign = 'center';
     ctx.fillText(name, lx, ly);
   }
 }
