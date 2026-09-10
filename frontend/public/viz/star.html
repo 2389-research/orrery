@@ -57,7 +57,8 @@ canvas:active { cursor: grabbing; }
 import { Camera } from './core/camera.js';
 import { sin, cos, hexRGB, rgba, sqrt, clamp, random, hypot, TAU, PI } from './core/utils.js';
 import { drawBackground } from './renderers/galaxy.js';
-import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar } from './renderers/star.js';
+import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar, drawSectors } from './renderers/star.js';
+import * as SL from './core/star-layout.js';
 
 const canvas = document.getElementById('c');
 const camera = new Camera();
@@ -252,23 +253,24 @@ function buildStarView(graph) {
   // Doc ID → doc object (for linking co-entities to docs)
   const docById = {};
 
-  // Place documents in inner ring
-  const docRing = 180;
-  for (let i = 0; i < docList.length; i++) {
-    const d = docList[i];
-    const angle = (i / docList.length) * TAU - PI / 2;
-    const r = docRing + (i % 3) * 20 - 15;
-    const dx = cx + cos(angle) * r;
-    const dy = cy + sin(angle) * r;
+  // Orbital layout: radius = strength (rings by percentile / small-N crescent),
+  // angle = domain sectors. All the math lives in core/star-layout.js (tested).
+  const layout = SL.layoutStar(graph);
+
+  const docAngle = new Map();
+  for (const d of layout.documents) {
+    const dx = cx + cos(d.angle) * d.radius;
+    const dy = cy + sin(d.angle) * d.radius;
     const doc = {
       id: d.id,
       kind: 'document',
       title: d.title || 'Untitled',
       content_type: d.content_type || 'text',
+      domain_path: d.domain_path,
       radius: 8,
       x: dx, y: dy,
       _px: dx, _py: dy,
-      angle,
+      angle: d.angle,
       orbitPhase: random() * TAU,
       orbitSpeed: 0.5 + random() * 0.5,
       orbitDrift: 4 + random() * 6,
@@ -277,35 +279,29 @@ function buildStarView(graph) {
     docs.push(doc);
     docById[d.id] = doc;
     docIndex.set(d.id, doc);
+    docAngle.set(d.id, d.angle);
   }
 
-  // Place co-entities — filter out Domain types, position near their shared docs
+  // Co-entities — a graduated band beyond the outer ring. Strength (shared/entity
+  // docs) sets radius within the band; angle = circular mean of shared-doc angles.
   const filteredCo = coList.filter(c => c.type !== 'Domain');
-  const maxWeight = Math.max(1, ...filteredCo.map(c => c.weight));
+  const entityDocCount = docList.length || 1;
   const sortedCo = [...filteredCo].sort((a, b) => b.weight - a.weight);
   const labelThreshold = sortedCo.length > 8
-    ? sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1
+    ? (sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1)
     : 0;
-
-  const coRing = 380;
-  for (let i = 0; i < sortedCo.length; i++) {
-    const co = sortedCo[i];
-    const sharedDocs = (co.shared_doc_ids || []).map(id => docById[id]).filter(Boolean);
-
-    let angle;
-    if (sharedDocs.length > 0) {
-      // Average angle of shared docs — cluster near them
-      let sx = 0, sy = 0;
-      for (const sd of sharedDocs) { sx += cos(sd.angle); sy += sin(sd.angle); }
-      angle = Math.atan2(sy, sx);
-      angle += (random() - 0.5) * 0.5;
-    } else {
-      angle = i * 2.399963;
-    }
-
-    const wNorm = co.weight / maxWeight;
-    const r = coRing - wNorm * 80 + (random() - 0.5) * 50;
-
+  for (const co of filteredCo) {
+    co._entityDocCount = entityDocCount;
+    co.shared = (co.shared_doc_ids || []).length;
+    co.labelThreshold = labelThreshold;
+  }
+  const band = SL.coEntityBand(filteredCo, docAngle, {
+    rInner: SL.RING_OUTER + 60,
+    rOuter: SL.RING_OUTER + 60 + Math.min(200, 40 + filteredCo.length),
+  });
+  for (const co of band) {
+    const x = cx + cos(co.angle) * co.radius;
+    const y = cy + sin(co.angle) * co.radius;
     coEntities.push({
       id: co.id,
       kind: 'co_entity',
@@ -313,18 +309,20 @@ function buildStarView(graph) {
       type: co.type,
       weight: co.weight,
       sharedDocIds: co.shared_doc_ids || [],
-      labelThreshold,
-      radius: 5 + sqrt(co.weight) * 2,
-      x: cx + cos(angle) * r,
-      y: cy + sin(angle) * r,
-      _px: cx + cos(angle) * r,
-      _py: cy + sin(angle) * r,
+      strength: co.strength,
+      labelThreshold: co.labelThreshold,
+      radius: 5 + sqrt(co.weight || 1) * 2,
+      x, y, _px: x, _py: y,
       orbitPhase: random() * TAU,
       orbitSpeed: 0.4 + random() * 0.6,
       orbitDrift: 5 + random() * 8,
       activityGlow: 0,
     });
   }
+
+  // Stash the ring/sector structure + palette for the renderer.
+  window.__STAR_LAYOUT__ = layout;
+  window.__STAR_PALETTE__ = graph.palette || {};
 
   // Repo nodes — outer periphery ring (beyond co-entities), gold tint, so this
   // reads as "the collection(s) this entity belongs to". Click navigates to collection.html.
@@ -545,6 +543,9 @@ function frame() {
       top: camera.y - H / 2 / camera.zoom - _m,
       bottom: camera.y + H / 2 / camera.zoom + _m,
     };
+
+    // Domain sectors sit behind everything else (above the starfield).
+    if (window.__STAR_LAYOUT__) drawSectors(ctx, window.__STAR_LAYOUT__, 2500, 2500, view);
 
     drawConnections(ctx, centralEntity.x, centralEntity.y, docs, coEntities, hoveredId, centralEntity.id, docIndex, view);
 

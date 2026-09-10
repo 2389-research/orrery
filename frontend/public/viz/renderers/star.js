@@ -5,6 +5,15 @@
 
 import { sin, cos, TAU, PI, hexRGB, rgba, clamp, min, max, sqrt } from '../core/utils.js';
 import { docGlowSprite, coEntityGlowSprite, DOC_R0, CO_R0 } from './sprites.js';
+import { sectorColor, MISC_COLOR, RING_RADII } from '../core/star-layout.js';
+
+// palette + layout are stashed on window by star.html's buildStarView
+function palette() { return (typeof window !== 'undefined' && window.__STAR_PALETTE__) || {}; }
+function docColor(doc) {
+  const p = palette();
+  if (doc.domain_path && p[doc.domain_path]) return p[doc.domain_path];
+  return MISC_COLOR;
+}
 
 // Is a world-space point outside the visible box (with the box's own margin)? Used
 // to skip drawing off-screen nodes — the big win once a star has many documents.
@@ -120,28 +129,96 @@ export function drawDocuments(ctx, docs, tick, hoveredId, view) {
     ctx.drawImage(glow, px - half, py - half, half * 2, half * 2);
     ctx.globalAlpha = 1;
 
-    // Core
-    ctx.fillStyle = `rgba(255,220,160,${0.8 * alpha})`;
+    // Core — coloured by the document's DOMAIN (fixes the old monochrome bug: the
+    // renderer used to key colour off entity TYPE via a table that matched nothing).
+    const [dr, dg, db] = hexRGB(docColor(doc));
+    ctx.fillStyle = `rgba(${dr},${dg},${db},${0.85 * alpha})`;
     ctx.beginPath();
     ctx.arc(px, py, sz * 0.5, 0, TAU);
     ctx.fill();
-
-    // Tiny document icon — two horizontal lines
-    ctx.strokeStyle = `rgba(255,220,160,${0.5 * alpha})`;
+    // A thin bright rim so a dark domain colour still reads as a dot.
+    ctx.strokeStyle = `rgba(255,255,255,${0.35 * alpha})`;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(px - sz * 0.3, py - sz * 0.15);
-    ctx.lineTo(px + sz * 0.3, py - sz * 0.15);
-    ctx.moveTo(px - sz * 0.3, py + sz * 0.15);
-    ctx.lineTo(px + sz * 0.2, py + sz * 0.15);
+    ctx.arc(px, py, sz * 0.5, 0, TAU);
     ctx.stroke();
 
-    // Label — always show (truncated)
-    const label = doc.title.length > 30 ? doc.title.slice(0, 28) + '…' : doc.title;
-    ctx.fillStyle = `rgba(255,230,180,${(hov ? 0.9 : 0.45) * alpha})`;
-    ctx.font = `${hov ? 16 : 13}px 'Courier New', monospace`;
-    ctx.textAlign = 'center';
-    ctx.fillText(label, px, py + sz * 2 + 10);
+    // Label — documents are unlabelled dots at rest (spec: only sectors + co-entities
+    // carry text; the outer ring is too dense to label). Title shows on hover only.
+    if (hov) {
+      const label = doc.title.length > 30 ? doc.title.slice(0, 28) + '…' : doc.title;
+      ctx.fillStyle = `rgba(255,230,180,0.9)`;
+      ctx.font = `16px 'Courier New', monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(label, px, py + sz * 2 + 10);
+    }
+  }
+}
+
+/** Draw the domain sectors behind the documents (the 40k galactic-sector look).
+ *  Reads the layout produced by core/star-layout.js. Each ring's sectors are drawn
+ *  as tinted wedges between adjacent ring radii, with radial boundary lines; because
+ *  per-ring widths differ, the boundaries step in and out — the "cut into one
+ *  another" effect. Named sectors are labelled once, on their widest ring. */
+export function drawSectors(ctx, layout, cx, cy, view) {
+  if (!layout) return;
+
+  // Faint concentric ring guides (both modes).
+  ctx.strokeStyle = 'rgba(120,150,200,0.10)';
+  ctx.lineWidth = 1;
+  for (const rr of RING_RADII) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, 0, TAU);
+    ctx.stroke();
+  }
+  if (layout.mode !== 'rings') return;   // small-N: guides only, no sectors
+
+  const pal = palette();
+  // widest-ring label position per named domain
+  const widest = new Map();   // domain -> { arc, angle, ringOuter }
+  for (const ring of layout.rings) {
+    const rInner = ring.ring === 0 ? 60 : RING_RADII[ring.ring - 1];
+    const rOuter = RING_RADII[ring.ring];
+    for (const s of ring.sectors) {
+      const col = sectorColor(s.domain, pal) || MISC_COLOR;
+      const [r, g, b] = hexRGB(col);
+
+      // tinted wedge
+      ctx.fillStyle = `rgba(${r},${g},${b},0.07)`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rOuter, s.startAngle, s.endAngle);
+      ctx.arc(cx, cy, rInner, s.endAngle, s.startAngle, true);
+      ctx.closePath();
+      ctx.fill();
+
+      // radial boundary lines
+      ctx.strokeStyle = `rgba(${r},${g},${b},0.28)`;
+      ctx.lineWidth = 1;
+      for (const a of [s.startAngle, s.endAngle]) {
+        ctx.beginPath();
+        ctx.moveTo(cx + cos(a) * rInner, cy + sin(a) * rInner);
+        ctx.lineTo(cx + cos(a) * rOuter, cy + sin(a) * rOuter);
+        ctx.stroke();
+      }
+
+      const mid = (s.startAngle + s.endAngle) / 2;
+      const prev = widest.get(s.domain);
+      if (!prev || s.arc > prev.arc) widest.set(s.domain, { arc: s.arc, angle: mid, rOuter });
+    }
+  }
+
+  // Sector labels — once, on the widest ring, just outside it.
+  ctx.textAlign = 'center';
+  for (const [domain, w] of widest) {
+    const isMisc = domain === 'misc';
+    const col = sectorColor(domain, pal) || MISC_COLOR;
+    const [r, g, b] = hexRGB(col);
+    const lr = w.rOuter + 22;
+    const lx = cx + cos(w.angle) * lr, ly = cy + sin(w.angle) * lr;
+    const name = isMisc ? 'misc' : domain.split('/').pop();
+    ctx.fillStyle = isMisc ? 'rgba(160,168,185,0.55)' : `rgba(${r},${g},${b},0.85)`;
+    ctx.font = `${isMisc ? 11 : 13}px 'Courier New', monospace`;
+    ctx.fillText(name, lx, ly);
   }
 }
 
