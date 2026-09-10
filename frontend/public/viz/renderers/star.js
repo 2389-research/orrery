@@ -10,6 +10,8 @@ import { sectorColor, MISC_COLOR, cellAngle, R0 as SEG_R0, R1 as SEG_R1 } from '
 // palette + layout are stashed on window by star.html's buildStarView
 function palette() { return (typeof window !== 'undefined' && window.__STAR_PALETTE__) || {}; }
 function docColor(doc) {
+  // Organic-scatter mode (?territories=off): no domain information — uniform warm doc.
+  if (typeof window !== 'undefined' && window.__NO_DOMAIN_COLOR__) return '#e0b070';
   const p = palette();
   if (doc.domain_path && p[doc.domain_path]) return p[doc.domain_path];
   return MISC_COLOR;

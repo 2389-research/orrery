@@ -256,7 +256,13 @@ function buildStarView(graph) {
   // Segmentum layout: radius = relevance band, angle = domain-anchor + connectivity,
   // domain TERRITORIES derived after placement by a KNN/Voronoi partition. All the math
   // lives in core/segmentum-layout.js (tested). Positions are world coords around cx,cy.
-  const seg = SEG.layoutSegmentum(graph, { K: 10, minRegionCells: 10, maxEnclaves: 2, maxReachMul: 16 });
+  // ?territories=off → the domain-free ORGANIC SCATTER: same 2D placement, radius spread
+  // EVENLY (no rim clump), no territory partition, uniform doc colour.
+  const noTerritories = new URLSearchParams(location.search).get('territories') === 'off';
+  window.__NO_DOMAIN_COLOR__ = noTerritories;
+  const seg = noTerritories
+    ? SEG.layoutSegmentum(graph, { placeOnly: true, radiusMode: 'even' })
+    : SEG.layoutSegmentum(graph, { K: 10, minRegionCells: 10, maxEnclaves: 2, maxReachMul: 16 });
 
   const docAngle = new Map();
   for (const d of seg.points) {

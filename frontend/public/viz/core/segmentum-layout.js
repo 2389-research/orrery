@@ -37,13 +37,16 @@ export function midLevel(p) {
 // ── Stage 0: relevance -> radius band ───────────────────────────────────────────
 /** rel = 1/n_entities; rank+sqrt -> rTarget (most relevant innermost); band clamped
  *  to [r0,r1]. Ties in rel broken by id so percentiles are distinct (no radial clot). */
-export function resolveDocs(docs, { r0 = R0, r1 = R1, band = BAND } = {}) {
+export function resolveDocs(docs, { r0 = R0, r1 = R1, band = BAND, radiusMode = 'sqrt' } = {}) {
   const withRel = docs.map(d => ({ ...d, rel: 1 / (d.n_entities || 1), domain: midLevel(d.domain_path) }));
   const order = [...withRel].sort((a, b) => (b.rel - a.rel) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const n = order.length || 1;
   return order.map((d, i) => {
     const p = n > 1 ? i / (n - 1) : 0;
-    const rTarget = r0 + (r1 - r0) * Math.sqrt(p);
+    // 'sqrt' = equal-AREA density (edge-heavy per radius; good behind a partition).
+    // 'even' = equal count per radius band (rank-linear) — spreads docs evenly across
+    // the disk with NO clump at the rim, for the domain-free organic scatter.
+    const rTarget = r0 + (r1 - r0) * (radiusMode === 'even' ? p : Math.sqrt(p));
     const b0 = Math.max(r0, rTarget - band / 2), b1 = Math.min(r1, rTarget + band / 2);
     return { ...d, p, rTarget, band: [b0, b1] };
   });
@@ -385,6 +388,8 @@ export function drawGuard(components, { coherenceFloor = 0.35, minSectorCells = 
 export function layoutSegmentum(graph, config = {}) {
   const { points, anchors } = placeDocs(graph, config);
   const minForRaster = config.minForRaster ?? 20;
+  // placeOnly: the domain-free organic scatter — placement only, no territories.
+  if (config.placeOnly) return { mode: 'points', points, anchors };
   if (points.length < minForRaster) return { mode: 'points', points, anchors };
   const raster = rasterize(points, config);
   const clean = cleanupRegions(raster, config);
