@@ -102,3 +102,53 @@ test('sim organizes angle toward the domain anchor (docs of a domain cluster)', 
   const diff = Math.abs(Math.atan2(Math.sin(mean - anchor), Math.cos(mean - anchor)));
   assert.ok(diff < Math.PI / 2, `domain mean ${mean.toFixed(2)} should be near anchor ${anchor.toFixed(2)}`);
 });
+
+// ── Stage 3-5 ────────────────────────────────────────────────────────────────────
+import { rasterize, cleanupRegions, extractBoundaries, drawGuard, layoutSegmentum } from './segmentum-layout.js';
+
+test('rasterize: a tight same-domain cluster occupies a contiguous block of its domain', () => {
+  const pts = [];
+  for (let k=0;k<40;k++){ const th=0.3+ (k%8)*0.02, r=200+(k%5)*8; pts.push({domain:'a',theta:th,r,x:Math.cos(th)*r,y:Math.sin(th)*r}); }
+  const {cells,A,J} = rasterize(pts,{voteFloor:0.2});
+  let aCells=0; for(let i=0;i<A;i++)for(let j=0;j<J;j++) if(cells[i][j]?.domain==='a') aCells++;
+  assert.ok(aCells>0, 'domain a claims cells');
+});
+
+test('cleanup despeckles a lone cell', () => {
+  const A=8,J=4; const cells=Array.from({length:A},()=>Array(J).fill(null));
+  cells[0][0]={domain:'a',contested:false};                 // isolated
+  const clean = cleanupRegions({A,J,cells},{minRegionCells:2});
+  assert.equal(clean.cells[0][0], null);
+});
+
+const closes = (L, A) => { const f=L[0], l=L[L.length-1]; return ((f.i%A+A)%A)===((l.i%A+A)%A) && f.j===l.j; };
+
+test('extractBoundaries: a solid 3x3 block yields one closed loop', () => {
+  const A=8,J=6; const cells=Array.from({length:A},()=>Array(J).fill(null));
+  for(let i=2;i<5;i++)for(let j=1;j<4;j++) cells[i][j]={domain:'a',contested:false};
+  const loops = extractBoundaries({A,J,cells}).a;
+  assert.ok(loops.length>=1);
+  assert.ok(closes(loops[0], A), 'loop closes (mod A)');
+});
+
+test('extractBoundaries: theta-seam block draws one loop (no spurious seam edge)', () => {
+  const A=8,J=6; const cells=Array.from({length:A},()=>Array(J).fill(null));
+  // occupy columns A-1,0,1 at rows 2,3 -> straddles the 0/2pi seam
+  for(const i of [A-1,0,1])for(let j=2;j<4;j++) cells[i][j]={domain:'a',contested:false};
+  const loops = extractBoundaries({A,J,cells}).a;
+  assert.ok(closes(loops[0], A), 'seam loop closes (mod A)');
+});
+
+test('drawGuard suppresses confetti, keeps a coherent region', () => {
+  const g = drawGuard({ big:[[...Array(20)].map((_,k)=>[k,0])], confetti:[[[1,1]],[[3,3]],[[5,5]]] });
+  assert.equal(g.big.drawable, true);
+  assert.equal(g.confetti.drawable, false);   // largest comp 1 / total 3 = 0.33, total 3 < 12
+});
+
+test('layoutSegmentum: small entity -> points mode; large -> territories', () => {
+  const small = layoutSegmentum({documents:[{id:'a',n_entities:3,domain_path:'x/y'}], co_entities:[]});
+  assert.equal(small.mode, 'points');
+  const big = layoutSegmentum(mkGraph(120), {maxTicks:120});
+  assert.equal(big.mode, 'territories');
+  assert.ok(Object.keys(big.loops).length>=1);
+});

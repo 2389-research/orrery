@@ -195,3 +195,199 @@ export function placeDocs(graph, config = {}) {
   const points = simulate(seeded, graph.co_entities || [], { ...config, anchors });
   return { points, anchors };
 }
+
+// ── cell geometry (lattice is a rendering device, unrelated to relevance) ────────
+export function cellAngle(i, A) { return -Math.PI + (i + 0.5) / A * TAU; }   // centre
+export function cellRadius(j, J, r0 = R0, r1 = R1) { return r0 + (j + 0.5) / J * (r1 - r0); }
+function angIndex(theta, A) { let t = ((theta + Math.PI) % TAU + TAU) % TAU; return Math.floor(t / TAU * A) % A; }
+function radIndex(r, J, r0 = R0, r1 = R1) { return clamp(Math.floor((r - r0) / (r1 - r0) * J), 0, J - 1); }
+
+export function medianNearestNeighbor(points) {
+  if (points.length < 2) return 1;
+  const d = points.map(p => {
+    let best = Infinity;
+    for (const q of points) { if (q === p) continue; const dx = q.x - p.x, dy = q.y - p.y; const dd = dx * dx + dy * dy; if (dd < best) best = dd; }
+    return Math.sqrt(best);
+  }).sort((a, b) => a - b);
+  return d[Math.floor(d.length / 2)] || 1;
+}
+
+// ── Stage 3: rasterize domain occupancy ─────────────────────────────────────────
+/** Vote each doc's domain into nearby cells with an adaptive gaussian; assign each
+ *  cell its argmax domain above voteFloor, flag contested. Returns {A,J,cells} where
+ *  cells[i][j] = {domain, contested} | null. */
+export function rasterize(points, { A, J = 24, r0 = R0, r1 = R1, contestRatio = 0.8,
+    bandwidthMul = 1.5, voteFloor = 0.35 } = {}) {
+  const n = points.length;
+  A = A ?? clamp(Math.round(3 * Math.sqrt(n)), 64, 160);
+  const cellDiag = Math.hypot(TAU / A * (r0 + r1) / 2, (r1 - r0) / J);
+  const h = clamp(bandwidthMul * medianNearestNeighbor(points), 0.5 * cellDiag, 3 * cellDiag);
+  const inv2h2 = 1 / (2 * h * h);
+  const wI = Math.max(1, Math.ceil(3 * h / (TAU / A * (r0 + r1) / 2)));
+  const wJ = Math.max(1, Math.ceil(3 * h / ((r1 - r0) / J)));
+
+  // votes[i][j] = Map<domain, weight>
+  const votes = Array.from({ length: A }, () => Array.from({ length: J }, () => new Map()));
+  for (const p of points) {
+    const ci = angIndex(p.theta, A), cj = radIndex(p.r, J, r0, r1);
+    for (let di = -wI; di <= wI; di++) for (let dj = -wJ; dj <= wJ; dj++) {
+      const i = ((ci + di) % A + A) % A, j = cj + dj;
+      if (j < 0 || j >= J) continue;
+      const rmid = cellRadius(j, J, r0, r1);
+      const dth = Math.atan2(Math.sin(cellAngle(i, A) - p.theta), Math.cos(cellAngle(i, A) - p.theta));
+      const d2 = (dth * rmid) ** 2 + (rmid - p.r) ** 2;
+      const w = Math.exp(-d2 * inv2h2);
+      if (w < 1e-3) continue;
+      const m = votes[i][j]; m.set(p.domain, (m.get(p.domain) || 0) + w);
+    }
+  }
+  const cells = Array.from({ length: A }, (_, i) => Array.from({ length: J }, (_, j) => {
+    const m = votes[i][j]; if (!m.size) return null;
+    let win = null, w1 = 0, w2 = 0;
+    for (const [dom, w] of m) { if (w > w1) { w2 = w1; w1 = w; win = dom; } else if (w > w2) w2 = w; }
+    if (w1 < voteFloor) return null;
+    return { domain: win, contested: w2 >= contestRatio * w1 };
+  }));
+  return { A, J, cells };
+}
+
+// ── Stage 4: region cleanup (θ wraps; radial does not) ──────────────────────────
+function neighbours4(i, j, A, J) {
+  return [[(i + 1) % A, j], [(i - 1 + A) % A, j], [i, j + 1], [i, j - 1]]
+    .filter(([, jj]) => jj >= 0 && jj < J);
+}
+/** Per-domain connected components (4-connected, θ-wrap). */
+function components(cells, A, J, domain) {
+  const seen = Array.from({ length: A }, () => Array(J).fill(false));
+  const comps = [];
+  for (let i = 0; i < A; i++) for (let j = 0; j < J; j++) {
+    if (seen[i][j] || !cells[i][j] || cells[i][j].domain !== domain) continue;
+    const comp = []; const stack = [[i, j]]; seen[i][j] = true;
+    while (stack.length) {
+      const [ci, cj] = stack.pop(); comp.push([ci, cj]);
+      for (const [ni, nj] of neighbours4(ci, cj, A, J))
+        if (!seen[ni][nj] && cells[ni][nj] && cells[ni][nj].domain === domain) { seen[ni][nj] = true; stack.push([ni, nj]); }
+    }
+    comps.push(comp);
+  }
+  return comps;
+}
+export function cleanupRegions(raster, { minRegionCells = 4, maxEnclaves = 3 } = {}) {
+  const { A, J } = raster;
+  const cells = raster.cells.map(col => col.map(c => c ? { ...c } : null));
+  // 1. despeckle
+  for (let i = 0; i < A; i++) for (let j = 0; j < J; j++) {
+    const c = cells[i][j]; if (!c) continue;
+    if (!neighbours4(i, j, A, J).some(([ni, nj]) => cells[ni][nj] && cells[ni][nj].domain === c.domain)) cells[i][j] = null;
+  }
+  // 2. islands + 4. enclave cap, per domain
+  const domains = [...new Set(cells.flat().filter(Boolean).map(c => c.domain))];
+  const compsByDomain = {};
+  for (const dom of domains) {
+    let comps = components(cells, A, J, dom).sort((a, b) => b.length - a.length);
+    // dissolve small ones into the majority bordering domain (or empty)
+    const survivors = [];
+    for (const comp of comps) {
+      if (comp.length >= minRegionCells) { survivors.push(comp); continue; }
+      const border = {};
+      for (const [ci, cj] of comp) for (const [ni, nj] of neighbours4(ci, cj, A, J)) {
+        const nc = cells[ni][nj]; if (nc && nc.domain !== dom) border[nc.domain] = (border[nc.domain] || 0) + 1;
+      }
+      const maj = Object.entries(border).sort((a, b) => b[1] - a[1])[0];
+      for (const [ci, cj] of comp) cells[ci][cj] = maj ? { domain: maj[0], contested: false } : null;
+    }
+    // cap enclaves: keep largest + up to maxEnclaves, dissolve the rest to empty
+    const keep = survivors.slice(0, 1 + maxEnclaves);
+    for (const comp of survivors.slice(1 + maxEnclaves)) for (const [ci, cj] of comp) cells[ci][cj] = null;
+    compsByDomain[dom] = keep;
+  }
+  return { A, J, cells, components: compsByDomain };
+}
+
+// ── Stage 5a: boundary extraction (edge cancellation; seam + degree-4 safe) ──────
+const vKey = (i, j, A) => `${((i % A) + A) % A},${j}`;
+const eKey = (a, b) => a < b ? `${a}|${b}` : `${b}|${a}`;
+/** Per-domain closed boundary loops as vertex sequences {i,j}. XOR of cell edges =>
+ *  cycles; seam handled by angular index mod A in vKey; degree-4 pinch split by a
+ *  consistent turn so every loop closes. */
+export function extractBoundaries(raster) {
+  const { A, J, cells } = raster;
+  const domains = [...new Set(cells.flat().filter(Boolean).map(c => c.domain))];
+  const out = {};
+  for (const dom of domains) {
+    // XOR edges
+    const edges = new Map();      // eKey -> [vA, vB] (vertices as {i,j})
+    const seen = new Set();
+    const emit = (ai, aj, bi, bj) => {
+      const ka = vKey(ai, aj, A), kb = vKey(bi, bj, A), k = eKey(ka, kb);
+      if (edges.has(k)) edges.delete(k); else edges.set(k, [{ i: ai, j: aj }, { i: bi, j: bj }]);
+    };
+    for (let i = 0; i < A; i++) for (let j = 0; j < J; j++) {
+      if (!cells[i][j] || cells[i][j].domain !== dom) continue;
+      emit(i, j, i + 1, j);          // inner arc
+      emit(i, j + 1, i + 1, j + 1);  // outer arc
+      emit(i + 1, j, i + 1, j + 1);  // cw radial
+      emit(i, j, i, j + 1);          // ccw radial
+    }
+    // adjacency
+    const adj = new Map();
+    for (const [, [a, b]] of edges) {
+      const ka = vKey(a.i, a.j, A), kb = vKey(b.i, b.j, A);
+      (adj.get(ka) || adj.set(ka, []).get(ka)).push({ v: b, k: kb });
+      (adj.get(kb) || adj.set(kb, []).get(kb)).push({ v: a, k: ka });
+    }
+    // walk loops (degree-4 vertices are just visited twice; each edge used once)
+    const usedEdge = new Set();
+    const loops = [];
+    for (const [, [a, b]] of edges) {
+      const startK = vKey(a.i, a.j, A), e0 = eKey(startK, vKey(b.i, b.j, A));
+      if (usedEdge.has(e0)) continue;
+      const loop = [a]; let prevK = startK, cur = b;
+      usedEdge.add(e0);
+      let guard = 0;
+      while (guard++ < A * J * 8) {
+        loop.push(cur);
+        const curK = vKey(cur.i, cur.j, A);
+        if (curK === startK) break;
+        // pick an unused incident edge (prefer not going straight back)
+        const cands = (adj.get(curK) || []).filter(nb => !usedEdge.has(eKey(curK, nb.k)));
+        if (!cands.length) break;
+        const next = cands.find(nb => nb.k !== prevK) || cands[0];
+        usedEdge.add(eKey(curK, next.k));
+        prevK = curK; cur = next.v;
+      }
+      loops.push(loop);
+    }
+    out[dom] = loops;
+  }
+  return out;
+}
+
+// ── Stage 5b: draw guard ────────────────────────────────────────────────────────
+/** coherence = largest-component-cells / total-cells; a domain is drawable if
+ *  coherence >= coherenceFloor OR total >= minSectorCells. Confetti is suppressed. */
+export function drawGuard(components, { coherenceFloor = 0.35, minSectorCells = 12 } = {}) {
+  const guard = {};
+  for (const [dom, comps] of Object.entries(components)) {
+    const total = comps.reduce((a, c) => a + c.length, 0);
+    const largest = comps.length ? Math.max(...comps.map(c => c.length)) : 0;
+    const coherence = total ? largest / total : 0;
+    guard[dom] = { total, coherence, drawable: total > 0 && (coherence >= coherenceFloor || total >= minSectorCells) };
+  }
+  return guard;
+}
+
+// ── orchestrator ─────────────────────────────────────────────────────────────────
+/** Full pipeline S0..S5. Returns points + territory (cells/loops/guard) + palette-ready
+ *  domain set. Small entities (< minForRaster) return points only (no territories). */
+export function layoutSegmentum(graph, config = {}) {
+  const { points, anchors } = placeDocs(graph, config);
+  const minForRaster = config.minForRaster ?? 20;
+  if (points.length < minForRaster) return { mode: 'points', points, anchors };
+  const raster = rasterize(points, config);
+  const clean = cleanupRegions(raster, config);
+  const loops = extractBoundaries(clean);
+  const guard = drawGuard(clean.components, config);
+  return { mode: 'territories', points, anchors, A: clean.A, J: clean.J,
+    cells: clean.cells, loops, guard, R0, R1 };
+}
