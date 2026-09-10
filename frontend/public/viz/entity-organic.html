@@ -272,15 +272,24 @@ function buildStarView(graph) {
       ? Math.atan2(c.gy - cgy, c.gx - cgx)
       : (-Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU),
   }));
-  // 2) Angular equalization. openai's co-entities nearly all lie in ONE galaxy direction
-  // (AI/software), so honoring raw degrees leaves half the disk empty. Direction matters
-  // as ORDER, not as absolute degrees — so sort by bearing and respread evenly around the
-  // full circle. Galaxy adjacency (who sits next to whom) is preserved; the occupied arc
-  // stretches to 360deg and the docs pulled toward them fill the whole space.
+  // 2) Blended angular spread. openai's co-entities nearly all lie in ONE galaxy direction
+  // (AI/software), so honoring raw degrees leaves half the disk empty; but pure rank
+  // equalization evens out the density and loses the signal that that region is crowded.
+  // So blend each co-entity's UNIFORM rank position with its NORMALIZED raw galaxy bearing
+  // (BLEND = equalized share), keeping order intact, then renormalize the blend to span the
+  // FULL circle. Result: all 360deg is used AND spacing stays data-driven — co-entities
+  // bunch where their galaxy region is genuinely dense, with gaps where it is sparse.
+  const BLEND = 0.6;                                     // 0.6 uniform + 0.4 raw galaxy density
   const ordered = [...rawBearing].sort((u, v) => u.a - v.a);
+  const N = ordered.length || 1;
+  const rawMin = ordered[0]?.a ?? 0, rawMax = ordered[N - 1]?.a ?? 1;
+  const rawRange = (rawMax - rawMin) || 1;
+  const pos = ordered.map((p, i) => BLEND * ((i + 0.5) / N) + (1 - BLEND) * ((p.a - rawMin) / rawRange));
+  const pMin = pos[0] ?? 0, pMax = pos[N - 1] ?? 1, pRange = (pMax - pMin) || 1;
   const coPos = new Map();
   ordered.forEach((p, i) => {
-    const a = -Math.PI + (i + 0.5) / ordered.length * TAU;
+    const t = (pos[i] - pMin) / pRange;                 // 0..1 across the full circle
+    const a = -Math.PI + t * TAU;
     coPos.set(p.id, { angle: a, x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
   });
   const docCo = new Map();                              // docId -> [{id, w}]
