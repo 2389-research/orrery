@@ -265,12 +265,23 @@ function buildStarView(graph) {
   // direction preserves where it sits on the galaxy map (galaxy layout isn't even — it's
   // the domain UMAP). Co-entities with no galaxy position fall back to an even spread.
   const cgx = graph.entity?.gx ?? 0.5, cgy = graph.entity?.gy ?? 0.5;
-  const coPos = new Map();
-  coAll.forEach((c, i) => {
-    const a = (c.gx != null && c.gy != null && (c.gx !== cgx || c.gy !== cgy))
+  // 1) Raw galaxy bearing per co-entity (the direction it lies from the core on the map).
+  const rawBearing = coAll.map((c, i) => ({
+    id: c.id,
+    a: (c.gx != null && c.gy != null && (c.gx !== cgx || c.gy !== cgy))
       ? Math.atan2(c.gy - cgy, c.gx - cgx)
-      : (-Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU);
-    coPos.set(c.id, { angle: a, x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
+      : (-Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU),
+  }));
+  // 2) Angular equalization. openai's co-entities nearly all lie in ONE galaxy direction
+  // (AI/software), so honoring raw degrees leaves half the disk empty. Direction matters
+  // as ORDER, not as absolute degrees — so sort by bearing and respread evenly around the
+  // full circle. Galaxy adjacency (who sits next to whom) is preserved; the occupied arc
+  // stretches to 360deg and the docs pulled toward them fill the whole space.
+  const ordered = [...rawBearing].sort((u, v) => u.a - v.a);
+  const coPos = new Map();
+  ordered.forEach((p, i) => {
+    const a = -Math.PI + (i + 0.5) / ordered.length * TAU;
+    coPos.set(p.id, { angle: a, x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
   });
   const docCo = new Map();                              // docId -> [{id, w}]
   for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
