@@ -276,11 +276,18 @@ function buildStarView(graph) {
   for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
     if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push({ id: c.id, w: c.weight || 1 });
   }
-  // Doc position = cube-weighted centroid of its co-entities' rim positions + jitter.
+  // Doc position = EQUAL-weight centroid of the co-entities it actually shares + jitter.
+  // Each shared co-entity is one honest tie from this doc (shared_doc_ids is membership,
+  // not per-doc strength), so the doc falls to the true balance point of its connections.
+  // We deliberately do NOT cube here: the galaxy's _makeEntityNode cubes domain-membership
+  // counts (tiny dynamic range, breaks symmetry), but co-entity weights are GLOBAL
+  // co-occurrence counts spanning ~40x — cubing lets the single most globally-popular
+  // co-entity (e.g. anthropic) own ~64% of the pull and drag the doc against its own
+  // visible co-mentions.
   for (const d of (graph.documents || [])) {
     const cs = docCo.get(d.id) || [];
     let sx = 0, sy = 0, tw = 0;
-    for (const { id, w } of cs) { const p = coPos.get(id); if (!p) continue; const cw = w * w * w; sx += p.x * cw; sy += p.y * cw; tw += cw; }
+    for (const { id } of cs) { const p = coPos.get(id); if (!p) continue; sx += p.x; sy += p.y; tw += 1; }
     let dx, dy;
     if (tw > 0) { dx = sx / tw; dy = sy / tw; }
     else { const a = hash01(d.id) * TAU; const r = 200 + hash01(d.id + 'r') * 300; dx = cx + Math.cos(a) * r; dy = cy + Math.sin(a) * r; }
