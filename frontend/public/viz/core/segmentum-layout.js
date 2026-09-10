@@ -163,14 +163,16 @@ export function buildDocEdges(docs, coEntities) {
  *  domain-anchor pull (primary angular organizer), doc<->doc attraction, collision.
  *  No Math.random; degenerate collisions separated by id order -> byte-deterministic. */
 export function simulate(docs, coEntities, { maxTicks = 300, dotR = 6, pad = 2,
-    kAnchor = 0.02, kLink = 0.04, kBand = 0.15, anchors = {} } = {}) {
+    kAnchor = 0.02, kLink = 0.04, kBand = 0.15, kRepel = 0, repelR = 0, anchors = {} } = {}) {
   const edges = buildDocEdges(docs, coEntities);
   const P = docs.map(d => ({ ...d, x: Math.cos(d.theta) * d.r, y: Math.sin(d.theta) * d.r }));
   const byId = new Map(P.map(p => [p.id, p]));
+  const rr2 = repelR * repelR;
   for (let t = 0; t < maxTicks; t++) {
     const fx = new Map(), fy = new Map();
     const add = (id, ax, ay) => { fx.set(id, (fx.get(id) || 0) + ax); fy.set(id, (fy.get(id) || 0) + ay); };
-    for (const p of P) {
+    // domain-anchor pull (skipped when kAnchor is 0 — the domain-free organic view)
+    if (kAnchor > 0) for (const p of P) {
       const th = anchors[p.domain]; if (th == null) continue;
       const ax = Math.cos(th) * (R1 + R_ANCHOR_MARGIN), ay = Math.sin(th) * (R1 + R_ANCHOR_MARGIN);
       add(p.id, (ax - p.x) * kAnchor, (ay - p.y) * kAnchor);
@@ -178,6 +180,13 @@ export function simulate(docs, coEntities, { maxTicks = 300, dotR = 6, pad = 2,
     for (const p of P) for (const [q, w] of edges.get(p.id)) {
       const o = byId.get(q);
       add(p.id, (o.x - p.x) * kLink * Math.min(1, w / 3), (o.y - p.y) * kLink * Math.min(1, w / 3));
+    }
+    // pairwise repulsion — spreads docs to FILL 2D area (so labels aren't stacked).
+    // Only within repelR so it stays local and O(n²) stays cheap enough at ~600 docs.
+    if (kRepel > 0) for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+      const a = P[i], b = P[j]; let dx = a.x - b.x, dy = a.y - b.y; const d2 = dx * dx + dy * dy;
+      if (d2 > rr2 || d2 < 1e-9) { if (d2 < 1e-9) { dx = (a.id < b.id ? 1 : -1); dy = 0; } else continue; }
+      const f = kRepel / (d2 + 100); add(a.id, dx * f, dy * f); add(b.id, -dx * f, -dy * f);
     }
     for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
       const a = P[i], b = P[j]; let dx = b.x - a.x, dy = b.y - a.y; let dist = Math.hypot(dx, dy);

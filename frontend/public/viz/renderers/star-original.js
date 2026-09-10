@@ -136,12 +136,15 @@ export function drawDocuments(ctx, docs, tick, hoveredId, view) {
     ctx.lineTo(px + sz * 0.2, py + sz * 0.15);
     ctx.stroke();
 
-    // Label — always show (truncated)
-    const label = doc.title.length > 30 ? doc.title.slice(0, 28) + '…' : doc.title;
-    ctx.fillStyle = `rgba(255,230,180,${(hov ? 0.9 : 0.45) * alpha})`;
-    ctx.font = `${hov ? 16 : 13}px 'Courier New', monospace`;
-    ctx.textAlign = 'center';
-    ctx.fillText(label, px, py + sz * 2 + 10);
+    // Label — HOVER ONLY (borrowed from the repo view: titles are hidden until hover,
+    // which keeps a dense field of docs legible instead of a wall of overlapping text).
+    if (hov) {
+      const label = doc.title.length > 30 ? doc.title.slice(0, 28) + '…' : doc.title;
+      ctx.fillStyle = `rgba(255,230,180,0.95)`;
+      ctx.font = `16px 'Courier New', monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText(label, px, py + sz * 2 + 10);
+    }
   }
 }
 

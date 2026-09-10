@@ -58,7 +58,7 @@ import { Camera } from './core/camera.js';
 import { sin, cos, hexRGB, rgba, sqrt, clamp, random, hypot, TAU, PI } from './core/utils.js';
 import { drawBackground } from './renderers/galaxy.js';
 import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar } from './renderers/star-original.js';
-import { placeDocs } from './core/segmentum-layout.js';
+import { resolveDocs, seed, simulate } from './core/segmentum-layout.js';
 
 const canvas = document.getElementById('c');
 const camera = new Camera();
@@ -256,7 +256,19 @@ function buildStarView(graph) {
   // Place documents by RELEVANCE (radius, value-normalized so only the least-relevant
   // sits at the rim; ties share a radius) and CONNECTIVITY (angle, from the force sim).
   // No domains, no segmentum — just the existing entity viz with better 2D placement.
-  const placed = placeDocs(graph, { radiusMode: 'value', maxTicks: 260 });
+  // Force layout over a SET area (max radius = RMAX; the least-relevant doc reaches the
+  // rim). Radius = value-normalized relevance; angle/spread come from a real force sim —
+  // NO domain anchors (kAnchor 0), so each doc is pulled only by its OWN co-entity links
+  // (kLink) and pushed apart by repulsion (kRepel) to FILL the area. A loose radial band
+  // + hashed jitter break the relevance ties so no two docs share an exact position.
+  const RMIN = 130, RMAX = 900;
+  const docs0 = resolveDocs(graph.documents || [], { radiusMode: 'value', r0: RMIN, r1: RMAX, band: 260 });
+  // hashed radial jitter so ties don't stack on one arc
+  for (const d of docs0) { const jz = (parseInt(d.id.replace(/\D/g,'').slice(-4)||'0',10)%200)/200 - 0.5; d.rTarget = Math.max(RMIN, Math.min(RMAX, d.rTarget + jz*90)); d.band=[Math.max(RMIN,d.rTarget-130), Math.min(RMAX,d.rTarget+130)]; }
+  const seeded = seed(docs0, {});                       // empty anchors -> hashed angular seed (spread)
+  const placed = { points: simulate(seeded, graph.co_entities || [], {
+    maxTicks: 320, kAnchor: 0, kLink: 0.05, kRepel: 700, repelR: 200, kBand: 0.05, dotR: 8, pad: 3,
+  }) };
   for (const pd of placed.points) {
     const dx = cx + cos(pd.theta) * pd.r;
     const dy = cy + sin(pd.theta) * pd.r;
@@ -287,7 +299,7 @@ function buildStarView(graph) {
     ? sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1
     : 0;
 
-  const coRing = 380;
+  const coRing = 980;   // beyond the doc area (RMAX=900) so co-entities ring the rim
   for (let i = 0; i < sortedCo.length; i++) {
     const co = sortedCo[i];
     const sharedDocs = (co.shared_doc_ids || []).map(id => docById[id]).filter(Boolean);
@@ -328,7 +340,7 @@ function buildStarView(graph) {
 
   // Repo nodes — outer periphery ring (beyond co-entities), gold tint, so this
   // reads as "the collection(s) this entity belongs to". Click navigates to collection.html.
-  const repoRing = 480;
+  const repoRing = 1080; // collections beyond the co-entities
   for (let i = 0; i < collectionList.length; i++) {
     const rp = collectionList[i];
     const rAngle = (i / Math.max(collectionList.length, 1)) * TAU - PI / 2;
