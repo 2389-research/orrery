@@ -1,6 +1,11 @@
 # Entity Star Page — Orbital Layout by Connection Strength
 
-**Status:** Design
+**Status:** SUPERSEDED by `2026-09-10-entity-segmentum-view-design.md` (2026-09-10). The
+arc-packing approach here made sectors a layout primitive; live feedback showed that
+produces rigid, dead-space pie-slices. v2 inverts it: place documents first, derive
+sectors after by rasterizing domain occupancy. The **backend work in this doc still
+stands** (`get_star_graph` payload additions, `domain_palette`); only the client
+layout is replaced.
 **Date:** 2026-09-10
 **Scope:** `frontend/public/viz/star.html`, `frontend/public/viz/renderers/star.js`, `orchestrator/src/repositories/sqlite_store.py::get_star_graph`, `orchestrator/src/routes/entities.py`.
 
