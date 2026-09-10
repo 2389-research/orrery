@@ -23,6 +23,21 @@ Revised guiding invariant:
 
 Two human decisions still hold: distance uses the metric we already compute (entity-share); **no global-galaxy layout is consumed** for placement (rev 2 anchor angles come from *local* domain co-occurrence; a later global-blend option is architected as a swap, see Stage 1).
 
+### Empirical validation (Variant C prototyped on real data before this spec was finalized)
+
+Stages 0–3 were prototyped and run read-only against the real graph across seven entities (openai 622, gemini 640, fastapi 209, docker 132, github 123, qualitative-feedback 111, prompt-engineering 10), comparing three placement models. **The domain-anchor + soft-band model (this spec) is the one that works, decisively:**
+
+- **openai:** 6 coherent / 9 confetti domains under the hard-pin models → **21 drawable / 0 confetti** under domain+band; orientation coherence 61% → **96.6%**; contested 10.2% → **3.7%**.
+- **gemini:** 2/6 → **15/0**; 68% → **98.9%**; 9.7% → **1.9%**.
+- Every real secondary domain that fractured into 15–41 islands under a hard radial pin collapses to 1–4 contiguous components once radius is a band; the draw guard suppresses **nothing** on any tested entity (confetti eliminated at placement, not by the guard).
+
+Confirmed mechanism and caveats now baked into this spec:
+- The **±BAND/2 of radial slack is what does the work** — many docs settle at their band edge (measured `max_radial_dev = BAND/2` on the large/medium entities). Radius is honest to the band, not the pixel (Acceptance #1).
+- **Dominant-domain de-swamping is intended:** a domain that blanketed the disk under a hard pin (gemini `testing-qa`: 677 cells) is compressed to a real territory (65 cells) under C. Territory area therefore does not track doc count linearly; if proportional area is ever wanted it needs an explicit term (out of scope).
+- **Fiedler sign is arbitrary (mirror symmetry)** — deterministic within a run, so it satisfies determinism; absolute orientation remains meaningless by design.
+- Blank-space (Acceptance #5) was not re-measured under C (15–21 populated wedges make a >30° gap unlikely); the build must confirm it in diagnostics.
+- Largest real entity is 640 docs; the n=1200 acceptance figures are extrapolated from the 620–640 runs.
+
 ---
 
 ## Terminology
