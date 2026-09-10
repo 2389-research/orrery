@@ -58,7 +58,7 @@ import { Camera } from './core/camera.js';
 import { sin, cos, hexRGB, rgba, sqrt, clamp, random, hypot, TAU, PI } from './core/utils.js';
 import { drawBackground } from './renderers/galaxy.js';
 import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar } from './renderers/star-original.js';
-import { resolveDocs, seed, simulate } from './core/segmentum-layout.js';
+import { resolveDocs, seed, simulate, fiedlerOrder } from './core/segmentum-layout.js';
 
 const canvas = document.getElementById('c');
 const camera = new Camera();
@@ -270,24 +270,39 @@ function buildStarView(graph) {
   // tied to co-entities on opposite sides lands between them, so docs with different
   // co-entity mixes fan out into 2D instead of collapsing onto one radial spoke.
   const coAll = (graph.co_entities || []).filter(c => c.type !== 'Domain');
-  const coAngle = new Map();
-  coAll.forEach((c, i) => coAngle.set(c.id, -Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU));
+  const RIM = RMAX + 80;
   const docCo = new Map();                              // docId -> [coId...]
   for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
     if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push(c.id);
   }
+  // Order co-entities by their OWN co-occurrence (which co-entities share docs), via
+  // Fiedler — so related co-entities sit ADJACENT on the rim and a doc's connections
+  // point to a coherent arc, not scattered all over. Fixed rim anchors the docs spring to.
+  const coIds = coAll.map(c => c.id), coIdx = new Map(coIds.map((id, i) => [id, i]));
+  const cw = coIds.map(() => coIds.map(() => 0));
+  for (const [, cids] of docCo) for (let a = 0; a < cids.length; a++) for (let b = a + 1; b < cids.length; b++) {
+    const i = coIdx.get(cids[a]), j = coIdx.get(cids[b]); cw[i][j]++; cw[j][i]++;
+  }
+  const coOrder = (coIds.length > 2 && fiedlerOrder(coIds, cw)) || coIds;
+  const coAngle = new Map(), coPos = new Map();
+  coOrder.forEach((id, i) => {
+    const a = -Math.PI / 2 + (i / coOrder.length) * TAU;
+    coAngle.set(id, a); coPos.set(id, { x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
+  });
+  // Seed each doc at the circular MEAN of its co-entities' rim angles.
   for (const d of docs0) {
     const cos_ = docCo.get(d.id) || [];
     let sx = 0, sy = 0;
     for (const cid of cos_) { const a = coAngle.get(cid); sx += Math.cos(a); sy += Math.sin(a); }
-    const jitter = ((parseInt(d.id.replace(/\D/g, '').slice(-3) || '0', 10) % 100) / 100 - 0.5) * 0.6;
-    d.theta = (sx * sx + sy * sy > 1e-6) ? Math.atan2(sy, sx) + jitter : (Math.random() * TAU);
+    d.theta = (sx * sx + sy * sy > 1e-6) ? Math.atan2(sy, sx) : (Math.random() * TAU);
     d.r = d.rTarget;
   }
-  // Refine with repulsion (spread within a neighbourhood) + co-entity links; no domain
-  // anchor. The membership-mean seed already gives the 2D angular structure.
+  // Spring embedder: each doc pulled toward EACH co-entity it connects to (kCo, fixed
+  // rim anchors) → settles at the real balance of its connections; repulsion spreads;
+  // radius stays relevance-banded. This is what makes a doc's spot its NATURAL point.
   const placed = { points: simulate(docs0, coAll, {
-    maxTicks: 200, kAnchor: 0, kLink: 0.03, kRepel: 900, repelR: 220, kBand: 0.05, dotR: 8, pad: 3,
+    maxTicks: 260, kAnchor: 0, kLink: 0.015, kCo: 0.06, coPos, docCo,
+    kRepel: 900, repelR: 220, kBand: 0.05, dotR: 8, pad: 3,
   }) };
   for (const pd of placed.points) {
     const dx = cx + cos(pd.theta) * pd.r;
@@ -319,24 +334,12 @@ function buildStarView(graph) {
     ? sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1
     : 0;
 
-  const coRing = 980;   // beyond the doc area (RMAX=900) so co-entities ring the rim
   for (let i = 0; i < sortedCo.length; i++) {
     const co = sortedCo[i];
-    const sharedDocs = (co.shared_doc_ids || []).map(id => docById[id]).filter(Boolean);
-
-    let angle;
-    if (sharedDocs.length > 0) {
-      // Average angle of shared docs — cluster near them
-      let sx = 0, sy = 0;
-      for (const sd of sharedDocs) { sx += cos(sd.angle); sy += sin(sd.angle); }
-      angle = Math.atan2(sy, sx);
-      angle += (random() - 0.5) * 0.5;
-    } else {
-      angle = i * 2.399963;
-    }
-
-    const wNorm = co.weight / maxWeight;
-    const r = coRing - wNorm * 80 + (random() - 0.5) * 50;
+    // Fixed Fiedler rim position — the SAME anchor the docs sprang toward, so a doc's
+    // hover-lines point straight at the co-entities it actually connects to.
+    const angle = coAngle.has(co.id) ? coAngle.get(co.id) : (i * 2.399963);
+    const r = RIM + 40 + (i % 2) * 22;   // slight ring thickness so labels don't collide
 
     coEntities.push({
       id: co.id,

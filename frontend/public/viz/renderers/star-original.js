@@ -297,7 +297,7 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, hovered
   // a line crosses the viewport — so zooming in made the center's spokes disappear.
   for (const doc of docs) {
     const lit = hovCenter || (hovDoc && doc.id === hovDoc.id);
-    if (!lit && _culled(view, doc._px, doc._py) && _culled(view, centerX, centerY)) continue;
+    if (!lit) continue;   // connections shown ONLY for the hovered node (no resting spokes)
     ctx.strokeStyle = `rgba(255,200,120,${lit ? 0.35 : 0.04})`;
     ctx.lineWidth = lit ? 1.8 : 0.5;
     ctx.setLineDash([3, 8]);
@@ -316,8 +316,8 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, hovered
     for (const docId of co.sharedDocIds) {
       const doc = docIndex ? docIndex.get(docId) : docs.find(d => d.id === docId);
       if (!doc) continue;
-      const lit = hovCenter || coHov || (hovDoc && doc.id === hovDoc.id);
-      if (!lit && _culled(view, doc._px, doc._py) && _culled(view, co._px, co._py)) continue;
+      const lit = coHov || (hovDoc && doc.id === hovDoc.id);
+      if (!lit) continue;   // hover-only
       const tc = typeColor(co.type);
       const [rc, gc, bc] = hexRGB(tc);
       ctx.strokeStyle = rgba(rc, gc, bc, lit ? 0.30 : 0.035);

@@ -163,7 +163,8 @@ export function buildDocEdges(docs, coEntities) {
  *  domain-anchor pull (primary angular organizer), doc<->doc attraction, collision.
  *  No Math.random; degenerate collisions separated by id order -> byte-deterministic. */
 export function simulate(docs, coEntities, { maxTicks = 300, dotR = 6, pad = 2,
-    kAnchor = 0.02, kLink = 0.04, kBand = 0.15, kRepel = 0, repelR = 0, anchors = {} } = {}) {
+    kAnchor = 0.02, kLink = 0.04, kBand = 0.15, kRepel = 0, repelR = 0, anchors = {},
+    kCo = 0, coPos = null, docCo = null } = {}) {
   const edges = buildDocEdges(docs, coEntities);
   const P = docs.map(d => ({ ...d, x: Math.cos(d.theta) * d.r, y: Math.sin(d.theta) * d.r }));
   const byId = new Map(P.map(p => [p.id, p]));
@@ -180,6 +181,15 @@ export function simulate(docs, coEntities, { maxTicks = 300, dotR = 6, pad = 2,
     for (const p of P) for (const [q, w] of edges.get(p.id)) {
       const o = byId.get(q);
       add(p.id, (o.x - p.x) * kLink * Math.min(1, w / 3), (o.y - p.y) * kLink * Math.min(1, w / 3));
+    }
+    // Spring each doc toward EACH co-entity it connects to (co-entities are fixed rim
+    // anchors). A doc settles at the balance of its real connections — its natural point
+    // — rather than at a bland membership-mean seed. Split across its co-entities so a
+    // highly-connected doc isn't yanked harder than a sparse one.
+    if (kCo > 0 && coPos && docCo) for (const p of P) {
+      const cids = docCo.get(p.id); if (!cids || !cids.length) continue;
+      const k = kCo / cids.length;
+      for (const cid of cids) { const c = coPos.get(cid); if (c) add(p.id, (c.x - p.x) * k, (c.y - p.y) * k); }
     }
     // pairwise repulsion — spreads docs to FILL 2D area (so labels aren't stacked).
     // Only within repelR so it stays local and O(n²) stays cheap enough at ~600 docs.
