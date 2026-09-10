@@ -147,7 +147,7 @@ async function loadData() {
     return;
   }
   try {
-    const graph = await fetch(`${API_URL}/entities/${entityId}/star-graph?co_limit=30`, { headers: fetchHeaders }).then(r => r.json());
+    const graph = await fetch(`${API_URL}/entities/${entityId}/star-graph?co_limit=150`, { headers: fetchHeaders }).then(r => r.json());
     buildStarView(graph);
   } catch (err) {
     console.error('Star view: load failed', err);

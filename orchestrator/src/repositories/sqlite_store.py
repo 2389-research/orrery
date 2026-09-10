@@ -555,7 +555,7 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         """).fetchall()
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
-    def get_star_graph(self, entity_id, co_limit=30):
+    def get_star_graph(self, entity_id, co_limit=150):
         # Entity info — an invalidated (soft-deleted) entity has no star graph.
         entity = self._conn.execute(
             "SELECT id, canonical_name, type FROM entities WHERE id = ? AND invalid_at IS NULL",
@@ -564,14 +564,42 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         if not entity:
             return None
 
-        # Documents
+        # Documents — with primary domain and the active-entity count per doc (the
+        # share denominator the orbital layout needs). domain_path comes from a
+        # correlated SUBQUERY, not a JOIN: (document_id, domain_path) is the PK but
+        # is_primary is an unconstrained flag, so a JOIN could multiply a doc row if a
+        # doc ever had two primaries. The subquery + LIMIT 1 can never multiply rows.
+        # domain_path is None when a doc has no primary domain → client greys it.
         doc_rows = self._conn.execute("""
-            SELECT DISTINCT d.id, d.title, d.content_type FROM entity_sources es
-            JOIN documents d ON es.document_id = d.id WHERE es.entity_id = ? AND d.invalid_at IS NULL
+            SELECT DISTINCT d.id, d.title, d.content_type,
+                   (SELECT dd.domain_path FROM document_domains dd
+                     WHERE dd.document_id = d.id AND dd.is_primary = 1 LIMIT 1) AS domain_path
+            FROM entity_sources es
+            JOIN documents d ON es.document_id = d.id
+            WHERE es.entity_id = ? AND d.invalid_at IS NULL
             ORDER BY d.title
         """, (entity_id,)).fetchall()
         doc_ids = [r["id"] for r in doc_rows]
-        documents = [{"id": r["id"], "title": r["title"], "content_type": r["content_type"] or "text"} for r in doc_rows]
+
+        # n_entities per doc: distinct ACTIVE entities extracted from that doc.
+        n_entities = {}
+        if doc_ids:
+            ph = ",".join("?" * len(doc_ids))
+            for r in self._conn.execute(f"""
+                SELECT es.document_id, COUNT(DISTINCT es.entity_id) AS n
+                FROM entity_sources es
+                JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
+                WHERE es.document_id IN ({ph})
+                GROUP BY es.document_id
+            """, doc_ids):
+                n_entities[r["document_id"]] = r["n"]
+
+        documents = [{
+            "id": r["id"], "title": r["title"],
+            "content_type": r["content_type"] or "text",
+            "domain_path": r["domain_path"],
+            "n_entities": n_entities.get(r["id"], 1),   # >=1: the entity itself
+        } for r in doc_rows]
 
         # Co-entities
         co_rows = self._conn.execute("""
@@ -605,11 +633,18 @@ class SQLiteRelationshipRepository(RelationshipRepository):
             "shared_doc_ids": list(set(shared_docs.get(r["id"], []))),
         } for r in co_rows]
 
+        from ..pipeline.graph_snapshot import domain_palette
+        palette = domain_palette(self._conn)
+        # Filter to the leaf domains actually present on this star.
+        present = {r["domain_path"] for r in doc_rows if r["domain_path"]}
+        palette = {p: palette[p] for p in present if p in palette}
+
         return {
             "entity": {"id": entity["id"], "canonical_name": entity["canonical_name"],
                         "type": entity["type"], "source_count": len(doc_ids)},
             "documents": documents,
             "co_entities": co_entities,
+            "palette": palette,
         }
 
     def update_entity_references(self, from_id, to_id):

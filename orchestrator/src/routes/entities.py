@@ -33,7 +33,7 @@ def get_cooccurrences(entity_id: str, limit: int = 10, auth: AuthStore = Depends
 
 
 @router.get("/entities/{entity_id}/star-graph")
-def get_star_graph(entity_id: str, co_limit: int = 30, auth: AuthStore = Depends(get_auth_store)):
+def get_star_graph(entity_id: str, co_limit: int = 150, auth: AuthStore = Depends(get_auth_store)):
     store = auth.store
     result = store.relationships.get_star_graph(entity_id, co_limit=co_limit)
     if not result:

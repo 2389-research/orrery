@@ -106,6 +106,30 @@ def assign_domain_colors(domains: list[dict]) -> dict[str, str]:
     return color_map
 
 
+def domain_palette(conn) -> dict[str, str]:
+    """The domain→hex map, computed over the SAME domain set the galaxy uses.
+
+    `assign_domain_colors` is set-dependent (branch_level, slice_size and each
+    family's golden-ratio index all derive from the input list), so any consumer
+    that wants to agree with the galaxy MUST feed it the identical set: domains with
+    document_count >= 1, ordered by path. This is that single source — used by the
+    galaxy payload (graph_v5) and the star page (get_star_graph) so the two cannot
+    drift.
+    """
+    rows = conn.execute(
+        "SELECT path FROM domains WHERE document_count >= 1 ORDER BY path"
+    ).fetchall()
+    domains = [{"path": r["path"]} for r in rows]
+    palette = assign_domain_colors(domains)
+    # Region fallback, identical to the galaxy's (graph_v5): a top-level region key so
+    # a node with no exact-path colour still gets its family hue.
+    for d in domains:
+        region = d["path"].split("/")[0]
+        if region not in palette:
+            palette[region] = palette.get(d["path"], "#81d4fa")
+    return palette
+
+
 def _circular_collection_positions(collections: list[dict], missing: list[dict]) -> dict:
     positions = {}
     for i, coll in enumerate(missing):
