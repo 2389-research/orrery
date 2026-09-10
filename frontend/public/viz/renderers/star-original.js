@@ -175,8 +175,9 @@ export function drawCoEntities(ctx, coEntities, tick, hoveredId, view) {
     ctx.drawImage(glow, px - half, py - half, half * 2, half * 2);
     ctx.globalAlpha = 1;
 
-    // Label
-    const showLabel = hov || e.weight >= e.labelThreshold;
+    // Label — HOVER-ONLY (like the collection/repo view): the resting cloud stays
+    // clean, details appear only when you point at a node. labelThreshold is ignored.
+    const showLabel = hov;
     if (showLabel) {
       ctx.fillStyle = `rgba(255,240,220,${hov ? 0.9 : 0.45})`;
       ctx.font = `${hov ? 16 : 12}px 'Courier New', monospace`;

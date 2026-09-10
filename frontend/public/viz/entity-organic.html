@@ -326,8 +326,13 @@ function buildStarView(graph) {
     // Same rim position the docs were pulled toward — its BEARING from the core's galaxy
     // position, so a co-entity sits where it is on the galaxy map (+ tiny ring thickness).
     const p0 = coPos.get(co.id);
-    const angle = p0 ? p0.angle : (i * 2.399963);
-    const r = RIM + 60 + (i % 3) * 26;
+    const baseAngle = p0 ? p0.angle : (i * 2.399963);
+    // Galaxy bearing is the ANCHOR (a co-entity sits in the direction it lies from the
+    // core on the galaxy map), but we fan + jitter around it so same-bearing co-entities
+    // form a readable CLOUD at the edge instead of piling into one thin arc. Angular
+    // jitter spreads them across their true direction; radial jitter gives depth.
+    const angle = baseAngle + (hash01(co.id + 'ca') - 0.5) * 0.42;
+    const r = RIM + 30 + hash01(co.id + 'cr') * 230;
 
     coEntities.push({
       id: co.id,
