@@ -31,7 +31,8 @@ The servable metric is **document entity-share**: for a document that mentions t
 
 Properties that shape the design:
 - Share ranges **0.200 → 0.00069** for openai (291× spread) — a real, discriminating signal, unlike raw `co_occurs` weight (median 1 across 2,130 co-entities).
-- Because `share = 1/ndoc` and `ndoc` clusters on small integers, shares are **quantized and tied**: openai's top 10% holds only 3 distinct share values (40 docs tie at exactly 0.167). **Ties are intended** — those docs are equally about the entity and belong at the same radius; the domain angle separates them. The design must not treat ties as a defect (an earlier draft did, wrongly).
+- Because `share = 1/ndoc` and `ndoc` clusters on small integers, shares are **quantized and tied**: openai's top 10% holds only 3 distinct share values (40 docs tie at exactly 0.167). **Ties are intended** — those docs are equally about the entity and belong at the same radius; the domain angle separates them. The design must not treat ties as a defect (an earlier draft did, wrongly). This directly constrains ring assignment below: a ring boundary may never split a tied share value.
+- `n_entities` (the share denominator) counts only **active** entities (`invalid_at IS NULL`), matching the soft-delete-aware reads the rest of the graph uses. The same `invalid_at IS NULL` filter that `get_star_graph` already applies to co-entities and documents applies here.
 
 ### Domain structure — real and universal
 
@@ -66,30 +67,40 @@ Rings are the primary structure; domain arcs are packed within each ring indepen
 
 ### Rings (radius)
 
-Four orbit rings at fixed **percentile cutoffs of strength**: top 10% / next 20% / next 30% / next 40%, inner → outer. Compute the cutoffs from the entity's own share distribution, assign each document to a ring by its share, and draw the rings at fixed radii (`R1 < R2 < R3 < R4`).
+Four orbit rings at **percentile targets of strength**: top 10% / next 20% / next 30% / next 40%, inner → outer. The rings are drawn at fixed radii (`R1 < R2 < R3 < R4`).
+
+**Assignment rule (tie-safe), stated precisely so a planner cannot build it two ways:**
+1. Collect the entity's documents and their shares. Reduce to the **distinct share values**, sorted descending (strongest first).
+2. Walk the distinct values, accumulating the running document count. A value is assigned to the first ring whose cumulative-fraction target it has not yet exceeded: the running fraction `cum/total` selects ring 1 while `< 0.10`, ring 2 while `< 0.30`, ring 3 while `< 0.60`, else ring 4. The ring is chosen per **distinct value**, so **every document sharing a value lands in the same ring** — satisfying the ties invariant and test (d).
+3. Because a whole tie group is placed together, a band can be over- or under-filled when a large tie group straddles a target (e.g. if 15% of docs share one value, ring 1 holds ~15%, not exactly 10%). This is intended: the percentages are targets, not hard quotas, and the tie group is never split. The assignment is deterministic given a stable sort (sort distinct values descending; the input doc order does not matter).
 
 - Rings are the skeleton and are drawn as faint concentric guide circles (as `collection.html:409-413` draws depth rings).
-- A ring with zero documents in its percentile band is **bare** — no error, no stretching. Bare rings and partial crescents are desired output, not defects.
-- Ties (many docs at one share) land in the same ring by construction; angle separates them.
+- A ring with zero documents in its band is **bare** — no error, no stretching. Bare rings and partial crescents are desired output, not defects.
 
 ### Domain sectors (angle) — non-uniform, per-ring
 
 Within **each ring independently**, the documents present are grouped by their mid-level domain, and each domain gets a contiguous arc whose angular width ∝ the number of documents that domain has **in that ring**. This is what makes the arcs breathe: a domain that is fat on the inner ring can pinch to nothing on the outer ring, and its neighbours expand into the freed angle.
 
 Two invariants keep it from reading as chaos:
-1. **Global domain order is fixed** across all rings (by total document count, then domain path for determinism), so a domain keeps the same angular *neighbourhood* between rings even as its width changes — the sector still reads as a sector.
-2. **A fixed arc-per-document scale**, shared by all rings, sets angular width. The busiest ring fills most of the circle (capped at ~340°, leaving a small gap so the ring's start/end is visible); sparser rings occupy proportionally less — a thin ring is a small crescent, not a stretched full circle.
+
+1. **Global domain order is fixed** across all rings. Order domains by total document count (across the whole entity, not per ring), breaking ties by domain path for determinism; "other" is always last. Every ring lays its present domains out in this same order, so a domain keeps its **ordinal position** (e.g. always the third arc) between rings even as its width breathes. Its *absolute* angle drifts as spans change — that drift is the intended cut-in/cut-out, not a bug — but the eye tracks it by order, colour, and neighbours.
+
+2. **Arc-per-document scale is derived from the busiest ring, so nothing can overflow.** Let `MAX_FILL` be the largest fraction of the circle any ring may occupy (proposed **340°**, leaving a ~20° gap so the arc's start/end is visible). Let `Nmax` be the document count of the busiest ring. Then `arc_per_doc = MAX_FILL / Nmax`, applied uniformly to **every** ring. Consequences, stated so the earlier ambiguity is closed:
+   - The busiest ring occupies exactly `MAX_FILL`; every other ring occupies `MAX_FILL × (N_ring / Nmax)` — strictly proportional, a smaller crescent.
+   - No ring can exceed `MAX_FILL`, so there is no clamp and no special "ring overflows the cap" case. `arc_per_doc` is derived, not an independent constant; `MAX_FILL` is the single tunable.
+
+**Angular anchoring:** each ring's populated arc is **centred on the 12-o'clock axis** (−90°). A ring occupying angle `A = N_ring × arc_per_doc` spans `[−90° − A/2, −90° + A/2]`, and domains fill it left-to-right in the fixed global order. A sparse ring is therefore a small crescent centred at top; a full ring wraps toward the bottom. This is the deterministic rule the co-entity placement below depends on.
 
 Within a domain's arc on a ring, documents are laid out at equal angular slots (the collection page's `(_leaf + 0.5)/total` mechanic, `collection.html:259`), so spacing is uniform inside the arc.
 
 ### Documents outside a domain's own ring
 
-A document's radius is its strength ring; its angle is its domain's arc *on that ring*. Because arc widths are computed per ring, a domain's arc on ring 1 and its arc on ring 3 need not be the same angular span — that is the intended breathing. The domain's fixed order anchors it so the eye still tracks it across rings.
+A document's radius is its strength ring; its angle is its domain's arc *on that ring*, under the centred anchor above. Because arc widths and the ring's total span are computed per ring, a domain's arc on ring 1 and on ring 3 differ in both width and absolute angle — that is the intended breathing. Fixed ordinal order is what lets the eye still track a domain across rings.
 
 ### Co-entities and collections
 
-- **Co-entities** are placed at the circular mean of the angles of their shared documents (as `star.html:295-301` already does), so a co-entity sits in the domain neighbourhood it actually relates to, at a radius just beyond the outermost ring. Strength between the entity and a co-entity uses `shared_docs / docs_of_entity` (a Jaccard-style share) rather than raw `co_occurs` weight, which mostly measures how popular the *other* entity is.
-- **Collections** (repos the entity belongs to) keep their current outer-periphery ring, unchanged.
+- **Co-entities** are placed at the circular mean of the angles of their shared documents (as `star.html:295-301` already does). The shared-doc angles are now well-defined by the centred per-ring anchor above, so a co-entity sits in the domain neighbourhood it actually relates to, at a radius just beyond the outermost ring. Strength between the entity and a co-entity uses `shared_docs / docs_of_entity` (a Jaccard-style share) rather than raw `co_occurs` weight, which mostly measures how popular the *other* entity is. This design does **not** give co-entities the four-ring orbital treatment — they remain a single band beyond the document rings (open question 3 records the alternative, deferred).
+- **Collections** (repos the entity belongs to) are **out of scope** for this work. `get_star_graph` returns no `collections` today, so the repo ring is presently always empty and `star.html` defaults it; it stays that way. Populating it is a separate change.
 
 ## Sector notation
 
@@ -100,10 +111,12 @@ A document's radius is its strength ring; its angle is its domain's arc *on that
 
 ## Colour — fixes the current monochrome bug
 
-`star.js`'s `TYPE_COLORS` table keys on `Person/Organization/Product/…`, but the real entity-type vocabulary is `capability/interface/pattern/concept/data_model/integration/dependency/…` — **zero overlap**, so `typeColor()` returns default grey for every node today (the reason the current page is monochrome). The redesign colours documents and sectors by **domain**, using the same palette the galaxy uses. The star page must receive a domain→colour map:
+`star.js`'s `TYPE_COLORS` table keys on `Person/Organization/Product/…`, but the real entity-type vocabulary is `capability/interface/pattern/concept/data_model/integration/dependency/…` — **zero overlap**, so `typeColor()` returns default grey for every node today (the reason the current page is monochrome). The redesign colours documents and sectors by **domain**, using the same palette the galaxy uses. The star page must receive a domain→colour map, and getting it right requires care because the palette function is **set-dependent**:
 
-- The galaxy computes colours via `assignDomainColors()` (`utils.js:87`) plus the payload's `layout.palette`. The star payload currently carries no palette.
-- **Decision:** `get_star_graph` returns a `palette` map (`domain_path → hex`) for the domains present, computed the same way the galaxy payload computes it, so the star page and the galaxy agree on a domain's colour. `star.html` applies it exactly as `state.js:93-96` does.
+- `assign_domain_colors()` (`graph_snapshot.py:62`) derives `branch_level`, `top_level_names`, `slice_size`, and each path's golden-ratio index from the **entire** domain list it is given. Run over a star's subset of domains, it returns **different** hexes for the same `domain_path` than the galaxy does. So "compute for the domains present" would silently disagree with the galaxy.
+- **Decision:** `get_star_graph` computes the palette over the **full** graph domain set (`store.domains.list()`, exactly the input the galaxy payload uses), then **filters** the resulting map to the leaf domains present on this star. Same input set → identical hexes → the star and galaxy agree. The palette is keyed by **leaf `domain_path`**, which always resolves (a document's primary domain is a real row). Measured: 58 of 61 mid-level roll-up paths are themselves domain rows, but 3 are not (e.g. `technology/databases`), so a mid-level path is **not** a reliable palette key.
+- **Sector colour rule (always resolvable):** a sector's colour is the palette hex of its mid-level path if that path is present, else the palette hex of the **lexicographically-first leaf** under it (leaves always exist). This is deterministic and does not require adding synthetic domain rows.
+- On the star page the `palette` is the **primary** colour source, not a fallback. The galaxy runs client-side `assignDomainColors()` over its full domain list and treats `layout.palette` only as a fill-in (`state.js:93-96`); the star page has no full domain list to run that over, so it reads colours directly from the server `palette`. If a document's leaf `domain_path` is missing from the map (defensive), fall back to a neutral grey.
 
 ## API changes (`get_star_graph`)
 
@@ -116,8 +129,8 @@ co_entities: [{id, canonical_name, type, weight, shared_doc_ids}]
 
 Changes:
 
-1. **Add to each document:** `domain_path` (the primary domain, full leaf path — the client rolls up to mid-level and keeps the leaf for the exact palette colour) and `n_entities` (distinct entities extracted from that document, i.e. the share denominator). Both come from joins already adjacent to the existing query.
-2. **Add `palette`:** `{domain_path → hex}` for the domains present.
+1. **Add to each document:** `domain_path` (the primary domain, full leaf path — the client rolls up to mid-level for the sector and keeps the leaf for the exact document dot colour) and `n_entities` (count of **active** entities extracted from that document, `COUNT(DISTINCT entity_id)` filtered `invalid_at IS NULL` — the share denominator, matching the soft-delete-aware graph). Both come from joins already adjacent to the existing query.
+2. **Add `palette`:** `{leaf domain_path → hex}` covering every leaf domain present, computed over the full graph domain set then filtered (see Colour). Sector colours are derived client-side from this by the sector-colour rule.
 3. **Raise the co-entity cap.** `co_limit` defaults to **30** in both the route (`entities.py:36`) and the client fetch (`star.html:150`); openai has 2,130 co-entities, so the page already silently shows 30. Raise the default (proposed **150**) and keep it a query parameter. Documents were never capped and remain uncapped.
 4. **Strength is computed client-side** from `n_entities` (the client owns layout math), so no strength field is added to the payload. The server provides the raw denominator only.
 
@@ -133,13 +146,13 @@ Backward compatibility: the new fields are additive. The `weight`/`shared_doc_id
 
 ## Testing
 
-- **Layout unit tests** (pure functions, no canvas): extract the ring-assignment and per-ring sector-packing into testable functions and assert: (a) percentile cutoffs put the right doc counts in each ring; (b) a domain absent from a ring yields zero arc there and its neighbours' arcs sum correctly; (c) global domain order is stable across rings; (d) ties in strength land in one ring; (e) a single-domain entity produces one full sector; (f) the busiest ring is capped at the max fill angle and sparser rings scale down proportionally.
-- **API test** (`get_star_graph`): assert each document carries `domain_path` and `n_entities`, that `palette` covers every domain present, that `co_limit` is honoured and defaults to the new value, and that an entity with unclassified docs (should be none in practice, but defensively) still returns a usable payload.
+- **Layout unit tests** (pure functions, no canvas): extract the ring-assignment and per-ring sector-packing into testable functions and assert: (a) ring assignment hits the percentile targets when shares are distinct; (b) a domain absent from a ring yields zero arc there and its neighbours' arcs sum to the ring's total span; (c) global domain order (by total doc count, path tiebreak, "other" last) is identical across rings; (d) a tie group is never split across rings even when it straddles a target, and the band is allowed to over/under-fill as a result; (e) a single-domain entity produces one arc; (f) the busiest ring occupies exactly `MAX_FILL` and every other ring occupies `MAX_FILL × N_ring/Nmax`; (g) each ring's arc is centred on −90°.
+- **API test** (`get_star_graph`): assert each document carries `domain_path` and `n_entities` (the latter counting only active entities); that `palette` covers every leaf domain present and that its hexes equal the galaxy's for the same paths (compute the full-graph palette and compare the filtered subset); that `co_limit` is honoured and defaults to the new value; and that an entity whose docs somehow lack a primary domain still returns a usable payload (grey fallback).
 - **Regression:** an entity with one document and no co-entities renders without divide-by-zero (empty rings, single arc).
 - Follow the existing `orchestrator/tests/` file-backed SQLite fixture convention (never `:memory:`, per CLAUDE.md).
 
 ## Open questions for review
 
-1. Ring radii and the max-fill cap (~340°) are proposed constants; confirm they should be tunable query params (like `collection.html`'s `?scale=`) rather than hardcoded.
+1. Ring radii (`R1..R4`) and `MAX_FILL` (~340°) are proposed constants. `MAX_FILL` is the single tunable that sets angular density (`arc_per_doc` is derived from it); confirm whether it and the radii should be query params like `collection.html`'s `?scale=` or hardcoded. Not layout-critical either way — a default must exist.
 2. Whether the "other" sector should be omitted below a threshold (e.g. if the top 8 already cover >95%).
-3. Whether co-entity strength (`shared/docs_of_entity`) should also drive a co-entity's radius, or only documents get the orbital treatment while co-entities stay a single outer band.
+3. Whether co-entity strength (`shared/docs_of_entity`) should also drive a co-entity's radius (giving them the orbital treatment too), or they stay a single outer band as specified. Current design: single band; this question only widens scope, it does not block the plan.
