@@ -44,30 +44,42 @@ function draw(P){
   bg.addColorStop(0,'#0a0e18'); bg.addColorStop(0.5,'#070912'); bg.addColorStop(1,'#03040a');
   ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
 
-  // faint radius guides
-  ctx.strokeStyle='rgba(120,150,200,.06)'; ctx.lineWidth=1;
-  for (const r of [R0, R0+(R1-R0)*0.5, R1]){ ctx.beginPath(); ctx.arc(cx,cy,r*scale,0,Math.PI*2); ctx.stroke(); }
-
-  // add one cell's wedge to the CURRENT path (batched fill per domain -> cheap blur)
+  // add one cell's wedge to the CURRENT path
   const addCell = (i,j,A,J) => {
     const dA=(Math.PI*2)/A/2;
     const th=cellAngle(i,A), r0c=(R0+j/J*(R1-R0))*scale, r1c=(R0+(j+1)/J*(R1-R0))*scale;
     ctx.moveTo(cx+Math.cos(th-dA)*r0c, cy+Math.sin(th-dA)*r0c);
     ctx.arc(cx,cy,r1c, th-dA, th+dA); ctx.arc(cx,cy,r0c, th+dA, th-dA, true);
   };
+  const polar = (ang,r)=>[cx+Math.cos(ang)*r*scale, cy+Math.sin(ang)*r*scale];
 
   if (seg.mode==='territories'){
-    const {A,J,cells,guard}=seg;
+    const {A,J,cells}=seg;
+    const dom=(i,j)=> (j>=0&&j<J) ? cells[((i%A)+A)%A][j]?.domain ?? null : null;
+    // 1. WHOLE-DISK PARTITION fill — every cell tinted by its territory (KNN/Voronoi),
+    //    soft-blurred so it reads as nebula, not blocks. One fill per domain.
     const byDom={};
-    for(let i=0;i<A;i++)for(let j=0;j<J;j++){ const c=cells[i][j]; if(!c)continue; const g=guard[c.domain]; if(g&&!g.drawable)continue; (byDom[c.domain]=byDom[c.domain]||[]).push([i,j]); }
-    // domain NEBULA — one blurred fill per domain (soft cloud, orrery look, not blocks)
-    for(const [dom,cs] of Object.entries(byDom)){
-      const [r,g,b]=hexRGB(sectorColor(dom,palette));
-      ctx.save();
-      ctx.beginPath(); for(const [i,j] of cs) addCell(i,j,A,J);
-      ctx.filter='blur(9px)'; ctx.fillStyle=`rgba(${r},${g},${b},0.16)`; ctx.fill();   // soft halo
-      ctx.filter='blur(3px)'; ctx.fillStyle=`rgba(${r},${g},${b},0.22)`; ctx.fill();   // denser body
+    for(let i=0;i<A;i++)for(let j=0;j<J;j++){ const c=cells[i][j]; if(!c)continue; (byDom[c.domain]=byDom[c.domain]||[]).push([i,j]); }
+    for(const [d,cs] of Object.entries(byDom)){
+      const [r,g,b]=hexRGB(sectorColor(d,palette));
+      ctx.save(); ctx.beginPath(); for(const [i,j] of cs) addCell(i,j,A,J);
+      ctx.filter='blur(7px)'; ctx.fillStyle=`rgba(${r},${g},${b},0.18)`; ctx.fill();
       ctx.restore();
+    }
+    // 2. SECTOR-DIVIDING LINES — clean thin lines at every interface between two
+    //    different territories (the 40k segmentum boundaries). Each interface once.
+    ctx.strokeStyle='rgba(150,190,220,0.32)'; ctx.lineWidth=1; ctx.lineCap='round';
+    for(let i=0;i<A;i++)for(let j=0;j<J;j++){
+      const d=dom(i,j); if(d==null) continue;
+      const dA=(Math.PI*2)/A/2, th=cellAngle(i,A);
+      const rIn=R0+j/J*(R1-R0), rOut=R0+(j+1)/J*(R1-R0);
+      if(dom(i+1,j)!==d){ // radial line at the cw angular edge
+        const a=th+dA; const [x0,y0]=polar(a,rIn),[x1,y1]=polar(a,rOut);
+        ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+      }
+      if(dom(i,j+1)!==d){ // arc line at the outer radial edge
+        ctx.beginPath(); ctx.arc(cx,cy,rOut*scale, th-dA, th+dA); ctx.stroke();
+      }
     }
   }
 
@@ -81,17 +93,20 @@ function draw(P){
     ctx.beginPath(); ctx.arc(x,y,1.5,0,Math.PI*2); ctx.fillStyle='rgba(255,250,240,.95)'; ctx.fill();
   }
 
-  // 3. labels at each drawable domain's centroid — soft, domain-coloured
+  // 3. labels at each territory's largest-cluster centroid (>= a few cells)
   if (seg.mode==='territories'){
-    const {A,J,cells,guard}=seg; const compsBy={};
-    for(let i=0;i<A;i++)for(let j=0;j<J;j++){ const c=cells[i][j]; if(!c)continue; const g=guard[c.domain]; if(g&&!g.drawable)continue; (compsBy[c.domain]=compsBy[c.domain]||[]).push([i,j]); }
+    const {A,J,cells}=seg; const compsBy={};
+    for(let i=0;i<A;i++)for(let j=0;j<J;j++){ const c=cells[i][j]; if(!c)continue; (compsBy[c.domain]=compsBy[c.domain]||[]).push([i,j]); }
     ctx.textAlign='center'; ctx.font="12px 'Courier New',monospace";
     for(const [dom,cs] of Object.entries(compsBy)){
-      let si=0,sj=0; for(const [i,j] of cs){ si+=(((i%A)+A)%A); sj+=j; }
-      const mi=si/cs.length, mj=sj/cs.length;
-      const r=(R0+(mj+.5)/J*(R1-R0))*scale, th=-Math.PI+mi/A*Math.PI*2;
+      if(cs.length<4) continue;
+      // circular-mean angle so seam-straddling territories label sensibly
+      let sx=0,sy=0,sj=0; for(const [i,j] of cs){ const a=-Math.PI+(((i%A)+A)%A)/A*Math.PI*2; sx+=Math.cos(a); sy+=Math.sin(a); sj+=j; }
+      const th=Math.atan2(sy,sx), mj=sj/cs.length;
+      const r=(R0+(mj+.5)/J*(R1-R0))*scale;
       const [rr,gg,bb]=hexRGB(sectorColor(dom,palette));
-      ctx.fillStyle=`rgba(${rr},${gg},${bb},.9)`; ctx.shadowColor='#000'; ctx.shadowBlur=6;
+      ctx.fillStyle=`rgba(${Math.min(255,rr+60)},${Math.min(255,gg+60)},${Math.min(255,bb+60)},.95)`;
+      ctx.shadowColor='#000'; ctx.shadowBlur=6;
       ctx.fillText(dom.split('/').pop(), cx+Math.cos(th)*r, cy+Math.sin(th)*r); ctx.shadowBlur=0;
     }
   }
@@ -115,7 +130,9 @@ function draw(P){
     // filled disk: moderate bandwidth so a domain's cloud stays where its docs are, and a
     // floor high enough that sparse angular regions stay empty (the void = "openai barely
     // discussed here"), low enough that a real cluster fills solid (no punched holes).
-    const seg = layoutSegmentum(graph, { maxTicks: 260, bandwidthMul: 1.5, voteFloor: 0.28 });
+    // KNN/Voronoi partition: whole disk divided into territories; consolidate small
+    // islands so the map reads as a few big segmentums, not confetti.
+    const seg = layoutSegmentum(graph, { maxTicks: 260, K: 10, minRegionCells: 10, maxEnclaves: 2, maxReachMul: 16 });
     window.__P = { seg, palette: graph.palette||{}, entity: graph.entity?.canonical_name || entityId };
     const nDraw = seg.guard ? Object.values(seg.guard).filter(g=>g.drawable).length : 0;
     console.log(`Preview loaded: ${seg.points.length} docs, mode=${seg.mode}, ${nDraw} drawable territories`);

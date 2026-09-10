@@ -212,40 +212,39 @@ export function medianNearestNeighbor(points) {
   return d[Math.floor(d.length / 2)] || 1;
 }
 
-// ── Stage 3: rasterize domain occupancy ─────────────────────────────────────────
-/** Vote each doc's domain into nearby cells with an adaptive gaussian; assign each
- *  cell its argmax domain above voteFloor, flag contested. Returns {A,J,cells} where
- *  cells[i][j] = {domain, contested} | null. */
-export function rasterize(points, { A, J = 24, r0 = R0, r1 = R1, contestRatio = 0.8,
-    bandwidthMul = 1.5, voteFloor = 0.35 } = {}) {
+// ── Stage 3: rasterize as a KNN / Voronoi partition ─────────────────────────────
+/** Assign EVERY lattice cell to the domain that owns the majority of its K nearest
+ *  documents (distance-weighted), so the whole disk is partitioned into contiguous
+ *  territories with no dead void — the Warhammer-40k segmentum look. `contested` marks
+ *  a cell where the top-two domains are close. Cells beyond `reach` from any doc are
+ *  left null (a genuinely empty far region), controlled by `maxReachMul` × median-NN.
+ *  Returns {A,J,cells} with cells[i][j] = {domain, contested} | null. */
+export function rasterize(points, { A, J = 24, r0 = R0, r1 = R1, K = 8, contestRatio = 0.7,
+    maxReachMul = 6 } = {}) {
   const n = points.length;
   A = A ?? clamp(Math.round(3 * Math.sqrt(n)), 64, 160);
+  if (!n) return { A, J, cells: Array.from({ length: A }, () => Array(J).fill(null)) };
+  // reach floored at a few cell-diagonals so coincident/dense docs (median-NN -> 0)
+  // don't collapse it to zero and blank the whole disk.
   const cellDiag = Math.hypot(TAU / A * (r0 + r1) / 2, (r1 - r0) / J);
-  const h = clamp(bandwidthMul * medianNearestNeighbor(points), 0.5 * cellDiag, 3 * cellDiag);
-  const inv2h2 = 1 / (2 * h * h);
-  const wI = Math.max(1, Math.ceil(3 * h / (TAU / A * (r0 + r1) / 2)));
-  const wJ = Math.max(1, Math.ceil(3 * h / ((r1 - r0) / J)));
-
-  // votes[i][j] = Map<domain, weight>
-  const votes = Array.from({ length: A }, () => Array.from({ length: J }, () => new Map()));
-  for (const p of points) {
-    const ci = angIndex(p.theta, A), cj = radIndex(p.r, J, r0, r1);
-    for (let di = -wI; di <= wI; di++) for (let dj = -wJ; dj <= wJ; dj++) {
-      const i = ((ci + di) % A + A) % A, j = cj + dj;
-      if (j < 0 || j >= J) continue;
-      const rmid = cellRadius(j, J, r0, r1);
-      const dth = Math.atan2(Math.sin(cellAngle(i, A) - p.theta), Math.cos(cellAngle(i, A) - p.theta));
-      const d2 = (dth * rmid) ** 2 + (rmid - p.r) ** 2;
-      const w = Math.exp(-d2 * inv2h2);
-      if (w < 1e-3) continue;
-      const m = votes[i][j]; m.set(p.domain, (m.get(p.domain) || 0) + w);
-    }
-  }
+  const reach = Math.max(maxReachMul * medianNearestNeighbor(points), 4 * cellDiag);
+  const reach2 = reach * reach;
   const cells = Array.from({ length: A }, (_, i) => Array.from({ length: J }, (_, j) => {
-    const m = votes[i][j]; if (!m.size) return null;
+    const th = cellAngle(i, A), r = cellRadius(j, J, r0, r1);
+    const cx = Math.cos(th) * r, cy = Math.sin(th) * r;
+    // K nearest docs to this cell centre (small insertion buffer)
+    const best = [];   // [{d2, domain}], kept sorted ascending, length <= K
+    for (const p of points) {
+      const dx = p.x - cx, dy = p.y - cy, d2 = dx * dx + dy * dy;
+      if (best.length < K) { best.push({ d2, domain: p.domain }); best.sort((a, b) => a.d2 - b.d2); }
+      else if (d2 < best[K - 1].d2) { best[K - 1] = { d2, domain: p.domain }; best.sort((a, b) => a.d2 - b.d2); }
+    }
+    if (!best.length || best[0].d2 > reach2) return null;   // nothing within reach -> empty
+    // distance-weighted vote among the K nearest
+    const tally = new Map();
+    for (const b of best) { const w = 1 / (1 + b.d2); tally.set(b.domain, (tally.get(b.domain) || 0) + w); }
     let win = null, w1 = 0, w2 = 0;
-    for (const [dom, w] of m) { if (w > w1) { w2 = w1; w1 = w; win = dom; } else if (w > w2) w2 = w; }
-    if (w1 < voteFloor) return null;
+    for (const [dom, w] of tally) { if (w > w1) { w2 = w1; w1 = w; win = dom; } else if (w > w2) w2 = w; }
     return { domain: win, contested: w2 >= contestRatio * w1 };
   }));
   return { A, J, cells };
@@ -272,34 +271,37 @@ function components(cells, A, J, domain) {
   }
   return comps;
 }
-export function cleanupRegions(raster, { minRegionCells = 4, maxEnclaves = 3 } = {}) {
+export function cleanupRegions(raster, { minRegionCells = 4, maxEnclaves = 3, fillWhole = true } = {}) {
   const { A, J } = raster;
   const cells = raster.cells.map(col => col.map(c => c ? { ...c } : null));
-  // 1. despeckle
+  // Reassign a component's cells to the majority BORDERING domain. In fillWhole mode
+  // (the KNN/Voronoi partition) never leave a hole — fall back to any bordering domain;
+  // only null when the component truly has no neighbour (isolated in empty space).
+  const dissolve = (comp, dom) => {
+    const border = {};
+    for (const [ci, cj] of comp) for (const [ni, nj] of neighbours4(ci, cj, A, J)) {
+      const nc = cells[ni][nj]; if (nc && nc.domain !== dom) border[nc.domain] = (border[nc.domain] || 0) + 1;
+    }
+    const maj = Object.entries(border).sort((a, b) => b[1] - a[1])[0];
+    const to = maj ? maj[0] : null;
+    for (const [ci, cj] of comp) cells[ci][cj] = to ? { domain: to, contested: false } : (fillWhole ? cells[ci][cj] : null);
+  };
+  // 1. despeckle (a lone cell with no same-domain neighbour dissolves into a neighbour)
   for (let i = 0; i < A; i++) for (let j = 0; j < J; j++) {
     const c = cells[i][j]; if (!c) continue;
-    if (!neighbours4(i, j, A, J).some(([ni, nj]) => cells[ni][nj] && cells[ni][nj].domain === c.domain)) cells[i][j] = null;
+    if (!neighbours4(i, j, A, J).some(([ni, nj]) => cells[ni][nj] && cells[ni][nj].domain === c.domain)) dissolve([[i, j]], c.domain);
   }
-  // 2. islands + 4. enclave cap, per domain
+  // 2. islands + 4. enclave cap, per domain — both dissolve into a neighbour, not null
   const domains = [...new Set(cells.flat().filter(Boolean).map(c => c.domain))];
   const compsByDomain = {};
   for (const dom of domains) {
     let comps = components(cells, A, J, dom).sort((a, b) => b.length - a.length);
-    // dissolve small ones into the majority bordering domain (or empty)
     const survivors = [];
     for (const comp of comps) {
-      if (comp.length >= minRegionCells) { survivors.push(comp); continue; }
-      const border = {};
-      for (const [ci, cj] of comp) for (const [ni, nj] of neighbours4(ci, cj, A, J)) {
-        const nc = cells[ni][nj]; if (nc && nc.domain !== dom) border[nc.domain] = (border[nc.domain] || 0) + 1;
-      }
-      const maj = Object.entries(border).sort((a, b) => b[1] - a[1])[0];
-      for (const [ci, cj] of comp) cells[ci][cj] = maj ? { domain: maj[0], contested: false } : null;
+      if (comp.length >= minRegionCells) survivors.push(comp); else dissolve(comp, dom);
     }
-    // cap enclaves: keep largest + up to maxEnclaves, dissolve the rest to empty
-    const keep = survivors.slice(0, 1 + maxEnclaves);
-    for (const comp of survivors.slice(1 + maxEnclaves)) for (const [ci, cj] of comp) cells[ci][cj] = null;
-    compsByDomain[dom] = keep;
+    for (const comp of survivors.slice(1 + maxEnclaves)) dissolve(comp, dom);
+    compsByDomain[dom] = survivors.slice(0, 1 + maxEnclaves);
   }
   return { A, J, cells, components: compsByDomain };
 }

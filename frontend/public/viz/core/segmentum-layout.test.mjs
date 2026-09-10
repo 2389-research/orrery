@@ -106,18 +106,23 @@ test('sim organizes angle toward the domain anchor (docs of a domain cluster)', 
 // ── Stage 3-5 ────────────────────────────────────────────────────────────────────
 import { rasterize, cleanupRegions, extractBoundaries, drawGuard, layoutSegmentum } from './segmentum-layout.js';
 
-test('rasterize: a tight same-domain cluster occupies a contiguous block of its domain', () => {
-  const pts = [];
-  for (let k=0;k<40;k++){ const th=0.3+ (k%8)*0.02, r=200+(k%5)*8; pts.push({domain:'a',theta:th,r,x:Math.cos(th)*r,y:Math.sin(th)*r}); }
-  const {cells,A,J} = rasterize(pts,{voteFloor:0.2});
-  let aCells=0; for(let i=0;i<A;i++)for(let j=0;j<J;j++) if(cells[i][j]?.domain==='a') aCells++;
-  assert.ok(aCells>0, 'domain a claims cells');
+test('rasterize KNN: a cell is assigned the domain of its nearest docs', () => {
+  // domain a docs on the right (theta~0), domain b on the left (theta~PI)
+  const pts=[];
+  for(let k=0;k<20;k++){ const r=250; const ta=0.1, tb=Math.PI-0.1;
+    pts.push({domain:'a',theta:ta,r,x:Math.cos(ta)*r,y:Math.sin(ta)*r});
+    pts.push({domain:'b',theta:tb,r,x:Math.cos(tb)*r,y:Math.sin(tb)*r}); }
+  const {cells,A,J}=rasterize(pts,{K:5});
+  // a cell near theta 0 -> a ; near PI -> b (whole disk partitioned, no floor)
+  const near = (th)=>{ const i=Math.floor(((th+Math.PI)/(2*Math.PI))*A)%A, j=Math.floor(J/2); return cells[i][j]?.domain; };
+  assert.equal(near(0.1),'a');
+  assert.equal(near(Math.PI-0.1),'b');
 });
 
 test('cleanup despeckles a lone cell', () => {
   const A=8,J=4; const cells=Array.from({length:A},()=>Array(J).fill(null));
   cells[0][0]={domain:'a',contested:false};                 // isolated
-  const clean = cleanupRegions({A,J,cells},{minRegionCells:2});
+  const clean = cleanupRegions({A,J,cells},{minRegionCells:2, fillWhole:false});
   assert.equal(clean.cells[0][0], null);
 });
 
