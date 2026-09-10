@@ -24,8 +24,7 @@
 - `frontend/public/viz/star.html` — replace the `star-layout` wiring with `segmentum-layout`; stash `window.__SEG__` (points + sectors + palette).
 - `frontend/public/viz/renderers/star.js` — replace `drawSectors` with territory drawing from rasterized boundaries; keep domain doc-colouring + hover.
 
-**Deleted (after the new path works):**
-- `core/star-layout.js` ring/packing exports (`assignRings`, `packRings`, `layoutStar`, `coEntityBand`) and their tests. **Keep** `midLevel`, `orderDomains`, `sectorColor`, `documentStrength`, `MISC_*` — move them into `segmentum-layout.js` (or import) so nothing re-implements them.
+**Deleted (after the new path works):** `core/star-layout.js`'s **ring/packing only** — `assignRings`, `packRings`, `layoutStar`, and the `RING_TARGETS/RING_RADII/RING_BAND` constants — plus their tests. **Moved into `segmentum-layout.js`** (so nothing re-implements them and the delete is clean): `midLevel`, `orderDomains`, `sectorColor`, `documentStrength`, `coEntityBand`, `MISC_LABEL`, `MISC_COLOR`. The co-entity band is **kept** (co-entities are not part of the territory) and re-based on `R1` instead of the deleted `RING_OUTER`. So after this work, `renderers/star.js` and `star.html` import these from `segmentum-layout.js`, and `star-layout.js` is gone entirely.
 
 **Constants** live in `segmentum-layout.js` as named exports (shared by tests + renderer).
 
@@ -90,7 +89,9 @@ export function resolveDocs(docs, {r0=R0,r1=R1,band=BAND}={}){
   return order.map((d,i)=>{
     const p = n>1 ? i/(n-1) : 0;
     const rTarget = r0 + (r1-r0)*Math.sqrt(p);
-    return {...d, p, rTarget, band:[rTarget-band/2, rTarget+band/2]};
+    // band clamped to [r0,r1] (spec Stage 0) so extremes don't spill past the map radii
+    const b0 = Math.max(r0, rTarget-band/2), b1 = Math.min(r1, rTarget+band/2);
+    return {...d, p, rTarget, band:[b0, b1]};
   });
 }
 ```
@@ -132,9 +133,18 @@ test('fiedler order is deterministic (sign fixed by a rule)', () => {
   assert.deepEqual(fiedlerOrder(domains,W), fiedlerOrder(domains,W));
 });
 
-test('anchors: disconnected/single domain -> even spacing fallback, all angles distinct', () => {
-  const a = domainAnchors([{id:'d',domain:'only'}], []);
-  assert.equal(a.only !== undefined, true);
+test('fiedler returns null on a DISCONNECTED domain graph (>=2 zero eigenvalues)', () => {
+  // two components: a-b and c-d, no cross edge
+  const domains = ['a','b','c','d'];
+  const W = [[0,1,0,0],[1,0,0,0],[0,0,0,1],[0,0,1,0]];
+  assert.equal(fiedlerOrder(domains, W), null);
+});
+
+test('anchors: disconnected graph -> count-order even spacing, all angles distinct', () => {
+  // 'a' has 3 docs, 'b' has 1; no shared co-entity -> disconnected -> count order
+  const docs = [{id:'1',domain:'a'},{id:'2',domain:'a'},{id:'3',domain:'a'},{id:'4',domain:'b'}];
+  const a = domainAnchors(docs, []);
+  assert.ok(a.a !== undefined && a.b !== undefined && a.a !== a.b);
 });
 ```
 
@@ -181,25 +191,34 @@ export function domainCooccur(docs, coEntities){
 }
 
 /** Fiedler ordering: 2nd-smallest eigenvector of L=D-W; sort domains by its value.
- *  Sign fixed deterministically (first nonzero component positive). */
+ *  Returns null when the graph is DISCONNECTED (>=2 near-zero eigenvalues) — the
+ *  Fiedler vector is then an arbitrary null-space vector, so the caller falls back to
+ *  count-order even spacing (spec Stage 1). Sign fixed deterministically. */
 export function fiedlerOrder(domains, W){
   const n = domains.length;
   if(n<=1) return [...domains];
   const L = W.map((row,i)=>{ const deg=row.reduce((a,b)=>a+b,0); return row.map((w,j)=> i===j?deg-w:-w); });
   const {values, vectors} = jacobiEigen(L);
-  const idxSorted = values.map((v,i)=>[v,i]).sort((a,b)=>a[0]-b[0]).map(x=>x[1]);
+  const idxSorted = values.map((v,i)=>[v,i]).sort((a,b)=> (a[0]-b[0]) || (a[1]-b[1])).map(x=>x[1]);
+  const EPS = 1e-6;
+  const nearZero = idxSorted.filter(i=>Math.abs(values[i])<EPS).length;
+  if(nearZero >= 2) return null;             // disconnected -> caller uses fallback
   const fied = idxSorted[1];                 // 2nd smallest eigenvalue
-  let vec = vectors.map(row=>row[fied]);
+  let vec = vectors.map(row=>row[fied]);     // column `fied` of V = the eigenvector
   const firstNZ = vec.find(x=>Math.abs(x)>1e-9) || 1;
   if(firstNZ < 0) vec = vec.map(x=>-x);      // deterministic sign
   return domains.map((d,i)=>[d,vec[i]]).sort((a,b)=> (a[1]-b[1]) || (a[0]<b[0]?-1:1)).map(x=>x[0]);
 }
 
-/** Domain -> anchor angle, evenly spaced around the circle in Fiedler order. */
+/** Domain -> anchor angle, evenly spaced around the circle in Fiedler order.
+ *  Fallback (disconnected/single/no-edges): order by doc count desc, id tiebreak. */
 export function domainAnchors(docs, coEntities, {strategy='local'}={}){
   const {domains, matrix} = domainCooccur(docs, coEntities);
-  const order = strategy==='local' ? fiedlerOrder(domains, matrix)
-              : [...domains].sort();          // 'global'/'blend' plug in here later
+  let order = strategy==='local' ? fiedlerOrder(domains, matrix) : null;
+  if(order == null){                          // disconnected, or non-local strategy
+    const count = {}; for(const d of docs) count[d.domain]=(count[d.domain]||0)+1;
+    order = [...domains].sort((a,b)=> (count[b]-count[a]) || (a<b?-1:1));
+  }
   const m = order.length || 1;
   const angles = {};
   order.forEach((d,i)=>{ angles[d] = -Math.PI/2 + (i/m)*TAU; });
@@ -373,7 +392,20 @@ test('degree-4 diagonal pinch splits deterministically; every loop closes', () =
 });
 ```
 
-- [ ] **Step 3: Implement** `extractBoundaries(cells)`: per domain, each occupied cell emits 4 edges keyed by canonical endpoint coords with **angular index mod A** (seam normalization); delete edges shared by two same-domain cells; link survivors into loops; at a **degree-4 vertex** apply the fixed clockwise-turn split so each region stays on its own side and the walk is degree-2; assert every loop closes. Corner fillets (≈0.35 cell) applied as a post-step (tested for radius ≤ half shorter edge).
+- [ ] **Step 3: Implement** `extractBoundaries(cells)`. Precise scheme (this is the hardest task — no hand-waving):
+
+  **Vertex + edge keys.** A cell `(i,j)` (i = angular index 0..A-1, j = radial ring 0..J-1) has 4 corner vertices `(i, j)`, `(i+1, j)`, `(i, j+1)`, `(i+1, j+1)` where the vertex angular index is taken **mod A** (this is the seam normalization: the right edge of cell `(A-1, j)` uses vertex angular index `A mod A = 0`, identical to the left edge of cell `(0, j)`, so a seam-straddling domain's edges cancel). An edge is keyed by its two vertices as a canonical sorted string `"${a_i},${a_j}|${b_i},${b_j}"`.
+  Cell `(i,j)`'s 4 edges: inner-arc `[(i,j),(i+1,j)]`, outer-arc `[(i,j+1),(i+1,j+1)]`, cw-radial `[(i+1,j),(i+1,j+1)]`, ccw-radial `[(i,j),(i,j+1)]`.
+
+  **Cancellation.** Per domain, XOR the edge multiset: an edge shared by two same-domain cells appears twice and is dropped; survivors are the boundary. (∂∂ = 0, so survivors always form cycles.)
+
+  **Walk into loops.** Build an adjacency `vertex → [neighbour vertices]` from surviving edges. Most vertices have degree 2. Walk: pick an unused edge, follow degree-2 vertices until back to start.
+
+  **Degree-4 pinch (worked example).** A vertex `v` has degree 4 only at a diagonal touch: same-domain cells at `(i,j)` and `(i+1,j+1)`, foreign/empty at `(i+1,j)` and `(i,j+1)` (or the mirror). The four surviving edges meet at `v`. Split deterministically by **connecting the two edges that keep each same-domain cell's interior on the left as you traverse clockwise** — concretely, pair the edge entering from cell `(i,j)`'s side with the edge leaving along `(i,j)`'s other boundary, and likewise for `(i+1,j+1)`, so the two same-domain cells become two separate degree-2 corners rather than an X-crossing. This yields two loops that touch at `v` but never cross, and every loop closes (asserted).
+
+  Corner fillets (≈0.35 cell) applied as a post-step, radius ≤ half the shorter adjacent edge.
+
+  **Test helpers to define in the test file:** `block(w,h,dom)` → a `cells` grid with a solid `w×h` same-domain rectangle; `seamStraddle(dom)` → cells occupied at columns `0` and `A-1` of one row; `diagonalPinch(dom)` → the 2×2 diagonal-touch pattern above; `closes(loop)` → asserts the loop's last vertex equals its first; `hasRadialEdgeAt(loops, angIdx)` → whether any loop contains a radial edge at angular index `angIdx`.
 
 - [ ] **Steps 4–5:** pass; commit `feat(viz): segmentum Stage 5a — edge-cancellation boundaries (seam + pinch safe)`.
 
@@ -391,13 +423,15 @@ test('degree-4 diagonal pinch splits deterministically; every loop closes', () =
 
 ## Task 9: Wire `star.html` + draw territories in `renderers/star.js`
 
-**Files:** modify both. Integration glue; validated visually in Task 10.
+**Files:** modify both. Integration glue — the load-bearing risk is preserving `star.html`'s downstream consumers (this class of gap bit the v1 plan), so each is called out explicitly. Validated visually in Task 10.
 
-- [ ] **Step 1:** In `star.html`, import `* as SEG from './core/segmentum-layout.js'`; in `buildStarView`, replace the `SL.layoutStar` block with `const seg = SEG.layoutSegmentum(graph)`, position `docs[]` from `seg.points` (carry `domain`, `domain_path`), place co-entities as before (band from v1 stays — co-entities are not part of the territory), and stash `window.__SEG__ = seg; window.__STAR_PALETTE__ = graph.palette || {}`.
-- [ ] **Step 2:** In `renderers/star.js`, replace `drawSectors` with `drawTerritories(ctx, seg, cx, cy, view)`: for each **drawable** sector, fill its cells (one path, ~8–12% alpha, `sectorColor`), stroke the filleted boundary loops (~1px, ~80%), label the largest component; contested cells `'gap'` by default; suppressed domains draw nothing (their docs still coloured). Colour docs by domain (keep). Hover: pointer → cell → domain (or hovered doc's domain) → highlight domain, dim rest.
-- [ ] **Step 3:** Call `drawTerritories` before `drawDocuments` in the render loop (guard null `__SEG__`).
-- [ ] **Step 4: Manual smoke** — serve viz (Task 10 recipe), open a large + small entity, DevTools console: no errors; territories render; small entity shows points only.
-- [ ] **Step 5: Commit** `feat(viz): wire star page to segmentum layout + draw territories`.
+- [ ] **Step 1 — star.html imports + `buildStarView`.** Replace `import * as SL from './core/star-layout.js'` with `import * as SEG from './core/segmentum-layout.js'`. In `buildStarView`: `const seg = SEG.layoutSegmentum(graph);` then position `docs[]` from `seg.points` — each carries `id`, `domain`, `domain_path`, `theta`, `r`; compute `x = cx + cos(theta)*r`, `y = sin(theta)*r`, and set `_px/_py = x/y` (hit-testing + `drawConnections` read these — preserve them). Build `docIndex`/`docById` and a `docAngle` map (`id → theta`) from `seg.points` — the co-entity band needs it.
+- [ ] **Step 2 — co-entity band (kept, re-based).** Keep the existing co-entity block but source its helpers from `SEG`: `SEG.coEntityBand(filteredCo, docAngle, { rInner: SEG.R1 + 60, rOuter: SEG.R1 + 60 + Math.min(200, 40 + filteredCo.length) })` (replaces the deleted `SL.RING_OUTER`). Preserve the `labelThreshold` computation and every field on the pushed co-entity object (`sharedDocIds`, `labelThreshold`, `_px/_py`) — `renderers/star.js:176` reads `labelThreshold` for resting labels.
+- [ ] **Step 3 — stash for the renderer + hover.** `window.__SEG__ = seg; window.__STAR_PALETTE__ = graph.palette || {}`. **Rewrite the pointer-hover block** (currently ~star.html:408-423, which reads `window.__STAR_LAYOUT__.rings` + `SL.RING_RADII/RING_BAND`): a hovered doc → `hit.domain`; else map the pointer to a lattice cell via `seg` (angular index from `atan2`, radial ring from `r` vs `[R0,R1]`) and read that cell's domain from `seg.sectors`/the raster. Set `window.__STAR_HOVER__ = domain`. Delete all `__STAR_LAYOUT__`/`RING_*` references.
+- [ ] **Step 4 — renderer.** In `renderers/star.js`: repoint the import `{ sectorColor, MISC_COLOR }` to `../core/segmentum-layout.js` and **remove** `RING_RADII`/`RING_BAND` from it and the now-dead `bandInner/bandOuter` helpers. Replace `drawSectors` with `drawTerritories(ctx, seg, cx, cy, view)`: for each **drawable** sector fill its cells (one path, ~8–12% alpha, `sectorColor`), stroke the filleted loops (~1px, ~80%), label the largest component; contested `'gap'`; **suppressed domains draw nothing** (docs still coloured by domain via the existing `docColor`). Keep the doc domain-colouring and the hovered-domain dimming in `drawDocuments`.
+- [ ] **Step 5 — render loop.** Call `drawTerritories(ctx, window.__SEG__, 2500, 2500, view)` before `drawDocuments`, guarding null `__SEG__`.
+- [ ] **Step 6 — manual smoke.** Serve viz (Task 10), open a large + small entity; DevTools console: 0 errors; territories render; hover (both a doc and empty sector space) highlights the domain; small entity shows points only.
+- [ ] **Step 7: Commit** `feat(viz): wire star page to segmentum layout + draw territories`.
 
 ---
 
@@ -405,14 +439,14 @@ test('degree-4 diagonal pinch splits deterministically; every loop closes', () =
 
 - [ ] **Step 1:** Full suites — `cd orchestrator && python -m pytest tests/test_star_graph_orbital.py -q` (backend unchanged, still green) and `cd frontend/public/viz/core && node --test segmentum-layout.test.mjs`.
 - [ ] **Step 2:** Serve viz: `cd frontend/public/viz && python3 -m http.server 8795` (Next swallows `/viz/`, so serve directly). Orchestrator already runs on :8100 with `get_star_graph`.
-- [ ] **Step 3:** Headless-render (reuse `scratchpad/star_render.mjs`, point `window.__SEG__`) openai `3a18e649-…`, gemini, docker, a <20-doc entity; assert 0 page errors and that large entities show coherent territories (few components per domain), matching the prototype's Variant-C numbers.
+- [ ] **Step 3:** Headless-render openai `3a18e649-8d6c-4888-86dc-8dbc8fb78f40`, gemini, docker, a <20-doc entity; assert 0 page errors and coherent territories (few components per domain) on the large ones, matching the prototype's Variant-C numbers. Use a small playwright driver that loads the URL, waits for the `Star loaded` console line, reads `window.__SEG__` (mode, per-domain component counts, suppressed list) and screenshots. A working driver from this project's prior session lives at `/private/tmp/claude-501/-Users-michaelsugimura-Documents-GitHub-Noospheric-Orrery/311265c4-af13-44b5-b634-33cb93efeeec/scratchpad/star_render.mjs` (env: `PW`=playwright-core path, `EXE`=chrome-headless-shell, `URL`, `OUT`); adapt it to read `__SEG__` instead of `__STAR_LAYOUT__`, or write an equivalent ~20-line driver if that path is gone.
 - [ ] **Step 4:** Hand the URLs to the user for feedback: `http://localhost:8795/star.html?entity=<id>&workspace=default&api=http://localhost:8100`. Tuning knobs: `BAND`, `kAnchor/kLink/kBand`, `coherenceFloor`, contested style, fillet radius.
 
 ---
 
 ## Task 11: Remove the dead v1 path
 
-- [ ] After Task 10 is accepted: delete `star-layout.js`'s ring/packing exports + their tests; keep the shared helpers (moved to `segmentum-layout.js` or re-exported). Run `node --test` + `tsc`/build. Commit `chore(viz): remove v1 arc-packing path superseded by segmentum view`.
+- [ ] After Task 10 is accepted: the shared helpers (`midLevel`, `orderDomains`, `sectorColor`, `documentStrength`, `coEntityBand`, `MISC_*`) already live in `segmentum-layout.js` (moved in Tasks 1–8), and Task 9 already repointed every importer (`star.html`, `renderers/star.js`) off `star-layout.js`. So this task **deletes `core/star-layout.js` and `core/star-layout.test.mjs` outright** and greps to confirm no remaining `star-layout` import anywhere under `frontend/public/viz/`. Run `node --test core/segmentum-layout.test.mjs` (green) and reload the app once. Commit `chore(viz): remove v1 arc-packing path superseded by segmentum view`.
 
 ---
 
