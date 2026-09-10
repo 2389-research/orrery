@@ -393,3 +393,30 @@ export function layoutSegmentum(graph, config = {}) {
   return { mode: 'territories', points, anchors, A: clean.A, J: clean.J,
     cells: clean.cells, loops, guard, R0, R1 };
 }
+
+/** Co-entities as a graduated band beyond the outer radius (reused from v1). Angle =
+ *  circular mean of shared-doc angles; radius = strength (shared/entityDocCount) within
+ *  the band + small deterministic jitter. */
+export function coEntityBand(coEntities, docAngleById, { rInner, rOuter }) {
+  return coEntities.map((co, i) => {
+    let sx = 0, sy = 0, k = 0;
+    for (const id of (co.shared_doc_ids || [])) {
+      if (docAngleById.has(id)) { const a = docAngleById.get(id); sx += Math.cos(a); sy += Math.sin(a); k++; }
+    }
+    const angle = k ? Math.atan2(sy, sx) : (i * 2.399963);
+    const denom = co._entityDocCount || 1;
+    const strength = Math.min(1, (co.shared ?? (co.shared_doc_ids || []).length) / denom);
+    const jitter = ((i % 5) - 2) * 4;
+    const radius = rInner + (rOuter - rInner) * (1 - strength) + jitter;
+    return { ...co, angle, radius, strength };
+  });
+}
+
+/** A territory's colour: the mid-path hex if the palette has it, else the first present
+ *  leaf under it; null (renderer uses MISC_COLOR) for misc. */
+export function sectorColor(midPath, palette) {
+  if (midPath === MISC_LABEL) return null;
+  if (palette[midPath]) return palette[midPath];
+  const leaves = Object.keys(palette).filter(p => p.startsWith(midPath + '/')).sort();
+  return leaves.length ? palette[leaves[0]] : null;
+}

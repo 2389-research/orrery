@@ -57,8 +57,8 @@ canvas:active { cursor: grabbing; }
 import { Camera } from './core/camera.js';
 import { sin, cos, hexRGB, rgba, sqrt, clamp, random, hypot, TAU, PI } from './core/utils.js';
 import { drawBackground } from './renderers/galaxy.js';
-import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar, drawSectors } from './renderers/star.js';
-import * as SL from './core/star-layout.js';
+import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar, drawTerritories } from './renderers/star.js';
+import * as SEG from './core/segmentum-layout.js';
 
 const canvas = document.getElementById('c');
 const camera = new Camera();
@@ -253,25 +253,26 @@ function buildStarView(graph) {
   // Doc ID → doc object (for linking co-entities to docs)
   const docById = {};
 
-  // Orbital layout: radius = strength (rings by percentile / small-N crescent),
-  // angle = domain sectors. All the math lives in core/star-layout.js (tested).
-  const layout = SL.layoutStar(graph);
+  // Segmentum layout: radius = relevance band, angle = domain-anchor + connectivity,
+  // domain TERRITORIES derived after placement by a KNN/Voronoi partition. All the math
+  // lives in core/segmentum-layout.js (tested). Positions are world coords around cx,cy.
+  const seg = SEG.layoutSegmentum(graph, { K: 10, minRegionCells: 10, maxEnclaves: 2, maxReachMul: 16 });
 
   const docAngle = new Map();
-  for (const d of layout.documents) {
-    const dx = cx + cos(d.angle) * d.radius;
-    const dy = cy + sin(d.angle) * d.radius;
+  for (const d of seg.points) {
+    const dx = cx + cos(d.theta) * d.r;
+    const dy = cy + sin(d.theta) * d.r;
     const doc = {
       id: d.id,
       kind: 'document',
       title: d.title || 'Untitled',
       content_type: d.content_type || 'text',
       domain_path: d.domain_path,
-      domain: d.domain,          // mid-level sector key (from layoutStar)
+      domain: d.domain,          // mid-level territory key
       radius: 8,
       x: dx, y: dy,
       _px: dx, _py: dy,
-      angle: d.angle,
+      angle: d.theta,
       orbitPhase: random() * TAU,
       orbitSpeed: 0.5 + random() * 0.5,
       orbitDrift: 4 + random() * 6,
@@ -280,7 +281,7 @@ function buildStarView(graph) {
     docs.push(doc);
     docById[d.id] = doc;
     docIndex.set(d.id, doc);
-    docAngle.set(d.id, d.angle);
+    docAngle.set(d.id, d.theta);
   }
 
   // Co-entities — a graduated band beyond the outer ring. Strength (shared/entity
@@ -296,9 +297,9 @@ function buildStarView(graph) {
     co.shared = (co.shared_doc_ids || []).length;
     co.labelThreshold = labelThreshold;
   }
-  const band = SL.coEntityBand(filteredCo, docAngle, {
-    rInner: SL.RING_OUTER + 60,
-    rOuter: SL.RING_OUTER + 60 + Math.min(200, 40 + filteredCo.length),
+  const band = SEG.coEntityBand(filteredCo, docAngle, {
+    rInner: SEG.R1 + 60,
+    rOuter: SEG.R1 + 60 + Math.min(200, 40 + filteredCo.length),
   });
   for (const co of band) {
     const x = cx + cos(co.angle) * co.radius;
@@ -321,8 +322,8 @@ function buildStarView(graph) {
     });
   }
 
-  // Stash the ring/sector structure + palette for the renderer.
-  window.__STAR_LAYOUT__ = layout;
+  // Stash the segmentum + palette for the renderer.
+  window.__SEG__ = seg;
   window.__STAR_PALETTE__ = graph.palette || {};
 
   // Repo nodes — outer periphery ring (beyond co-entities), gold tint, so this
@@ -404,25 +405,18 @@ canvas.addEventListener('mousemove', e => {
   hoveredId = hit ? hit.id : null;
   canvas.style.cursor = hit ? 'pointer' : 'grab';
 
-  // Sector hover: a hovered document lights its whole domain; otherwise pick the
-  // ring nearest the pointer's radius, then the sector in that ring holding its angle.
+  // Territory hover: a hovered document lights its whole domain; otherwise map the
+  // pointer to a partition cell (angle -> column, radius -> ring) and read its domain.
   let hd = (hit && hit.domain) ? hit.domain : null;
-  const layout = window.__STAR_LAYOUT__;
-  if (!hd && layout && layout.rings) {
+  const seg = window.__SEG__;
+  if (!hd && seg && seg.mode === 'territories') {
     const dist = Math.hypot(w.x - 2500, w.y - 2500);
     const ang = Math.atan2(w.y - 2500, w.x - 2500);
-    const norm = a => { while (a < -Math.PI) a += TAU; while (a > Math.PI) a -= TAU; return a; };
-    // nearest ring band
-    let best = null, bd = Infinity;
-    for (const rr of layout.rings) {
-      const d = Math.abs(dist - SL.RING_RADII[rr.ring]);
-      if (d < bd) { bd = d; best = rr; }
-    }
-    if (best && bd < SL.RING_BAND * 1.5) {
-      for (const s of best.sectors) {
-        const d0 = norm(ang - s.startAngle), d1 = norm(ang - s.endAngle);
-        if (d0 >= 0 && d1 <= 0) { hd = s.domain; break; }
-      }
+    const { A, J, cells } = seg;
+    if (dist >= SEG.R0 && dist <= SEG.R1) {
+      const i = ((Math.floor(((ang + Math.PI) / TAU) * A) % A) + A) % A;
+      const j = Math.min(J - 1, Math.max(0, Math.floor((dist - SEG.R0) / (SEG.R1 - SEG.R0) * J)));
+      hd = cells[i][j]?.domain ?? null;
     }
   }
   window.__STAR_HOVER__ = hd;
@@ -569,7 +563,7 @@ function frame() {
     };
 
     // Domain sectors sit behind everything else (above the starfield).
-    if (window.__STAR_LAYOUT__) drawSectors(ctx, window.__STAR_LAYOUT__, 2500, 2500, view);
+    if (window.__SEG__) drawTerritories(ctx, window.__SEG__, 2500, 2500, view);
 
     drawConnections(ctx, centralEntity.x, centralEntity.y, docs, coEntities, hoveredId, centralEntity.id, docIndex, view);
 

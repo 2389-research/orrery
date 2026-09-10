@@ -5,7 +5,7 @@
 
 import { sin, cos, TAU, PI, hexRGB, rgba, clamp, min, max, sqrt } from '../core/utils.js';
 import { docGlowSprite, coEntityGlowSprite, DOC_R0, CO_R0 } from './sprites.js';
-import { sectorColor, MISC_COLOR, RING_RADII, RING_BAND } from '../core/star-layout.js';
+import { sectorColor, MISC_COLOR, cellAngle, R0 as SEG_R0, R1 as SEG_R1 } from '../core/segmentum-layout.js';
 
 // palette + layout are stashed on window by star.html's buildStarView
 function palette() { return (typeof window !== 'undefined' && window.__STAR_PALETTE__) || {}; }
@@ -157,86 +157,70 @@ export function drawDocuments(ctx, docs, tick, hoveredId, view) {
   }
 }
 
-// Radial band a ring's docs occupy: RING_RADII[r] ± RING_BAND/2 (+ a little pad so
-// the tint reads as a filled area behind the dots).
-function bandInner(r) { return RING_RADII[r] - RING_BAND / 2 - 8; }
-function bandOuter(r) { return RING_RADII[r] + RING_BAND / 2 + 8; }
-
-/** Draw domain sectors behind the documents (the 40k galactic-sector look).
- *
- *  Organic packing: each ring fills its own crescent with ONLY the domains present in
- *  it, so there is no reserved dead space. Each sector's FULL wedge is tinted across
- *  the ring band, so the colour marks the whole domain area (not a sliver) and the
- *  docs sit inside it. Global order + centred crescents keep a domain in the same
- *  neighbourhood ring to ring; hover (window.__STAR_HOVER__, set by star.html from a
- *  hovered doc or the pointer's ring+angle) brightens a domain across all its rings
- *  and dims the rest. */
-export function drawSectors(ctx, layout, cx, cy, view) {
-  if (!layout) return;
-
-  // Faint concentric ring guides (both modes).
-  ctx.strokeStyle = 'rgba(120,150,200,0.09)';
-  ctx.lineWidth = 1;
-  for (const rr of RING_RADII) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, rr, 0, TAU);
-    ctx.stroke();
-  }
-  if (layout.mode !== 'rings') return;
-
+/** Draw the segmentum territories — the KNN/Voronoi partition of the disk into domain
+ *  sectors: a soft per-domain tint over the whole partition + thin sector-dividing lines
+ *  at every territory interface (the 40k boundaries) + one label per territory. The
+ *  orrery glow lives in the doc STARS (drawDocuments) sitting inside each territory, and
+ *  the co-entities/core use the existing star renderers. Hover (window.__STAR_HOVER__)
+ *  lifts one territory and dims the rest. `seg` is layoutSegmentum, on window.__SEG__. */
+export function drawTerritories(ctx, seg, cx, cy, view) {
+  if (!seg || seg.mode !== 'territories') return;
+  const { A, J, cells } = seg;
   const pal = palette();
   const hovered = (typeof window !== 'undefined' && window.__STAR_HOVER__) || null;
+  const rAt = j => SEG_R0 + j / J * (SEG_R1 - SEG_R0);
+  const dA = PI / A;
 
-  // widest-ring label anchor per domain
-  const widest = new Map();
-
-  for (const ring of layout.rings) {
-    const rIn = bandInner(ring.ring), rOut = bandOuter(ring.ring);
-    for (const s of ring.sectors) {
-      const isMisc = s.domain === 'misc';
-      const active = !hovered || hovered === s.domain;
-      const col = sectorColor(s.domain, pal) || MISC_COLOR;
-      const [r, g, b] = hexRGB(col);
-
-      // Full wedge tint across the whole sector arc + ring band.
-      const tint = (isMisc ? 0.06 : 0.16) * (active ? 1 : 0.2);
-      ctx.fillStyle = `rgba(${r},${g},${b},${tint})`;
-      ctx.beginPath();
-      ctx.arc(cx, cy, rOut, s.startAngle, s.endAngle);
-      ctx.arc(cx, cy, rIn, s.endAngle, s.startAngle, true);
-      ctx.closePath();
-      ctx.fill();
-
-      // Boundary lines at the wedge edges (radial spokes across this ring band).
-      const bAlpha = (active ? 0.30 : 0.07) * (isMisc ? 0.6 : 1);
-      ctx.strokeStyle = `rgba(${r},${g},${b},${bAlpha})`;
-      ctx.lineWidth = active && hovered ? 1.6 : 1;
-      for (const a of [s.startAngle, s.endAngle]) {
-        ctx.beginPath();
-        ctx.moveTo(cx + cos(a) * rIn, cy + sin(a) * rIn);
-        ctx.lineTo(cx + cos(a) * rOut, cy + sin(a) * rOut);
-        ctx.stroke();
-      }
-
-      const prev = widest.get(s.domain);
-      if (!prev || s.arc > prev.arc) widest.set(s.domain, { arc: s.arc, angle: s.center, rOut });
-    }
+  // group cells per domain
+  const byDom = new Map();
+  for (let i = 0; i < A; i++) for (let j = 0; j < J; j++) {
+    const c = cells[i][j]; if (!c) continue;
+    if (!byDom.has(c.domain)) byDom.set(c.domain, []);
+    byDom.get(c.domain).push([i, j, c.contested]);
   }
 
-  // One label per domain, at its widest ring, just outside that band.
+  // 1. soft territory tint across the whole-disk partition (one fill per domain). A
+  //    domain-nebula sprite per sector was tried and rejected: 20+ point-nebulae overlap
+  //    into one blob and bury the partition. The territory body is the tint + lines; the
+  //    orrery glow lives in the doc STARS (drawDocuments) sitting inside each territory.
+  for (const [dom, cs] of byDom) {
+    const active = !hovered || hovered === dom;
+    const [r, g, b] = hexRGB(sectorColor(dom, pal) || MISC_COLOR);
+    ctx.fillStyle = rgba(r, g, b, (dom === 'misc' ? 0.06 : 0.15) * (active ? 1 : 0.25));
+    ctx.beginPath();
+    for (const [i, j] of cs) {
+      const th = cellAngle(i, A), rIn = rAt(j), rOut = rAt(j + 1);
+      ctx.moveTo(cx + cos(th - dA) * rIn, cy + sin(th - dA) * rIn);
+      ctx.arc(cx, cy, rOut, th - dA, th + dA);
+      ctx.arc(cx, cy, rIn, th + dA, th - dA, true);
+    }
+    ctx.fill();
+  }
+
+  // 2. sector-dividing lines at every interface between two territories (40k borders)
+  const dom = (i, j) => (j >= 0 && j < J) ? (cells[((i % A) + A) % A][j]?.domain ?? null) : null;
+  ctx.lineWidth = 1; ctx.lineCap = 'round';
+  for (let i = 0; i < A; i++) for (let j = 0; j < J; j++) {
+    const d = dom(i, j); if (d == null) continue;
+    const active = !hovered || hovered === d;
+    ctx.strokeStyle = rgba(150, 190, 220, (active ? 0.30 : 0.08));
+    const th = cellAngle(i, A), rIn = rAt(j), rOut = rAt(j + 1);
+    if (dom(i + 1, j) !== d) { const a = th + dA; ctx.beginPath(); ctx.moveTo(cx + cos(a) * rIn, cy + sin(a) * rIn); ctx.lineTo(cx + cos(a) * rOut, cy + sin(a) * rOut); ctx.stroke(); }
+    if (dom(i, j + 1) !== d) { ctx.beginPath(); ctx.arc(cx, cy, rOut, th - dA, th + dA); ctx.stroke(); }
+  }
+
+  // 4. one label per territory at its centroid
   ctx.textAlign = 'center';
-  for (const [domain, w] of widest) {
-    const isMisc = domain === 'misc';
-    const active = !hovered || hovered === domain;
-    const col = sectorColor(domain, pal) || MISC_COLOR;
-    const [r, g, b] = hexRGB(col);
-    const lr = w.rOut + 20;
-    const lx = cx + cos(w.angle) * lr, ly = cy + sin(w.angle) * lr;
-    const name = isMisc ? 'misc' : domain.split('/').pop();
-    const lAlpha = active ? (isMisc ? 0.6 : 0.9) : 0.28;
-    ctx.fillStyle = isMisc ? `rgba(160,168,185,${lAlpha})` : `rgba(${r},${g},${b},${lAlpha})`;
-    ctx.font = `${isMisc ? 11 : 13}px 'Courier New', monospace`;
-    ctx.fillText(name, lx, ly);
+  for (const [dom0, cs] of byDom) {
+    if (cs.length < 4) continue;
+    const active = !hovered || hovered === dom0;
+    let sx = 0, sy = 0, sj = 0;
+    for (const [i, j] of cs) { const a = cellAngle(i, A); sx += cos(a); sy += sin(a); sj += j; }
+    const th = Math.atan2(sy, sx), r = rAt(sj / cs.length + 0.5);
+    const [r0, g0, b0] = hexRGB(sectorColor(dom0, pal) || MISC_COLOR);
+    ctx.fillStyle = rgba(min(255, r0 + 60), min(255, g0 + 60), min(255, b0 + 60), active ? 0.95 : 0.3);
+    ctx.font = "13px 'Courier New', monospace"; ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
+    ctx.fillText(dom0.split('/').pop(), cx + cos(th) * r, cy + sin(th) * r); ctx.shadowBlur = 0;
   }
 }
 
