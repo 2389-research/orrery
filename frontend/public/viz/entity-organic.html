@@ -148,7 +148,7 @@ async function loadData() {
     return;
   }
   try {
-    const graph = await fetch(`${API_URL}/entities/${entityId}/star-graph?co_limit=30`, { headers: fetchHeaders }).then(r => r.json());
+    const graph = await fetch(`${API_URL}/entities/${entityId}/star-graph?co_limit=150`, { headers: fetchHeaders }).then(r => r.json());
     buildStarView(graph);
   } catch (err) {
     console.error('Star view: load failed', err);
@@ -263,11 +263,31 @@ function buildStarView(graph) {
   // + hashed jitter break the relevance ties so no two docs share an exact position.
   const RMIN = 130, RMAX = 900;
   const docs0 = resolveDocs(graph.documents || [], { radiusMode: 'value', r0: RMIN, r1: RMAX, band: 260 });
-  // hashed radial jitter so ties don't stack on one arc
   for (const d of docs0) { const jz = (parseInt(d.id.replace(/\D/g,'').slice(-4)||'0',10)%200)/200 - 0.5; d.rTarget = Math.max(RMIN, Math.min(RMAX, d.rTarget + jz*90)); d.band=[Math.max(RMIN,d.rTarget-130), Math.min(RMAX,d.rTarget+130)]; }
-  const seeded = seed(docs0, {});                       // empty anchors -> hashed angular seed (spread)
-  const placed = { points: simulate(seeded, graph.co_entities || [], {
-    maxTicks: 320, kAnchor: 0, kLink: 0.05, kRepel: 700, repelR: 200, kBand: 0.05, dotR: 8, pad: 3,
+
+  // ANGLE by co-entity MEMBERSHIP MEAN (the galaxy's mechanic: an entity sits at the
+  // weighted mean of its domains; here a doc sits at the mean of its CO-ENTITIES). A doc
+  // tied to co-entities on opposite sides lands between them, so docs with different
+  // co-entity mixes fan out into 2D instead of collapsing onto one radial spoke.
+  const coAll = (graph.co_entities || []).filter(c => c.type !== 'Domain');
+  const coAngle = new Map();
+  coAll.forEach((c, i) => coAngle.set(c.id, -Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU));
+  const docCo = new Map();                              // docId -> [coId...]
+  for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
+    if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push(c.id);
+  }
+  for (const d of docs0) {
+    const cos_ = docCo.get(d.id) || [];
+    let sx = 0, sy = 0;
+    for (const cid of cos_) { const a = coAngle.get(cid); sx += Math.cos(a); sy += Math.sin(a); }
+    const jitter = ((parseInt(d.id.replace(/\D/g, '').slice(-3) || '0', 10) % 100) / 100 - 0.5) * 0.6;
+    d.theta = (sx * sx + sy * sy > 1e-6) ? Math.atan2(sy, sx) + jitter : (Math.random() * TAU);
+    d.r = d.rTarget;
+  }
+  // Refine with repulsion (spread within a neighbourhood) + co-entity links; no domain
+  // anchor. The membership-mean seed already gives the 2D angular structure.
+  const placed = { points: simulate(docs0, coAll, {
+    maxTicks: 200, kAnchor: 0, kLink: 0.03, kRepel: 900, repelR: 220, kBand: 0.05, dotR: 8, pad: 3,
   }) };
   for (const pd of placed.points) {
     const dx = cx + cos(pd.theta) * pd.r;
