@@ -223,14 +223,17 @@ Replace the Documents block so each document carries its primary domain and acti
 
 ```python
         # Documents — with primary domain and the active-entity count per doc (the
-        # share denominator the orbital layout needs). LEFT JOIN so a doc with no
-        # primary domain still returns (domain_path None → client greys it).
+        # share denominator the orbital layout needs). domain_path comes from a
+        # correlated SUBQUERY, not a JOIN: (document_id, domain_path) is the PK but
+        # is_primary is an unconstrained flag, so a JOIN could multiply a doc row if a
+        # doc ever had two primaries. The subquery + LIMIT 1 can never multiply rows.
+        # domain_path is None when a doc has no primary domain → client greys it.
         doc_rows = self._conn.execute("""
-            SELECT DISTINCT d.id, d.title, d.content_type, dd.domain_path
+            SELECT DISTINCT d.id, d.title, d.content_type,
+                   (SELECT dd.domain_path FROM document_domains dd
+                     WHERE dd.document_id = d.id AND dd.is_primary = 1 LIMIT 1) AS domain_path
             FROM entity_sources es
             JOIN documents d ON es.document_id = d.id
-            LEFT JOIN document_domains dd
-                   ON dd.document_id = d.id AND dd.is_primary = 1
             WHERE es.entity_id = ? AND d.invalid_at IS NULL
             ORDER BY d.title
         """, (entity_id,)).fetchall()
@@ -945,13 +948,23 @@ At the top of the `<script type="module">` (near the other imports ~line 58-60),
 import * as SL from './core/star-layout.js';
 ```
 
-- [ ] **Step 2: Compute `_entityDocCount` and `shared` for co-entities**
+- [ ] **Step 2: Compute `_entityDocCount`, `shared`, and preserve `labelThreshold`**
 
-The band needs each co-entity's `shared/docs_of_entity`. `docs_of_entity` = `docList.length`; `shared` = `co.shared_doc_ids.length`. In `buildStarView`, before placing co-entities, annotate:
+The band needs each co-entity's `shared/docs_of_entity`. `docs_of_entity` = `docList.length`; `shared` = `co.shared_doc_ids.length`. The renderer also decides **resting labels** from `e.labelThreshold` (`renderers/star.js:176`: `hov || e.weight >= e.labelThreshold`), so this field MUST survive — dropping it hides every co-entity label except on hover, violating the spec's "co-entities carry text". Preserve the existing threshold logic (`star.html:286` today). In `buildStarView`, before placing co-entities:
 
 ```js
   const entityDocCount = docList.length || 1;
-  for (const co of coList) { co._entityDocCount = entityDocCount; co.shared = (co.shared_doc_ids || []).length; }
+  const filteredCo0 = coList.filter(c => c.type !== 'Domain');
+  const sortedCo = [...filteredCo0].sort((a, b) => b.weight - a.weight);
+  // top ~30% by weight get resting labels (same rule as before this change)
+  const labelThreshold = sortedCo.length > 8
+    ? (sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1)
+    : 0;
+  for (const co of filteredCo0) {
+    co._entityDocCount = entityDocCount;
+    co.shared = (co.shared_doc_ids || []).length;
+    co.labelThreshold = labelThreshold;
+  }
 ```
 
 - [ ] **Step 3: Replace document + co-entity placement with `layoutStar` + `coEntityBand`**
@@ -975,14 +988,14 @@ In `buildStarView`, replace the manual doc-ring loop (`const docRing = 180; for 
     docAngle.set(d.id, d.angle);
   }
 
-  // co-entities: graduated band beyond the outer ring
-  const filteredCo = coList.filter(c => c.type !== 'Domain');
-  const band = SL.coEntityBand(filteredCo, docAngle,
-      { rInner: SL.RING_OUTER + 60, rOuter: SL.RING_OUTER + 60 + Math.min(200, 40 + filteredCo.length) });
+  // co-entities: graduated band beyond the outer ring (filteredCo0 from Step 2)
+  const band = SL.coEntityBand(filteredCo0, docAngle,
+      { rInner: SL.RING_OUTER + 60, rOuter: SL.RING_OUTER + 60 + Math.min(200, 40 + filteredCo0.length) });
   for (const co of band) {
     const x = cx + Math.cos(co.angle) * co.radius, y = cy + Math.sin(co.angle) * co.radius;
     coEntities.push({ id: co.id, kind: 'co_entity', name: co.canonical_name, type: co.type,
       weight: co.weight, sharedDocIds: co.shared_doc_ids || [], strength: co.strength,
+      labelThreshold: co.labelThreshold,          // preserved so resting labels show
       radius: 5 + Math.sqrt(co.weight || 1) * 2, x, y, _px: x, _py: y,
       orbitPhase: Math.random() * SL.TAU, orbitSpeed: 0.4 + Math.random() * 0.6,
       orbitDrift: 5 + Math.random() * 8, activityGlow: 0 });
@@ -1042,7 +1055,17 @@ Add a `drawSectors(ctx, layout, cx, cy, view)` exported function that, for `layo
 
 Label each *named* sector once, on its widest ring: find `argmax_ring sector.arc` for that domain across `layout.rings`, place the mid-level name at that ring's mid-angle just outside the ring radius. Skip the label for `misc` (draw its grey wedge but a small dim "misc" tag).
 
-Call `drawSectors` from `star.html`'s render loop **before** `drawDocuments`, so docs sit on top of their sectors. For `layout.mode === 'small'`, draw only the faint ring guides (no sectors).
+Wire it into `star.html` with two literal edits:
+- Extend the renderer import at `star.html:60` to include `drawSectors`:
+  ```js
+  import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar, drawSectors } from './renderers/star.js';
+  ```
+- In the render loop, insert the call **before** `drawDocuments(ctx, docs, tick, hoveredId, view);` (currently `star.html:601`), passing the stashed layout:
+  ```js
+      drawSectors(ctx, window.__STAR_LAYOUT__, 2500, 2500, view);
+      drawDocuments(ctx, docs, tick, hoveredId, view);
+  ```
+So docs sit on top of their sectors. For `layout.mode === 'small'`, `drawSectors` draws only the faint ring guides (no sectors). Guard `drawSectors` against a null/undefined layout (first frame before `buildStarView` runs).
 
 - [ ] **Step 3: Draw the co-entity band ring guide (optional, faint)**
 
