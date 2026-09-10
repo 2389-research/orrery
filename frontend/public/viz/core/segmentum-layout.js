@@ -41,12 +41,20 @@ export function resolveDocs(docs, { r0 = R0, r1 = R1, band = BAND, radiusMode = 
   const withRel = docs.map(d => ({ ...d, rel: 1 / (d.n_entities || 1), domain: midLevel(d.domain_path) }));
   const order = [...withRel].sort((a, b) => (b.rel - a.rel) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const n = order.length || 1;
+  // 'value' normalizes by the ACTUAL relevance range, so radius reflects real relevance:
+  // the single LEAST-relevant doc sits at the rim (r1), the most relevant at r0, and docs
+  // that share a relevance sit at the same radius (jittered by the sim) instead of being
+  // spread out just to fill the disk. No pile-up at the edge unless many truly tie there.
+  const relMax = Math.max(...withRel.map(d => d.rel)), relMin = Math.min(...withRel.map(d => d.rel));
+  const relRange = (relMax - relMin) || 1;
   return order.map((d, i) => {
     const p = n > 1 ? i / (n - 1) : 0;
     // 'sqrt' = equal-AREA density (edge-heavy per radius; good behind a partition).
-    // 'even' = equal count per radius band (rank-linear) — spreads docs evenly across
-    // the disk with NO clump at the rim, for the domain-free organic scatter.
-    const rTarget = r0 + (r1 - r0) * (radiusMode === 'even' ? p : Math.sqrt(p));
+    // 'even' = equal count per radius band (rank-linear).
+    // 'value' = by relevance value, normalized to the farthest (no rim clump; ties share r).
+    const rTarget = radiusMode === 'value' ? r0 + (r1 - r0) * (relMax - d.rel) / relRange
+      : radiusMode === 'even' ? r0 + (r1 - r0) * p
+        : r0 + (r1 - r0) * Math.sqrt(p);
     const b0 = Math.max(r0, rTarget - band / 2), b1 = Math.min(r1, rTarget + band / 2);
     return { ...d, p, rTarget, band: [b0, b1] };
   });
