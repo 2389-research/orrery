@@ -276,22 +276,35 @@ function buildStarView(graph) {
   for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
     if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push({ id: c.id, w: c.weight || 1 });
   }
-  // Doc position = EQUAL-weight centroid of the co-entities it actually shares + jitter.
-  // Each shared co-entity is one honest tie from this doc (shared_doc_ids is membership,
-  // not per-doc strength), so the doc falls to the true balance point of its connections.
-  // We deliberately do NOT cube here: the galaxy's _makeEntityNode cubes domain-membership
-  // counts (tiny dynamic range, breaks symmetry), but co-entity weights are GLOBAL
-  // co-occurrence counts spanning ~40x — cubing lets the single most globally-popular
-  // co-entity (e.g. anthropic) own ~64% of the pull and drag the doc against its own
-  // visible co-mentions.
+  // POLAR placement — the center now ENCODES something:
+  //   radius = the doc's relevance to the CORE entity (how much this doc is "about" it),
+  //   angle  = the gravitational bearing toward the co-entities it shares.
+  //
+  // radius: rel = 1/n_entities (a doc where the core is one of few entities is more about
+  // the core than one where it's 1-of-1272), normalized by the FARTHEST doc so only the
+  // least-relevant reaches the rim and equally-relevant docs share a radius (then jittered).
+  // This is resolveDocs' 'value' mode — reused, not re-invented.
+  const RIN = 90, ROUT = 820;                          // inner floor .. rim for docs
+  const rels = (graph.documents || []).map(d => 1 / (d.n_entities || 1));
+  const relMax = rels.length ? Math.max(...rels) : 1;
+  const relMin = rels.length ? Math.min(...rels) : 0;
+  const relRange = (relMax - relMin) || 1;
+  // angle: equal-weight resultant bearing of the co-entities the doc shares (each shared
+  // co-entity is one honest tie; shared_doc_ids is membership, not per-doc strength). We
+  // do NOT cube — co-entity weights are GLOBAL co-occurrence counts spanning ~40x, and
+  // cubing lets one globally-popular co-entity own the pull against the doc's own mentions.
   for (const d of (graph.documents || [])) {
     const cs = docCo.get(d.id) || [];
     let sx = 0, sy = 0, tw = 0;
-    for (const { id } of cs) { const p = coPos.get(id); if (!p) continue; sx += p.x; sy += p.y; tw += 1; }
-    let dx, dy;
-    if (tw > 0) { dx = sx / tw; dy = sy / tw; }
-    else { const a = hash01(d.id) * TAU; const r = 200 + hash01(d.id + 'r') * 300; dx = cx + Math.cos(a) * r; dy = cy + Math.sin(a) * r; }
-    const jx = dx + (hash01(d.id + 'x') * 60 - 30), jy = dy + (hash01(d.id + 'y') * 60 - 30);
+    for (const { id } of cs) { const p = coPos.get(id); if (!p) continue; sx += p.x - cx; sy += p.y - cy; tw += 1; }
+    const ang = tw > 0 ? Math.atan2(sy, sx) : hash01(d.id) * TAU;   // co-entity bearing, else random
+    const rel = 1 / (d.n_entities || 1);
+    const rTarget = RIN + (ROUT - RIN) * (relMax - rel) / relRange; // least-relevant -> rim
+    // jitter: angular spread so ties fan out, small radial wobble so equal-radius docs
+    // don't form a hard ring. The core-relevance radius is preserved (band, not pin).
+    const aj = ang + (hash01(d.id + 'a') - 0.5) * 0.55;
+    const rj = Math.max(RIN * 0.5, rTarget + (hash01(d.id + 'r') - 0.5) * 80);
+    const jx = cx + Math.cos(aj) * rj, jy = cy + Math.sin(aj) * rj;
     const doc = {
       id: d.id, kind: 'document', title: d.title || 'Untitled', content_type: d.content_type || 'text',
       radius: 8, x: jx, y: jy, _px: jx, _py: jy, angle: Math.atan2(jy - cy, jx - cx),
