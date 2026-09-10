@@ -82,28 +82,52 @@ function mk(ring, mid, n = 1) {
   }));
 }
 
-test('busiest ring occupies exactly MAX_FILL; others scale proportionally', () => {
-  const docs = [...mk(3, 'software/a', 100), ...mk(2, 'software/a', 50)];
-  const { rings } = packRings(docs, ['software/a']);
-  const deg = r => (r.arcSpan * 180 / Math.PI);
-  assert.ok(Math.abs(deg(rings[3]) - 340) < 1e-6);
-  assert.ok(Math.abs(deg(rings[2]) - 170) < 1e-6);
+test('slot band sums to MAX_FILL (sum of per-domain busiest-ring widths)', () => {
+  // a: busiest ring 100 docs; b: busiest ring 50 -> slots 100+50 span MAX_FILL
+  const docs = [...mk(3, 'software/a', 100), ...mk(2, 'software/a', 40),
+                ...mk(3, 'software/b', 50)];
+  const { slots } = packRings(docs, ['software/a', 'software/b']);
+  const totalDeg = slots.reduce((a, s) => a + s.width, 0) * 180 / Math.PI;
+  assert.ok(Math.abs(totalDeg - 340) < 1e-6);
+  // slot widths are proportional to busiest-ring counts (100:50)
+  assert.ok(Math.abs(slots[0].width / slots[1].width - 2) < 1e-6);
 });
 
-test('each ring arc is centred on -90 degrees (top)', () => {
-  const docs = mk(3, 'software/a', 10);
-  const { rings } = packRings(docs, ['software/a']);
-  const mid = (rings[3].startAngle + rings[3].endAngle) / 2;
+test('the slot band is centred on -90 degrees', () => {
+  const docs = [...mk(3, 'software/a', 10), ...mk(3, 'software/b', 10)];
+  const { slots } = packRings(docs, ['software/a', 'software/b']);
+  const mid = (slots[0].start + slots[slots.length - 1].end) / 2;
   assert.ok(Math.abs(mid - (-Math.PI / 2)) < 1e-6);
 });
 
-test('a domain absent from a ring yields zero arc; neighbours fill the ring span', () => {
+test('CONTINUITY: a domain sits at the SAME centre angle on every ring', () => {
+  // a appears on rings 3 and 2 with different counts; its centre must not drift.
+  const docs = [...mk(3, 'software/a', 10), ...mk(2, 'software/a', 3),
+                ...mk(3, 'software/b', 8), ...mk(2, 'software/b', 8)];
+  const order = ['software/a', 'software/b'];
+  const { rings } = packRings(docs, order);
+  const centreOf = (r, dom) => rings[r].sectors.find(s => s.domain === dom).center;
+  assert.equal(centreOf(3, 'software/a'), centreOf(2, 'software/a'));
+  assert.equal(centreOf(3, 'software/b'), centreOf(2, 'software/b'));
+});
+
+test('BREATHING: fill width varies per ring within the fixed slot', () => {
+  const docs = [...mk(3, 'software/a', 10), ...mk(2, 'software/a', 3)];
+  const { rings } = packRings(docs, ['software/a']);
+  const fill = (r) => rings[r].sectors.find(s => s.domain === 'software/a').half * 2;
+  assert.ok(fill(3) > fill(2), 'the busier ring fills more of the slot');
+});
+
+test('a domain absent from a ring simply has no sector that ring (no neighbour fill)', () => {
   const docs = [...mk(3, 'software/a', 10), ...mk(2, 'software/a', 5), ...mk(2, 'software/b', 5)];
   const order = ['software/a', 'software/b'];
   const { rings } = packRings(docs, order);
   assert.equal(rings[3].sectors.find(s => s.domain === 'software/b'), undefined);
-  const sum = rings[2].sectors.reduce((a, s) => a + s.arc, 0);
-  assert.ok(Math.abs(sum - rings[2].arcSpan) < 1e-9);
+  // b's slot centre is fixed; on ring 2 it appears, on ring 3 it doesn't — a's centre
+  // is unchanged either way (no reflow).
+  const aC2 = rings[2].sectors.find(s => s.domain === 'software/a').center;
+  const aC3 = rings[3].sectors.find(s => s.domain === 'software/a').center;
+  assert.equal(aC2, aC3);
 });
 
 test('arc_per_doc is floored so a lone doc is not a huge wedge', () => {
@@ -112,15 +136,13 @@ test('arc_per_doc is floored so a lone doc is not a huge wedge', () => {
   assert.ok(arcPerDocDeg <= 12 + 1e-9);
 });
 
-test('domain ordinal position is identical across rings', () => {
+test('domain ordinal order (by slot) is the global order', () => {
   const docs = [
     ...mk(3, 'software/a', 5), ...mk(3, 'software/b', 5),
     ...mk(2, 'software/a', 5), ...mk(2, 'software/b', 5),
   ];
-  const order = ['software/a', 'software/b'];
-  const { rings } = packRings(docs, order);
-  const seq = r => r.sectors.map(s => s.domain);
-  assert.deepEqual(seq(rings[3]), seq(rings[2]));
+  const { slots } = packRings(docs, ['software/a', 'software/b']);
+  assert.deepEqual(slots.map(s => s.domain), ['software/a', 'software/b']);
 });
 
 // ── Task 7: small-N + orchestrator ──────────────────────────────────────────────

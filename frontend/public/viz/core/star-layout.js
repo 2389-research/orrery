@@ -120,42 +120,63 @@ export function packRings(docs, order, {
   maxFillDeg = MAX_FILL_DEG, arcPerDocMaxDeg = ARC_PER_DOC_MAX_DEG,
 } = {}) {
   const NRINGS = RING_RADII.length;
-  const perRing = Array.from({ length: NRINGS }, () => []);
-  for (const d of docs) if (d.ring != null) perRing[d.ring].push(d);
 
-  const nmax = Math.max(1, ...perRing.map(r => r.length));
-  const arcPerDocDeg = Math.min(maxFillDeg / nmax, arcPerDocMaxDeg);
+  // cell[domain][ring] = docs in that (domain, ring), plus per-ring totals.
+  const cell = new Map();
+  const perRingCount = Array(NRINGS).fill(0);
+  for (const d of docs) {
+    if (d.ring == null) continue;
+    perRingCount[d.ring]++;
+    const m = midLevelIfNamed(d, order);
+    if (!cell.has(m)) cell.set(m, Array.from({ length: NRINGS }, () => []));
+    cell.get(m)[d.ring].push(d);
+  }
+
+  // Present domains, in the fixed global order (misc last). Each domain gets a FIXED
+  // angular slot whose width = its busiest ring's doc count, so a domain occupies the
+  // SAME absolute angle on every ring (a continuous radial sector) and its FILL
+  // breathes within that slot — full on its strong ring, a short centred stub on a
+  // weak one. arc_per_doc scales the sum of slot widths to <= MAX_FILL.
+  const domains = order.filter(m => cell.has(m));
+  const slotDocs = new Map();
+  let totalSlotDocs = 0;
+  for (const m of domains) {
+    const mx = Math.max(0, ...cell.get(m).map(a => a.length));
+    slotDocs.set(m, mx);
+    totalSlotDocs += mx;
+  }
+  const arcPerDocDeg = Math.min(maxFillDeg / Math.max(1, totalSlotDocs), arcPerDocMaxDeg);
   const arcPerDoc = arcPerDocDeg * DEG;
 
-  const orderIndex = new Map(order.map((m, i) => [m, i]));
-  const rings = perRing.map((ringDocs, ring) => {
-    const arcSpan = ringDocs.length * arcPerDoc;
-    const startAngle = -Math.PI / 2 - arcSpan / 2;
+  // Fixed global slots, contiguous, centred on -90deg (the slot BAND is centred).
+  const totalSpan = totalSlotDocs * arcPerDoc;
+  let cursor = -Math.PI / 2 - totalSpan / 2;
+  const slots = [];
+  const slotByDomain = new Map();
+  for (const m of domains) {
+    const w = slotDocs.get(m) * arcPerDoc;
+    const slot = { domain: m, start: cursor, end: cursor + w, center: cursor + w / 2, width: w };
+    slots.push(slot); slotByDomain.set(m, slot);
+    cursor += w;
+  }
 
-    const byDomain = new Map();
-    for (const d of ringDocs) {
-      const m = midLevelIfNamed(d, order);
-      if (!byDomain.has(m)) byDomain.set(m, []);
-      byDomain.get(m).push(d);
-    }
-    const domainsHere = [...byDomain.keys()].sort(
-      (a, b) => (orderIndex.get(a) ?? 1e9) - (orderIndex.get(b) ?? 1e9));
-
-    let cursor = startAngle;
-    const sectors = domainsHere.map(domain => {
-      const dd = byDomain.get(domain);
+  // Per ring: each present domain's FILLED arc, centred in its fixed slot.
+  const rings = [];
+  for (let r = 0; r < NRINGS; r++) {
+    const sectors = [];
+    for (const m of domains) {
+      const dd = cell.get(m)[r];
+      if (!dd.length) continue;
+      const slot = slotByDomain.get(m);
       const arc = dd.length * arcPerDoc;
-      const s0 = cursor, s1 = cursor + arc;
-      const placed = dd.map((d, i) => ({
-        ...d, angle: s0 + arc * ((i + 0.5) / dd.length),
-      }));
-      cursor = s1;
-      return { domain, arc, startAngle: s0, endAngle: s1, docs: placed };
-    });
-    return { ring, docCount: ringDocs.length, arcSpan, startAngle,
-             endAngle: startAngle + arcSpan, sectors };
-  });
-  return { rings, arcPerDocDeg };
+      const s0 = slot.center - arc / 2;
+      const placed = dd.map((d, i) => ({ ...d, angle: s0 + arc * ((i + 0.5) / dd.length) }));
+      sectors.push({ domain: m, center: slot.center, half: arc / 2,
+                     startAngle: s0, endAngle: s0 + arc, docs: placed });
+    }
+    rings.push({ ring: r, docCount: perRingCount[r], sectors });
+  }
+  return { rings, slots, arcPerDocDeg };
 }
 
 /** Below MIN_DOCS_FOR_RINGS: one crescent, radius = strength directly (strongest
@@ -193,11 +214,11 @@ export function layoutStar(graph, opts = {}) {
   }
   const ringed = assignRings(docs);
   const { order, named } = orderDomains(docs);
-  const { rings, arcPerDocDeg } = packRings(ringed, order, opts);
+  const { rings, slots, arcPerDocDeg } = packRings(ringed, order, opts);
   const positioned = [];
   for (const r of rings) for (const s of r.sectors)
-    for (const d of s.docs) positioned.push({ ...d, radius: RING_RADII[r.ring] });
-  return { mode: 'rings', documents: positioned, rings, sectorOrder: order,
+    for (const d of s.docs) positioned.push({ ...d, radius: RING_RADII[r.ring], domain: s.domain });
+  return { mode: 'rings', documents: positioned, rings, slots, sectorOrder: order,
            namedDomains: named, arcPerDocDeg };
 }
 
