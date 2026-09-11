@@ -233,6 +233,7 @@ export default function VizPage() {
   const beatTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const lingerTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const attractHiTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const attractHiLead = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const viewModeRef = useRef(viewMode);
   const exitToGalaxyRef = useRef(exitToGalaxy);
   useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
@@ -244,6 +245,7 @@ export default function VizPage() {
     clearInterval(beatTimer.current);
     clearTimeout(lingerTimer.current);
     clearInterval(attractHiTimer.current);
+    clearTimeout(attractHiLead.current);
     galaxyRef.current?.contentWindow?.postMessage({ type: "attract_stop" }, "*");
   }, []);
 
@@ -284,6 +286,7 @@ export default function VizPage() {
         clearTimeout(lingerTimer.current);
         lingerTimer.current = setTimeout(() => {
           clearInterval(attractHiTimer.current);
+          clearTimeout(attractHiLead.current);
           if (attractRef.current) exitToGalaxyRef.current();
         }, ATTRACT_STAR_LINGER_MS);
         // Pulse constellation highlights into the star view during the dwell: the
@@ -291,9 +294,10 @@ export default function VizPage() {
         // place (no camera move). It ignores these until its graph has loaded, so
         // the first pulse is delayed; the rest cycle a few nodes over the dwell.
         clearInterval(attractHiTimer.current);
+        clearTimeout(attractHiLead.current);
         const pulseHighlight = () =>
           starRef.current?.contentWindow?.postMessage({ type: "attract_highlight" }, "*");
-        setTimeout(pulseHighlight, 1800);
+        attractHiLead.current = setTimeout(pulseHighlight, 1800);
         attractHiTimer.current = setInterval(pulseHighlight, 5000);
       }
     };
@@ -309,6 +313,7 @@ export default function VizPage() {
       clearInterval(beatTimer.current);
       clearTimeout(lingerTimer.current);
       clearInterval(attractHiTimer.current);
+      clearTimeout(attractHiLead.current);
       // Reset so a re-mount (React StrictMode double-invokes effects in dev)
       // restarts cleanly — otherwise startAttract()'s `if (attractRef.current)
       // return` guard leaves the beat interval dead after remount.
