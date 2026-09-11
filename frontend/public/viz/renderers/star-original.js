@@ -310,19 +310,19 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
   if (!activeId) return;   // no resting spokes — links appear only for the active node
   const actDoc = docIndex ? docIndex.get(activeId) : docs.find(d => d.id === activeId);
   const actCo = coEntities.find(e => e.id === activeId);
-  // Reuse the collection page's link palette exactly:
-  //   PRIMARY  = highlighted tree edge  -> solid  rgba(255,220,150,0.55), lineWidth 1.6
-  //   SECONDARY = doc->entity edge       -> dashed rgba(90,165,255,0.45), [2,6] (blue, matches entities)
-  const PRIMARY = 'rgba(255,220,150,0.55)', SECONDARY = 'rgba(90,165,255,0.45)';
+
+  // PRIMARY (core -> active) is the original solid gold link, unchanged. SECONDARY
+  // (active -> its neighbours) used to be a faint dashed blue line that was hard to
+  // read — especially at range; make it a SOLID, brighter blue line instead.
+  const PRIMARY = 'rgba(255,220,150,0.55)', SECONDARY = 'rgba(120,190,255,0.75)';
 
   const primary = (ax, ay, bx, by) => {
     ctx.strokeStyle = PRIMARY; ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
   };
   const secondary = (ax, ay, bx, by) => {
-    ctx.strokeStyle = SECONDARY; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+    ctx.strokeStyle = SECONDARY; ctx.lineWidth = 1.4;      // solid (was dashed [2,6], alpha 0.45)
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-    ctx.setLineDash([]);
   };
 
   if (actDoc) {
@@ -339,7 +339,7 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
     }
   } else if (activeId === centralEntityId) {
     // core active — faint reach to every doc (dashed gold), so it reads without drowning
-    ctx.strokeStyle = SECONDARY; ctx.lineWidth = 0.6; ctx.setLineDash([2, 8]);
+    ctx.strokeStyle = 'rgba(90,165,255,0.28)'; ctx.lineWidth = 0.6; ctx.setLineDash([2, 8]);
     for (const doc of docs) { ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke(); }
     ctx.setLineDash([]);
   }
