@@ -364,11 +364,7 @@ function buildStarView(graph) {
 
   // Place co-entities — filter out Domain types, position near their shared docs
   const filteredCo = coList.filter(c => c.type !== 'Domain');
-  const maxWeight = Math.max(1, ...filteredCo.map(c => c.weight));
   const sortedCo = [...filteredCo].sort((a, b) => b.weight - a.weight);
-  const labelThreshold = sortedCo.length > 8
-    ? sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1
-    : 0;
 
   for (let i = 0; i < sortedCo.length; i++) {
     const co = sortedCo[i];
@@ -390,7 +386,6 @@ function buildStarView(graph) {
       type: co.type,
       weight: co.weight,
       sharedDocIds: co.shared_doc_ids || [],
-      labelThreshold,
       radius: 5 + sqrt(co.weight) * 2,
       x: cx + cos(angle) * r,
       y: cy + sin(angle) * r,
@@ -420,7 +415,6 @@ function buildStarView(graph) {
       name: `▣ ${rp.name}`,
       type: 'Repo',
       weight: 1,
-      labelThreshold: 0,
       sharedDocIds: [],
       radius: 9,
       x: rx, y: ry,
