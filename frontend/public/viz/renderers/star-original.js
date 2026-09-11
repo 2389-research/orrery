@@ -165,8 +165,9 @@ export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
     const tc = '#4aa3ff';   // entities glow BLUE (docs keep their amber) — a second color channel
     const [rc, gc, bc] = hexRGB(tc);
     const act = e.activityGlow || 0;
-    // Collection-page lighting: dim 0.14 / highlighted 1 / resting 0.62 (glow).
-    const alpha = dim ? 0.14 : lit ? 1 : clamp(0.62 + act * 0.3, 0, 1);
+    // Entities read DIMMER than docs at rest (docs rest ~0.62), so the outer ring recedes;
+    // when highlighted they match the docs' full glow. dim 0.12 / highlighted 1 / resting 0.4.
+    const alpha = dim ? 0.12 : lit ? 1 : clamp(0.4 + act * 0.3, 0, 1);
 
     // Slow drift — keep _px/_py current even when culled (hit-test + connections).
     const ox = sin(tick * 0.00015 * e.orbitSpeed + e.orbitPhase) * e.orbitDrift;
@@ -187,7 +188,7 @@ export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
     ctx.globalAlpha = 1;
 
     // Crisp core — collection coreA: dim 0.22 / highlighted 0.98 / resting 0.7.
-    const coreA = dim ? 0.22 : lit ? 0.98 : 0.7;
+    const coreA = dim ? 0.18 : lit ? 0.98 : 0.48;   // resting core dimmer than a doc's (0.7)
     ctx.fillStyle = `rgba(226,238,255,${coreA})`;   // cool-white core to match the blue glow
     ctx.beginPath();
     ctx.arc(px, py, Math.max(1.3, e.radius * 0.4), 0, TAU);
