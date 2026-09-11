@@ -312,7 +312,7 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
   const actCo = coEntities.find(e => e.id === activeId);
   // Reuse the collection page's link palette exactly:
   //   PRIMARY  = highlighted tree edge  -> solid  rgba(255,220,150,0.55), lineWidth 1.6
-  //   SECONDARY = file->entity edge      -> dashed rgba(224,160,48,0.35), [2,6]
+  //   SECONDARY = doc->entity edge       -> dashed rgba(90,165,255,0.45), [2,6] (blue, matches entities)
   const PRIMARY = 'rgba(255,220,150,0.55)', SECONDARY = 'rgba(90,165,255,0.45)';
 
   const primary = (ax, ay, bx, by) => {

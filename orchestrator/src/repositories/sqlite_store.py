@@ -556,6 +556,11 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
     def get_star_graph(self, entity_id, co_limit=150):
+        # co_limit is a caller/URL param; clamp it so the shared_docs query's
+        # (co_limit + 400-doc chunk) placeholder count stays under SQLite's
+        # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) — the same ceiling the
+        # doc-id chunking guards against.
+        co_limit = max(1, min(int(co_limit), 400))
         # Entity info — an invalidated (soft-deleted) entity has no star graph.
         entity = self._conn.execute(
             "SELECT id, canonical_name, type FROM entities WHERE id = ? AND invalid_at IS NULL",
