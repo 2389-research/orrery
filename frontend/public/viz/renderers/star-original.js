@@ -162,7 +162,7 @@ export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
     const isActive = activeId === e.id;
     const lit = hl && hl.has(e.id);            // highlighted (active node or linked to it)
     const dim = hl && !lit;
-    const tc = typeColor(e.type);
+    const tc = '#4aa3ff';   // entities glow BLUE (docs keep their amber) — a second color channel
     const [rc, gc, bc] = hexRGB(tc);
     const act = e.activityGlow || 0;
     // Collection-page lighting: dim 0.14 / highlighted 1 / resting 0.62 (glow).
@@ -188,7 +188,7 @@ export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
 
     // Crisp core — collection coreA: dim 0.22 / highlighted 0.98 / resting 0.7.
     const coreA = dim ? 0.22 : lit ? 0.98 : 0.7;
-    ctx.fillStyle = `rgba(255,240,220,${coreA})`;
+    ctx.fillStyle = `rgba(226,238,255,${coreA})`;   // cool-white core to match the blue glow
     ctx.beginPath();
     ctx.arc(px, py, Math.max(1.3, e.radius * 0.4), 0, TAU);
     ctx.fill();
@@ -312,7 +312,7 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
   // Reuse the collection page's link palette exactly:
   //   PRIMARY  = highlighted tree edge  -> solid  rgba(255,220,150,0.55), lineWidth 1.6
   //   SECONDARY = file->entity edge      -> dashed rgba(224,160,48,0.35), [2,6]
-  const PRIMARY = 'rgba(255,220,150,0.55)', SECONDARY = 'rgba(224,160,48,0.35)';
+  const PRIMARY = 'rgba(255,220,150,0.55)', SECONDARY = 'rgba(90,165,255,0.45)';
 
   const primary = (ax, ay, bx, by) => {
     ctx.strokeStyle = PRIMARY; ctx.lineWidth = 1.6;
