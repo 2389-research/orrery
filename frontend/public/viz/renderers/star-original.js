@@ -338,7 +338,7 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
       if (doc) secondary(actCo._px, actCo._py, doc._px, doc._py);
     }
   } else if (activeId === centralEntityId) {
-    // core active — faint reach to every doc (dashed gold), so it reads without drowning
+    // core active — faint reach to every doc (dashed blue), so it reads without drowning
     ctx.strokeStyle = 'rgba(90,165,255,0.28)'; ctx.lineWidth = 0.6; ctx.setLineDash([2, 8]);
     for (const doc of docs) { ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke(); }
     ctx.setLineDash([]);
