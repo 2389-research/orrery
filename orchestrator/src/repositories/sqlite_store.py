@@ -564,16 +564,12 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         if not entity:
             return None
 
-        # Documents — with primary domain and the active-entity count per doc (the
-        # share denominator the orbital layout needs). domain_path comes from a
-        # correlated SUBQUERY, not a JOIN: (document_id, domain_path) is the PK but
-        # is_primary is an unconstrained flag, so a JOIN could multiply a doc row if a
-        # doc ever had two primaries. The subquery + LIMIT 1 can never multiply rows.
-        # domain_path is None when a doc has no primary domain → client greys it.
+        # Documents for this entity. Every id-list query below is CHUNKED (400/batch):
+        # a hub entity can have thousands of docs, and an unbounded `IN (…)` would blow
+        # past SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) and 500 the whole
+        # endpoint. _galaxy_pos already chunked for this reason; the doc-id paths now do too.
         doc_rows = self._conn.execute("""
-            SELECT DISTINCT d.id, d.title, d.content_type,
-                   (SELECT dd.domain_path FROM document_domains dd
-                     WHERE dd.document_id = d.id AND dd.is_primary = 1 LIMIT 1) AS domain_path
+            SELECT DISTINCT d.id, d.title, d.content_type
             FROM entity_sources es
             JOIN documents d ON es.document_id = d.id
             WHERE es.entity_id = ? AND d.invalid_at IS NULL
@@ -581,23 +577,40 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         """, (entity_id,)).fetchall()
         doc_ids = [r["id"] for r in doc_rows]
 
+        def _chunks(seq, n=400):
+            for i in range(0, len(seq), n):
+                yield seq[i:i + n]
+
+        # Primary domain per doc — one grouped fetch, not a correlated subquery evaluated
+        # once per doc row. (document_id, domain_path) is the PK and is_primary is an
+        # unconstrained flag, so we map the FIRST primary seen per doc (setdefault), which
+        # can never multiply doc rows the way a JOIN could. None when a doc has no primary.
+        primary_domain = {}
+        for chunk in _chunks(doc_ids):
+            ph = ",".join("?" * len(chunk))
+            for r in self._conn.execute(f"""
+                SELECT document_id, domain_path FROM document_domains
+                WHERE document_id IN ({ph}) AND is_primary = 1
+            """, list(chunk)):
+                primary_domain.setdefault(r["document_id"], r["domain_path"])
+
         # n_entities per doc: distinct ACTIVE entities extracted from that doc.
         n_entities = {}
-        if doc_ids:
-            ph = ",".join("?" * len(doc_ids))
+        for chunk in _chunks(doc_ids):
+            ph = ",".join("?" * len(chunk))
             for r in self._conn.execute(f"""
                 SELECT es.document_id, COUNT(DISTINCT es.entity_id) AS n
                 FROM entity_sources es
                 JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
                 WHERE es.document_id IN ({ph})
                 GROUP BY es.document_id
-            """, doc_ids):
+            """, list(chunk)):
                 n_entities[r["document_id"]] = r["n"]
 
         documents = [{
             "id": r["id"], "title": r["title"],
             "content_type": r["content_type"] or "text",
-            "domain_path": r["domain_path"],
+            "domain_path": primary_domain.get(r["id"]),
             "n_entities": n_entities.get(r["id"], 1),   # >=1: the entity itself
         } for r in doc_rows]
 
@@ -615,17 +628,17 @@ class SQLiteRelationshipRepository(RelationshipRepository):
 
         co_entity_ids = list(dict.fromkeys(r["id"] for r in co_rows))
 
-        # Shared docs
+        # Shared docs — chunk on doc_ids so the placeholder count stays ~co_limit + 400.
         shared_docs = {}
         if co_entity_ids and doc_ids:
             ph_co = ",".join("?" * len(co_entity_ids))
-            ph_doc = ",".join("?" * len(doc_ids))
-            shared_rows = self._conn.execute(f"""
-                SELECT es.entity_id, es.document_id FROM entity_sources es
-                WHERE es.entity_id IN ({ph_co}) AND es.document_id IN ({ph_doc})
-            """, co_entity_ids + doc_ids).fetchall()
-            for r in shared_rows:
-                shared_docs.setdefault(r["entity_id"], []).append(r["document_id"])
+            for chunk in _chunks(doc_ids):
+                ph_doc = ",".join("?" * len(chunk))
+                for r in self._conn.execute(f"""
+                    SELECT es.entity_id, es.document_id FROM entity_sources es
+                    WHERE es.entity_id IN ({ph_co}) AND es.document_id IN ({ph_doc})
+                """, co_entity_ids + list(chunk)):
+                    shared_docs.setdefault(r["entity_id"], []).append(r["document_id"])
 
         # Galaxy positions: where each co-entity (and the core) sits on the galaxy map —
         # the cube-weighted centroid of its domains' UMAP positions (domain_layout), the
@@ -654,8 +667,9 @@ class SQLiteRelationshipRepository(RelationshipRepository):
                     a[0] += p[0] * cw; a[1] += p[1] * cw; a[2] += cw
             return {eid: {"gx": a[0] / a[2], "gy": a[1] / a[2]} for eid, a in acc.items() if a[2] > 0}
 
-        co_pos = _galaxy_pos(co_entity_ids)
-        core_pos = _galaxy_pos([entity_id]).get(entity_id)
+        # One pass for co-entities AND the core (the core was a second redundant query).
+        co_pos = _galaxy_pos(co_entity_ids + [entity_id])
+        core_pos = co_pos.get(entity_id)
 
         co_entities = [{
             "id": r["id"], "canonical_name": r["canonical_name"], "type": r["type"],
@@ -667,7 +681,7 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         from ..pipeline.graph_snapshot import domain_palette
         palette = domain_palette(self._conn)
         # Filter to the leaf domains actually present on this star.
-        present = {r["domain_path"] for r in doc_rows if r["domain_path"]}
+        present = {dp for dp in primary_domain.values() if dp}
         palette = {p: palette[p] for p in present if p in palette}
 
         return {

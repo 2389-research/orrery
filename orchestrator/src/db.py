@@ -794,6 +794,12 @@ def init_db(db_path: str) -> None:
             # table — tens of seconds on a mid-size graph.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_sources_entity "
                          "ON entity_sources(entity_id)")
+            # The reverse lookup — "which entities are in this doc" — is just as hot:
+            # the star graph's per-doc n_entities/shared-docs reads filter on
+            # document_id, which had no index, forcing a full scan of the largest
+            # table on every star-graph load. Index it too (verified via EXPLAIN).
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_sources_document "
+                         "ON entity_sources(document_id)")
             # Any domain-scoped read (a domain's docs, its entities, its neighbours)
             # filters on domain_path, but the only index is the composite PK
             # (document_id, domain_path), which cannot be seeked by path — so the
