@@ -338,9 +338,14 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
       if (doc) secondary(actCo._px, actCo._py, doc._px, doc._py);
     }
   } else if (activeId === centralEntityId) {
-    // core active — faint reach to every doc (dashed blue), so it reads without drowning
-    ctx.strokeStyle = 'rgba(90,165,255,0.28)'; ctx.lineWidth = 0.6; ctx.setLineDash([2, 8]);
+    // core highlighted — SOLID gold links to every doc. Every doc connects to the core,
+    // so a big entity (thousands of docs) would drown in bright lines; scale alpha + width
+    // DOWN with doc count so a small entity reads as a crisp bright starburst while a large
+    // one stays legible. (The docs themselves light up regardless via the highlight set.)
+    const n = Math.max(1, docs.length);
+    const a = Math.max(0.08, Math.min(0.55, 2.4 / Math.sqrt(n)));
+    const w = Math.max(0.6, Math.min(1.6, 24 / Math.sqrt(n)));
+    ctx.strokeStyle = `rgba(255,220,150,${a})`; ctx.lineWidth = w;
     for (const doc of docs) { ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke(); }
-    ctx.setLineDash([]);
   }
 }
