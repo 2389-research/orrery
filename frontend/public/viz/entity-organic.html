@@ -57,8 +57,9 @@ canvas:active { cursor: grabbing; }
 import { Camera } from './core/camera.js';
 import { sin, cos, hexRGB, rgba, sqrt, clamp, random, hypot, TAU, PI } from './core/utils.js';
 import { drawBackground } from './renderers/galaxy.js';
-import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar, drawTerritories } from './renderers/star.js';
-import * as SEG from './core/segmentum-layout.js';
+import { drawCentralStar, drawDocuments, drawCoEntities, drawConnections, drawMiniStar } from './renderers/star-original.js';
+// Placement uses the galaxy method (cube-weighted centroid); deterministic hash for jitter.
+function hash01(str){let h=2166136261>>>0;for(let i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0)/4294967296;}
 
 const canvas = document.getElementById('c');
 const camera = new Camera();
@@ -133,7 +134,36 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
 
 const collections = []; // collections this entity belongs to — periphery ring, gold tint
 const pulses = []; // traveling dots along connections
-let hoveredId = null;
+let hoveredId = null;   // node under the cursor
+let pinnedId = null;    // node locked by a click; overrides hover until cleared
+
+// Active node = pinned (locked) or, failing that, hovered — the collection-view model.
+// Its highlight set is the node itself plus everything it connects to: for a doc, the
+// central entity + every co-entity it shares; for a co-entity, the central entity + every
+// doc it shares. Everything outside the set dims. Memoized on the active id so the set is
+// rebuilt only when the active node changes, not every frame.
+let _hlCache = { id: undefined, set: null };
+function computeHighlight() {
+  const id = pinnedId ?? hoveredId;
+  if (id === _hlCache.id) return _hlCache.set;
+  let set = null;
+  if (id) {
+    const doc = docIndex.get(id);
+    const co = coEntities.find(c => c.id === id);
+    if (doc) {
+      set = new Set([id]);
+      if (centralEntity) set.add(centralEntity.id);
+      for (const c of coEntities) if (c.sharedDocIds && c.sharedDocIds.includes(id)) set.add(c.id);
+    } else if (co) {
+      set = new Set([id]);
+      if (centralEntity) set.add(centralEntity.id);
+      for (const did of (co.sharedDocIds || [])) set.add(did);
+    }
+    // central / collection active -> set stays null (no dimming, just its own panel)
+  }
+  _hlCache = { id, set };
+  return set;
+}
 
 const API_URL = new URLSearchParams(location.search).get('api') || window.API_URL || 'http://localhost:8100';
 const AUTH_TOKEN = new URLSearchParams(location.search).get('token') || '';
@@ -253,63 +283,102 @@ function buildStarView(graph) {
   // Doc ID → doc object (for linking co-entities to docs)
   const docById = {};
 
-  // Segmentum layout: radius = relevance band, angle = domain-anchor + connectivity,
-  // domain TERRITORIES derived after placement by a KNN/Voronoi partition. All the math
-  // lives in core/segmentum-layout.js (tested). Positions are world coords around cx,cy.
-  // ?territories=off → the domain-free ORGANIC SCATTER: same 2D placement, radius spread
-  // EVENLY (no rim clump), no territory partition, uniform doc colour.
-  const noTerritories = new URLSearchParams(location.search).get('territories') === 'off';
-  window.__NO_DOMAIN_COLOR__ = noTerritories;
-  const seg = noTerritories
-    ? SEG.layoutSegmentum(graph, { placeOnly: true, radiusMode: 'even' })
-    : SEG.layoutSegmentum(graph, { K: 10, minRegionCells: 10, maxEnclaves: 2, maxReachMul: 16 });
-
-  const docAngle = new Map();
-  for (const d of seg.points) {
-    const dx = cx + cos(d.theta) * d.r;
-    const dy = cy + sin(d.theta) * d.r;
-    const doc = {
-      id: d.id,
-      kind: 'document',
-      title: d.title || 'Untitled',
-      content_type: d.content_type || 'text',
-      domain_path: d.domain_path,
-      domain: d.domain,          // mid-level territory key
-      radius: 8,
-      x: dx, y: dy,
-      _px: dx, _py: dy,
-      angle: d.theta,
-      orbitPhase: random() * TAU,
-      orbitSpeed: 0.5 + random() * 0.5,
-      orbitDrift: 4 + random() * 6,
-      activityGlow: 0,
-    };
-    docs.push(doc);
-    docById[d.id] = doc;
-    docIndex.set(d.id, doc);
-    docAngle.set(d.id, d.theta);
-  }
-
-  // Co-entities — a graduated band beyond the outer ring. Strength (shared/entity
-  // docs) sets radius within the band; angle = circular mean of shared-doc angles.
-  const filteredCo = coList.filter(c => c.type !== 'Domain');
-  const entityDocCount = docList.length || 1;
-  const sortedCo = [...filteredCo].sort((a, b) => b.weight - a.weight);
-  const labelThreshold = sortedCo.length > 8
-    ? (sortedCo[Math.floor(sortedCo.length * 0.3)]?.weight || 1)
-    : 0;
-  for (const co of filteredCo) {
-    co._entityDocCount = entityDocCount;
-    co.shared = (co.shared_doc_ids || []).length;
-    co.labelThreshold = labelThreshold;
-  }
-  const band = SEG.coEntityBand(filteredCo, docAngle, {
-    rInner: SEG.R1 + 60,
-    rOuter: SEG.R1 + 60 + Math.min(200, 40 + filteredCo.length),
+  // THE GALAXY METHOD (state.js _makeEntityNode): co-entities are fixed CONTAINERS at
+  // their real galaxy positions; a doc is the cube-weighted CENTROID of its co-entities'
+  // positions + jitter. No force sim, no tuning — the doc falls to the gravitational
+  // balance of the co-entities it connects to, exactly like an entity falls to its
+  // domains' centroid on the galaxy map.
+  const RIM = 900;
+  const coAll = (graph.co_entities || []).filter(c => c.type !== 'Domain');
+  // Fix each co-entity on the rim at its BEARING from the core's galaxy position, so its
+  // direction preserves where it sits on the galaxy map (galaxy layout isn't even — it's
+  // the domain UMAP). Co-entities with no galaxy position fall back to an even spread.
+  const cgx = graph.entity?.gx ?? 0.5, cgy = graph.entity?.gy ?? 0.5;
+  // 1) Raw galaxy bearing per co-entity (the direction it lies from the core on the map).
+  const rawBearing = coAll.map((c, i) => ({
+    id: c.id,
+    a: (c.gx != null && c.gy != null && (c.gx !== cgx || c.gy !== cgy))
+      ? Math.atan2(c.gy - cgy, c.gx - cgx)
+      : (-Math.PI / 2 + (i / Math.max(1, coAll.length)) * TAU),
+  }));
+  // 2) Blended angular spread. openai's co-entities nearly all lie in ONE galaxy direction
+  // (AI/software), so honoring raw degrees leaves half the disk empty; but pure rank
+  // equalization evens out the density and loses the signal that that region is crowded.
+  // So blend each co-entity's UNIFORM rank position with its NORMALIZED raw galaxy bearing
+  // (BLEND = equalized share), keeping order intact, then renormalize the blend to span the
+  // FULL circle. Result: all 360deg is used AND spacing stays data-driven — co-entities
+  // bunch where their galaxy region is genuinely dense, with gaps where it is sparse.
+  const BLEND = 0.6;                                     // 0.6 uniform + 0.4 raw galaxy density
+  const ordered = [...rawBearing].sort((u, v) => u.a - v.a);
+  const N = ordered.length || 1;
+  const rawMin = ordered[0]?.a ?? 0, rawMax = ordered[N - 1]?.a ?? 1;
+  const rawRange = (rawMax - rawMin) || 1;
+  const pos = ordered.map((p, i) => BLEND * ((i + 0.5) / N) + (1 - BLEND) * ((p.a - rawMin) / rawRange));
+  const pMin = pos[0] ?? 0, pMax = pos[N - 1] ?? 1, pRange = (pMax - pMin) || 1;
+  const coPos = new Map();
+  ordered.forEach((p, i) => {
+    const t = (pos[i] - pMin) / pRange;                 // 0..1 across the full circle
+    const a = -Math.PI + t * TAU;
+    coPos.set(p.id, { angle: a, x: cx + Math.cos(a) * RIM, y: cy + Math.sin(a) * RIM });
   });
-  for (const co of band) {
-    const x = cx + cos(co.angle) * co.radius;
-    const y = cy + sin(co.angle) * co.radius;
+  const docCo = new Map();                              // docId -> [{id, w}]
+  for (const c of coAll) for (const did of (c.shared_doc_ids || [])) {
+    if (!docCo.has(did)) docCo.set(did, []); docCo.get(did).push({ id: c.id, w: c.weight || 1 });
+  }
+  // POLAR placement — the center now ENCODES something:
+  //   radius = the doc's relevance to the CORE entity (how much this doc is "about" it),
+  //   angle  = the gravitational bearing toward the co-entities it shares.
+  //
+  // radius: rel = 1/n_entities (a doc where the core is one of few entities is more about
+  // the core than one where it's 1-of-1272), normalized by the FARTHEST doc so only the
+  // least-relevant reaches the rim and equally-relevant docs share a radius (then jittered).
+  // This is resolveDocs' 'value' mode — reused, not re-invented.
+  const RIN = 90, ROUT = 820;                          // inner floor .. rim for docs
+  const rels = (graph.documents || []).map(d => 1 / (d.n_entities || 1));
+  const relMax = rels.length ? Math.max(...rels) : 1;
+  const relMin = rels.length ? Math.min(...rels) : 0;
+  const relRange = (relMax - relMin) || 1;
+  // angle: equal-weight resultant bearing of the co-entities the doc shares (each shared
+  // co-entity is one honest tie; shared_doc_ids is membership, not per-doc strength). We
+  // do NOT cube — co-entity weights are GLOBAL co-occurrence counts spanning ~40x, and
+  // cubing lets one globally-popular co-entity own the pull against the doc's own mentions.
+  for (const d of (graph.documents || [])) {
+    const cs = docCo.get(d.id) || [];
+    let sx = 0, sy = 0, tw = 0;
+    for (const { id } of cs) { const p = coPos.get(id); if (!p) continue; sx += p.x - cx; sy += p.y - cy; tw += 1; }
+    const ang = tw > 0 ? Math.atan2(sy, sx) : hash01(d.id) * TAU;   // co-entity bearing, else random
+    const rel = 1 / (d.n_entities || 1);
+    const rTarget = RIN + (ROUT - RIN) * (relMax - rel) / relRange; // least-relevant -> rim
+    // jitter: angular spread so ties fan out, small radial wobble so equal-radius docs
+    // don't form a hard ring. The core-relevance radius is preserved (band, not pin).
+    const aj = ang + (hash01(d.id + 'a') - 0.5) * 0.55;
+    const rj = Math.max(RIN * 0.5, rTarget + (hash01(d.id + 'r') - 0.5) * 80);
+    const jx = cx + Math.cos(aj) * rj, jy = cy + Math.sin(aj) * rj;
+    const doc = {
+      id: d.id, kind: 'document', title: d.title || 'Untitled', content_type: d.content_type || 'text',
+      radius: 8, x: jx, y: jy, _px: jx, _py: jy, angle: Math.atan2(jy - cy, jx - cx),
+      orbitPhase: random() * TAU, orbitSpeed: 0.5 + random() * 0.5, orbitDrift: 4 + random() * 6, activityGlow: 0,
+    };
+    docs.push(doc); docById[d.id] = doc; docIndex.set(d.id, doc);
+  }
+
+  // Place co-entities — filter out Domain types, position near their shared docs
+  const filteredCo = coList.filter(c => c.type !== 'Domain');
+  const sortedCo = [...filteredCo].sort((a, b) => b.weight - a.weight);
+
+  for (let i = 0; i < sortedCo.length; i++) {
+    const co = sortedCo[i];
+    // Same rim position the docs were pulled toward — its BEARING from the core's galaxy
+    // position, so a co-entity sits where it is on the galaxy map (+ tiny ring thickness).
+    const p0 = coPos.get(co.id);
+    const baseAngle = p0 ? p0.angle : (i * 2.399963);
+    // Galaxy bearing is the ANCHOR (a co-entity sits in the direction it lies from the
+    // core on the galaxy map), but we fan + jitter around it so same-bearing co-entities
+    // form a readable CLOUD at the edge instead of piling into one thin arc. Angular
+    // jitter spreads them across their true direction; radial jitter gives depth.
+    const angle = baseAngle + (hash01(co.id + 'ca') - 0.5) * 0.42;
+    const r = RIM + 30 + hash01(co.id + 'cr') * 230;
+
     coEntities.push({
       id: co.id,
       kind: 'co_entity',
@@ -317,10 +386,11 @@ function buildStarView(graph) {
       type: co.type,
       weight: co.weight,
       sharedDocIds: co.shared_doc_ids || [],
-      strength: co.strength,
-      labelThreshold: co.labelThreshold,
-      radius: 5 + sqrt(co.weight || 1) * 2,
-      x, y, _px: x, _py: y,
+      radius: 5 + sqrt(co.weight) * 2,
+      x: cx + cos(angle) * r,
+      y: cy + sin(angle) * r,
+      _px: cx + cos(angle) * r,
+      _py: cy + sin(angle) * r,
       orbitPhase: random() * TAU,
       orbitSpeed: 0.4 + random() * 0.6,
       orbitDrift: 5 + random() * 8,
@@ -328,13 +398,9 @@ function buildStarView(graph) {
     });
   }
 
-  // Stash the segmentum + palette for the renderer.
-  window.__SEG__ = seg;
-  window.__STAR_PALETTE__ = graph.palette || {};
-
   // Repo nodes — outer periphery ring (beyond co-entities), gold tint, so this
   // reads as "the collection(s) this entity belongs to". Click navigates to collection.html.
-  const repoRing = 480;
+  const repoRing = 1080; // collections beyond the co-entities
   for (let i = 0; i < collectionList.length; i++) {
     const rp = collectionList[i];
     const rAngle = (i / Math.max(collectionList.length, 1)) * TAU - PI / 2;
@@ -349,7 +415,6 @@ function buildStarView(graph) {
       name: `▣ ${rp.name}`,
       type: 'Repo',
       weight: 1,
-      labelThreshold: 0,
       sharedDocIds: [],
       radius: 9,
       x: rx, y: ry,
@@ -411,22 +476,6 @@ canvas.addEventListener('mousemove', e => {
   hoveredId = hit ? hit.id : null;
   canvas.style.cursor = hit ? 'pointer' : 'grab';
 
-  // Territory hover: a hovered document lights its whole domain; otherwise map the
-  // pointer to a partition cell (angle -> column, radius -> ring) and read its domain.
-  let hd = (hit && hit.domain) ? hit.domain : null;
-  const seg = window.__SEG__;
-  if (!hd && seg && seg.mode === 'territories') {
-    const dist = Math.hypot(w.x - 2500, w.y - 2500);
-    const ang = Math.atan2(w.y - 2500, w.x - 2500);
-    const { A, J, cells } = seg;
-    if (dist >= SEG.R0 && dist <= SEG.R1) {
-      const i = ((Math.floor(((ang + Math.PI) / TAU) * A) % A) + A) % A;
-      const j = Math.min(J - 1, Math.max(0, Math.floor((dist - SEG.R0) / (SEG.R1 - SEG.R0) * J)));
-      hd = cells[i][j]?.domain ?? null;
-    }
-  }
-  window.__STAR_HOVER__ = hd;
-
   const tt = document.getElementById('tooltip');
   if (hit && hit.kind === 'document') {
     // Find co-entities that share this doc
@@ -475,33 +524,46 @@ canvas.addEventListener('mouseup', e => {
     const w = camera.screenToWorld(e.clientX, e.clientY, W, H);
     const hit = hitTest(w.x, w.y);
     if (hit) {
-      if (hit.kind === 'co_entity') {
-        const params = new URLSearchParams(location.search);
-        params.set('entity', hit.id);
-        window.location.search = params.toString();
-      } else if (hit.kind === 'document') {
-        window.parent.postMessage({
-          type: 'node_selected', nodeType: 'document',
-          data: { id: hit.id, title: hit.title, content_type: hit.content_type || 'text' }
-        }, '*');
+      if (hit.kind === 'document') {
+        // Click LOCKS the highlight (pin) and opens the doc; click it again to release.
+        if (pinnedId === hit.id) {
+          pinnedId = null;
+          window.parent.postMessage({ type: 'node_cleared' }, '*');
+        } else {
+          pinnedId = hit.id;
+          window.parent.postMessage({
+            type: 'node_selected', nodeType: 'document',
+            data: { id: hit.id, title: hit.title, content_type: hit.content_type || 'text' }
+          }, '*');
+        }
+      } else if (hit.kind === 'co_entity') {
+        // Click LOCKS the highlight on this entity + its docs. Double-click re-centers.
+        pinnedId = (pinnedId === hit.id) ? null : hit.id;
       } else if (hit.kind === 'collection') {
-        // Jump to that collection's structure view (host swaps star.html -> collection.html)
+        // Jump to that collection's structure view (host swaps to collection.html)
         window.parent.postMessage({ type: 'enter_collection',
                                    collectionId: hit.collectionId,
                                    collectionName: hit.collectionName }, '*');
       } else if (hit.kind === 'central') {
-        window.parent.postMessage({
-          type: 'node_selected', nodeType: 'entity',
-          data: {
-            id: centralEntity.id,
-            name: centralEntity.name,
-            entityType: centralEntity.type,
-            source_count: centralEntity.sourceCount,
-          }
-        }, '*');
+        if (pinnedId === hit.id) {
+          pinnedId = null;
+          window.parent.postMessage({ type: 'node_cleared' }, '*');
+        } else {
+          pinnedId = hit.id;
+          window.parent.postMessage({
+            type: 'node_selected', nodeType: 'entity',
+            data: {
+              id: centralEntity.id,
+              name: centralEntity.name,
+              entityType: centralEntity.type,
+              source_count: centralEntity.sourceCount,
+            }
+          }, '*');
+        }
       }
     } else {
-      // Clicked empty space — close any open panel
+      // Clicked empty space — release the pin + close any open panel
+      pinnedId = null;
       window.parent.postMessage({ type: 'node_cleared' }, '*');
     }
   }
@@ -515,6 +577,13 @@ canvas.addEventListener('dblclick', e => {
   H = canvas.height / renderScale;
   const w = camera.screenToWorld(e.clientX, e.clientY, W, H);
   const hit = hitTest(w.x, w.y);
+  if (hit && hit.kind === 'co_entity') {
+    // Double-click a co-entity re-centers the star on it (single click just pins).
+    const params = new URLSearchParams(location.search);
+    params.set('entity', hit.id);
+    window.location.search = params.toString();
+    return;
+  }
   if (!hit) {
     userMoved = true;
     camera.flyTo(w.x, w.y, camera.zoom * 1.8, 400);
@@ -568,14 +637,14 @@ function frame() {
       bottom: camera.y + H / 2 / camera.zoom + _m,
     };
 
-    // Domain sectors sit behind everything else (above the starfield).
-    if (window.__SEG__) drawTerritories(ctx, window.__SEG__, 2500, 2500, view);
+    const activeId = pinnedId ?? hoveredId;
+    const hl = computeHighlight();
 
-    drawConnections(ctx, centralEntity.x, centralEntity.y, docs, coEntities, hoveredId, centralEntity.id, docIndex, view);
+    drawConnections(ctx, centralEntity.x, centralEntity.y, docs, coEntities, activeId, centralEntity.id, docIndex, view);
 
     // Center → repo peripheral connections (gold), distinguishing "belongs to repo"
     for (const rp of collections) {
-      const litR = hoveredId === centralEntity.id || hoveredId === rp.id;
+      const litR = activeId === centralEntity.id || activeId === rp.id;
       ctx.strokeStyle = `rgba(224,160,48,${litR ? 0.35 : 0.06})`;
       ctx.lineWidth = litR ? 1.6 : 0.5;
       ctx.setLineDash([3, 9]);
@@ -623,13 +692,13 @@ function frame() {
       ctx.fill();
     }
 
-    drawDocuments(ctx, docs, tick, hoveredId, view);
-    drawCoEntities(ctx, coEntities, tick, hoveredId, view);
+    drawDocuments(ctx, docs, tick, activeId, view, hl);
+    drawCoEntities(ctx, coEntities, tick, activeId, view, hl);
     // Repo nodes render as small glowing gold stars — brighter/sharper than
     // a co-entity dot, but smaller and dimmer than the central entity star.
     for (const rp of collections) {
       if (rp.x < view.left || rp.x > view.right || rp.y < view.top || rp.y > view.bottom) continue;
-      drawMiniStar(ctx, rp, tick, hoveredId, { color: '#e0a030', brightness: 0.55 });
+      drawMiniStar(ctx, rp, tick, activeId, { color: '#e0a030', brightness: 0.55 });
     }
     drawCentralStar(ctx, centralEntity, tick);
   }

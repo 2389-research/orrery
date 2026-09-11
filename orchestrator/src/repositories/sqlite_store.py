@@ -555,7 +555,12 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         """).fetchall()
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
-    def get_star_graph(self, entity_id, co_limit=30):
+    def get_star_graph(self, entity_id, co_limit=150):
+        # co_limit is a caller/URL param; clamp it so the shared_docs query's
+        # (co_limit + 400-doc chunk) placeholder count stays under SQLite's
+        # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) — the same ceiling the
+        # doc-id chunking guards against.
+        co_limit = max(1, min(int(co_limit), 400))
         # Entity info — an invalidated (soft-deleted) entity has no star graph.
         entity = self._conn.execute(
             "SELECT id, canonical_name, type FROM entities WHERE id = ? AND invalid_at IS NULL",
@@ -564,14 +569,55 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         if not entity:
             return None
 
-        # Documents
+        # Documents for this entity. Every id-list query below is CHUNKED (400/batch):
+        # a hub entity can have thousands of docs, and an unbounded `IN (…)` would blow
+        # past SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) and 500 the whole
+        # endpoint. _galaxy_pos already chunked for this reason; the doc-id paths now do too.
         doc_rows = self._conn.execute("""
-            SELECT DISTINCT d.id, d.title, d.content_type FROM entity_sources es
-            JOIN documents d ON es.document_id = d.id WHERE es.entity_id = ? AND d.invalid_at IS NULL
+            SELECT DISTINCT d.id, d.title, d.content_type
+            FROM entity_sources es
+            JOIN documents d ON es.document_id = d.id
+            WHERE es.entity_id = ? AND d.invalid_at IS NULL
             ORDER BY d.title
         """, (entity_id,)).fetchall()
         doc_ids = [r["id"] for r in doc_rows]
-        documents = [{"id": r["id"], "title": r["title"], "content_type": r["content_type"] or "text"} for r in doc_rows]
+
+        def _chunks(seq, n=400):
+            for i in range(0, len(seq), n):
+                yield seq[i:i + n]
+
+        # Primary domain per doc — one grouped fetch, not a correlated subquery evaluated
+        # once per doc row. (document_id, domain_path) is the PK and is_primary is an
+        # unconstrained flag, so we map the FIRST primary seen per doc (setdefault), which
+        # can never multiply doc rows the way a JOIN could. None when a doc has no primary.
+        primary_domain = {}
+        for chunk in _chunks(doc_ids):
+            ph = ",".join("?" * len(chunk))
+            for r in self._conn.execute(f"""
+                SELECT document_id, domain_path FROM document_domains
+                WHERE document_id IN ({ph}) AND is_primary = 1
+            """, list(chunk)):
+                primary_domain.setdefault(r["document_id"], r["domain_path"])
+
+        # n_entities per doc: distinct ACTIVE entities extracted from that doc.
+        n_entities = {}
+        for chunk in _chunks(doc_ids):
+            ph = ",".join("?" * len(chunk))
+            for r in self._conn.execute(f"""
+                SELECT es.document_id, COUNT(DISTINCT es.entity_id) AS n
+                FROM entity_sources es
+                JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
+                WHERE es.document_id IN ({ph})
+                GROUP BY es.document_id
+            """, list(chunk)):
+                n_entities[r["document_id"]] = r["n"]
+
+        documents = [{
+            "id": r["id"], "title": r["title"],
+            "content_type": r["content_type"] or "text",
+            "domain_path": primary_domain.get(r["id"]),
+            "n_entities": n_entities.get(r["id"], 1),   # >=1: the entity itself
+        } for r in doc_rows]
 
         # Co-entities
         co_rows = self._conn.execute("""
@@ -587,29 +633,69 @@ class SQLiteRelationshipRepository(RelationshipRepository):
 
         co_entity_ids = list(dict.fromkeys(r["id"] for r in co_rows))
 
-        # Shared docs
+        # Shared docs — chunk on doc_ids so the placeholder count stays ~co_limit + 400.
         shared_docs = {}
         if co_entity_ids and doc_ids:
             ph_co = ",".join("?" * len(co_entity_ids))
-            ph_doc = ",".join("?" * len(doc_ids))
-            shared_rows = self._conn.execute(f"""
-                SELECT es.entity_id, es.document_id FROM entity_sources es
-                WHERE es.entity_id IN ({ph_co}) AND es.document_id IN ({ph_doc})
-            """, co_entity_ids + doc_ids).fetchall()
-            for r in shared_rows:
-                shared_docs.setdefault(r["entity_id"], []).append(r["document_id"])
+            for chunk in _chunks(doc_ids):
+                ph_doc = ",".join("?" * len(chunk))
+                for r in self._conn.execute(f"""
+                    SELECT es.entity_id, es.document_id FROM entity_sources es
+                    WHERE es.entity_id IN ({ph_co}) AND es.document_id IN ({ph_doc})
+                """, co_entity_ids + list(chunk)):
+                    shared_docs.setdefault(r["entity_id"], []).append(r["document_id"])
+
+        # Galaxy positions: where each co-entity (and the core) sits on the galaxy map —
+        # the cube-weighted centroid of its domains' UMAP positions (domain_layout), the
+        # same membership-centroid the galaxy uses (state.js _makeEntityNode). Lets the
+        # star view preserve galaxy spatial nuance instead of arbitrary placement.
+        dom_pos = {r["domain_path"]: (r["x"], r["y"]) for r in
+                   self._conn.execute("SELECT domain_path, x, y FROM domain_layout WHERE x IS NOT NULL").fetchall()}
+
+        def _galaxy_pos(ids):
+            if not ids or not dom_pos:
+                return {}
+            acc = {}
+            for chunk in (ids[i:i + 400] for i in range(0, len(ids), 400)):
+                ph = ",".join("?" * len(chunk))
+                for r in self._conn.execute(f"""
+                    SELECT es.entity_id AS eid, dd.domain_path AS dp, COUNT(*) AS w
+                    FROM entity_sources es
+                    JOIN document_domains dd ON dd.document_id = es.document_id
+                    WHERE es.entity_id IN ({ph}) GROUP BY es.entity_id, dd.domain_path
+                """, list(chunk)):
+                    p = dom_pos.get(r["dp"])
+                    if not p:
+                        continue
+                    cw = r["w"] ** 3
+                    a = acc.setdefault(r["eid"], [0.0, 0.0, 0.0])
+                    a[0] += p[0] * cw; a[1] += p[1] * cw; a[2] += cw
+            return {eid: {"gx": a[0] / a[2], "gy": a[1] / a[2]} for eid, a in acc.items() if a[2] > 0}
+
+        # One pass for co-entities AND the core (the core was a second redundant query).
+        co_pos = _galaxy_pos(co_entity_ids + [entity_id])
+        core_pos = co_pos.get(entity_id)
 
         co_entities = [{
             "id": r["id"], "canonical_name": r["canonical_name"], "type": r["type"],
             "weight": r["total_weight"],
             "shared_doc_ids": list(set(shared_docs.get(r["id"], []))),
+            **(co_pos.get(r["id"]) or {}),   # gx, gy: galaxy position (absent if no positioned domain)
         } for r in co_rows]
+
+        from ..pipeline.graph_snapshot import domain_palette
+        palette = domain_palette(self._conn)
+        # Filter to the leaf domains actually present on this star.
+        present = {dp for dp in primary_domain.values() if dp}
+        palette = {p: palette[p] for p in present if p in palette}
 
         return {
             "entity": {"id": entity["id"], "canonical_name": entity["canonical_name"],
-                        "type": entity["type"], "source_count": len(doc_ids)},
+                        "type": entity["type"], "source_count": len(doc_ids),
+                        **(core_pos or {})},   # gx, gy: the core's galaxy position
             "documents": documents,
             "co_entities": co_entities,
+            "palette": palette,
         }
 
     def update_entity_references(self, from_id, to_id):

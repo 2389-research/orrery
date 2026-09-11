@@ -101,11 +101,8 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
                 for k, p in domain_positions.items()
             }
 
-    palette = assign_domain_colors(domains)
-    for d in domains:
-        region = d["path"].split("/")[0]
-        if region not in palette:
-            palette[region] = palette.get(d["path"], "#81d4fa")
+    from .graph_snapshot import domain_palette
+    palette = domain_palette(conn)
 
     # ── entity nodes: per-entity domain + collection membership ─────────
     weight_rows = conn.execute("""
