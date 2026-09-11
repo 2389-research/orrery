@@ -101,11 +101,11 @@ export function drawDocuments(ctx, docs, tick, activeId, view, hl) {
   const glow = docGlowSprite();
   for (const doc of docs) {
     const isActive = activeId === doc.id;
-    const inHl = !hl || hl.has(doc.id);
+    const inHl = hl && hl.has(doc.id);   // in the active node's highlight set
     const dim = hl && !inHl;
     const act = doc.activityGlow || 0;
-    let alpha = clamp(0.7 + act * 0.4, 0, 1);
-    if (isActive) alpha = 1; else if (dim) alpha *= 0.14;
+    // Collection-page lighting: dim 0.14 / highlighted 1 / resting 0.62 (glow).
+    const alpha = dim ? 0.14 : inHl ? 1 : clamp(0.62 + act * 0.3, 0, 1);
 
     // Orbital drift — always update _px/_py (used by hit-test + connections) even
     // when the node itself is culled, so those stay accurate.
@@ -126,10 +126,11 @@ export function drawDocuments(ctx, docs, tick, activeId, view, hl) {
     if (isActive) { ctx.drawImage(glow, px - half, py - half, half * 2, half * 2); } // double-pass = hotter core
     ctx.globalAlpha = 1;
 
-    // Core
-    ctx.fillStyle = `rgba(255,228,175,${(isActive ? 1 : 0.8) * alpha})`;
+    // Crisp core — collection coreA: dim 0.22 / highlighted 0.98 / resting 0.7.
+    const coreA = dim ? 0.22 : inHl ? 0.98 : 0.7;
+    ctx.fillStyle = `rgba(255,240,220,${coreA})`;
     ctx.beginPath();
-    ctx.arc(px, py, sz * 0.5, 0, TAU);
+    ctx.arc(px, py, Math.max(1.3, sz * 0.4), 0, TAU);
     ctx.fill();
 
     // Tiny document icon — two horizontal lines (skip when dimmed to cut noise)
@@ -159,14 +160,13 @@ export function drawDocuments(ctx, docs, tick, activeId, view, hl) {
 export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
   for (const e of coEntities) {
     const isActive = activeId === e.id;
-    const inHl = !hl || hl.has(e.id);         // in the active node's highlight set
-    const lit = hl && inHl;                    // highlighted because the active node links to it
-    const dim = hl && !inHl;
+    const lit = hl && hl.has(e.id);            // highlighted (active node or linked to it)
+    const dim = hl && !lit;
     const tc = typeColor(e.type);
     const [rc, gc, bc] = hexRGB(tc);
     const act = e.activityGlow || 0;
-    let alpha = clamp(0.5 + act * 0.5, 0, 1);
-    if (isActive) alpha = 1.3; else if (lit) alpha = 1.1; else if (dim) alpha *= 0.12;
+    // Collection-page lighting: dim 0.14 / highlighted 1 / resting 0.62 (glow).
+    const alpha = dim ? 0.14 : lit ? 1 : clamp(0.62 + act * 0.3, 0, 1);
 
     // Slow drift — keep _px/_py current even when culled (hit-test + connections).
     const ox = sin(tick * 0.00015 * e.orbitSpeed + e.orbitPhase) * e.orbitDrift;
@@ -179,24 +179,23 @@ export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
 
     // Glow — pre-baked sprite. Highlighted co-entities get a bigger, double-passed halo.
     const glow = coEntityGlowSprite(tc);
-    const boost = (isActive || lit) ? 1.4 : 1;
+    const boost = isActive ? 1.4 : lit ? 1.15 : 1;   // focal node biggest; linked ones pop
     const half = (glow.width * 0.5) * (e.radius / CO_R0) * boost;
     ctx.globalAlpha = min(1, alpha);
     ctx.drawImage(glow, px - half, py - half, half * 2, half * 2);
-    if (isActive || lit) { ctx.drawImage(glow, px - half, py - half, half * 2, half * 2); }
+    if (isActive) { ctx.drawImage(glow, px - half, py - half, half * 2, half * 2); }
     ctx.globalAlpha = 1;
 
-    // Crisp core when highlighted (matches the collection node core).
-    if (!dim) {
-      ctx.fillStyle = `rgba(255,240,220,${isActive ? 0.98 : lit ? 0.85 : 0.6})`;
-      ctx.beginPath();
-      ctx.arc(px, py, Math.max(1.3, e.radius * 0.4), 0, TAU);
-      ctx.fill();
-    }
+    // Crisp core — collection coreA: dim 0.22 / highlighted 0.98 / resting 0.7.
+    const coreA = dim ? 0.22 : lit ? 0.98 : 0.7;
+    ctx.fillStyle = `rgba(255,240,220,${coreA})`;
+    ctx.beginPath();
+    ctx.arc(px, py, Math.max(1.3, e.radius * 0.4), 0, TAU);
+    ctx.fill();
 
     // Label — the active co-entity, AND every co-entity a hovered/pinned doc is attached
     // to (so the doc's connected entities reveal their names). Resting cloud stays clean.
-    const showLabel = isActive || lit;
+    const showLabel = lit;
     if (showLabel) {
       ctx.fillStyle = `rgba(255,244,224,${isActive ? 0.95 : 0.85})`;
       ctx.font = `${isActive ? 16 : 13}px 'Courier New', monospace`;
@@ -310,51 +309,37 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
   if (!activeId) return;   // no resting spokes — links appear only for the active node
   const actDoc = docIndex ? docIndex.get(activeId) : docs.find(d => d.id === activeId);
   const actCo = coEntities.find(e => e.id === activeId);
-  const HILITE = 'rgba(255,222,150,0.6)';   // collection-view bright link
+  // Reuse the collection page's link palette exactly:
+  //   PRIMARY  = highlighted tree edge  -> solid  rgba(255,220,150,0.55), lineWidth 1.6
+  //   SECONDARY = file->entity edge      -> dashed rgba(224,160,48,0.35), [2,6]
+  const PRIMARY = 'rgba(255,220,150,0.55)', SECONDARY = 'rgba(224,160,48,0.35)';
+
+  const primary = (ax, ay, bx, by) => {
+    ctx.strokeStyle = PRIMARY; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+  };
+  const secondary = (ax, ay, bx, by) => {
+    ctx.strokeStyle = SECONDARY; ctx.lineWidth = 1; ctx.setLineDash([2, 6]);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.setLineDash([]);
+  };
 
   if (actDoc) {
-    // center → the active doc
-    ctx.strokeStyle = HILITE;
-    ctx.lineWidth = 1.8;
-    ctx.setLineDash([3, 7]);
-    ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(actDoc._px, actDoc._py); ctx.stroke();
-    ctx.setLineDash([]);
-    // active doc → each co-entity it is attached to (in that entity's own colour)
-    for (const co of coEntities) {
+    primary(centerX, centerY, actDoc._px, actDoc._py);              // core -> active doc
+    for (const co of coEntities) {                                  // active doc -> its entities
       if (!co.sharedDocIds || !co.sharedDocIds.includes(actDoc.id)) continue;
-      const [rc, gc, bc] = hexRGB(typeColor(co.type));
-      ctx.strokeStyle = rgba(rc, gc, bc, 0.5);
-      ctx.lineWidth = 1.4;
-      ctx.setLineDash([2, 6]);
-      ctx.beginPath(); ctx.moveTo(actDoc._px, actDoc._py); ctx.lineTo(co._px, co._py); ctx.stroke();
-      ctx.setLineDash([]);
+      secondary(actDoc._px, actDoc._py, co._px, co._py);
     }
   } else if (actCo) {
-    // center → the active co-entity
-    ctx.strokeStyle = HILITE;
-    ctx.lineWidth = 1.4;
-    ctx.setLineDash([3, 7]);
-    ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(actCo._px, actCo._py); ctx.stroke();
-    ctx.setLineDash([]);
-    // active co-entity → each doc it shares
-    const [rc, gc, bc] = hexRGB(typeColor(actCo.type));
-    for (const docId of (actCo.sharedDocIds || [])) {
+    primary(centerX, centerY, actCo._px, actCo._py);                // core -> active co-entity
+    for (const docId of (actCo.sharedDocIds || [])) {              // active co-entity -> its docs
       const doc = docIndex ? docIndex.get(docId) : docs.find(d => d.id === docId);
-      if (!doc) continue;
-      ctx.strokeStyle = rgba(rc, gc, bc, 0.32);
-      ctx.lineWidth = 1.1;
-      ctx.setLineDash([2, 6]);
-      ctx.beginPath(); ctx.moveTo(actCo._px, actCo._py); ctx.lineTo(doc._px, doc._py); ctx.stroke();
-      ctx.setLineDash([]);
+      if (doc) secondary(actCo._px, actCo._py, doc._px, doc._py);
     }
   } else if (activeId === centralEntityId) {
-    // center → every doc, faint, so the core's reach reads without drowning the field
-    ctx.strokeStyle = 'rgba(255,200,120,0.10)';
-    ctx.lineWidth = 0.6;
-    ctx.setLineDash([3, 8]);
-    for (const doc of docs) {
-      ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke();
-    }
+    // core active — faint reach to every doc (dashed gold), so it reads without drowning
+    ctx.strokeStyle = SECONDARY; ctx.lineWidth = 0.6; ctx.setLineDash([2, 8]);
+    for (const doc of docs) { ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke(); }
     ctx.setLineDash([]);
   }
 }
