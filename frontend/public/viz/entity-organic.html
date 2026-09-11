@@ -158,8 +158,14 @@ function computeHighlight() {
       set = new Set([id]);
       if (centralEntity) set.add(centralEntity.id);
       for (const did of (co.sharedDocIds || [])) set.add(did);
+    } else if (centralEntity && id === centralEntity.id) {
+      // hovering the core lights up ALL its docs (and dims the co-entities) — the
+      // collection-view model: point at a node, its connected items brighten, the rest
+      // recede. drawConnections draws bright links to every doc to match.
+      set = new Set([id]);
+      for (const d of docs) set.add(d.id);
     }
-    // central / collection active -> set stays null (no dimming, just its own panel)
+    // collection active -> set stays null (no dimming, just its own panel)
   }
   _hlCache = { id, set };
   return set;

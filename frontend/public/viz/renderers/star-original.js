@@ -338,9 +338,9 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
       if (doc) secondary(actCo._px, actCo._py, doc._px, doc._py);
     }
   } else if (activeId === centralEntityId) {
-    // core active — faint reach to every doc (dashed blue), so it reads without drowning
-    ctx.strokeStyle = 'rgba(90,165,255,0.28)'; ctx.lineWidth = 0.6; ctx.setLineDash([2, 8]);
-    for (const doc of docs) { ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke(); }
-    ctx.setLineDash([]);
+    // core highlighted — bright SOLID gold links to every doc, matching the collection
+    // view's highlighted edges (and the same primary style used for a single doc's core
+    // link). Was a faint dashed reach that barely read when the core was selected.
+    for (const doc of docs) primary(centerX, centerY, doc._px, doc._py);
   }
 }
