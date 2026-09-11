@@ -338,9 +338,14 @@ export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeI
       if (doc) secondary(actCo._px, actCo._py, doc._px, doc._py);
     }
   } else if (activeId === centralEntityId) {
-    // core highlighted — bright SOLID gold links to every doc, matching the collection
-    // view's highlighted edges (and the same primary style used for a single doc's core
-    // link). Was a faint dashed reach that barely read when the core was selected.
-    for (const doc of docs) primary(centerX, centerY, doc._px, doc._py);
+    // core highlighted — SOLID gold links to every doc. Every doc connects to the core,
+    // so a big entity (thousands of docs) would drown in bright lines; scale alpha + width
+    // DOWN with doc count so a small entity reads as a crisp bright starburst while a large
+    // one stays legible. (The docs themselves light up regardless via the highlight set.)
+    const n = Math.max(1, docs.length);
+    const a = Math.max(0.08, Math.min(0.55, 2.4 / Math.sqrt(n)));
+    const w = Math.max(0.6, Math.min(1.6, 24 / Math.sqrt(n)));
+    ctx.strokeStyle = `rgba(255,220,150,${a})`; ctx.lineWidth = w;
+    for (const doc of docs) { ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke(); }
   }
 }
