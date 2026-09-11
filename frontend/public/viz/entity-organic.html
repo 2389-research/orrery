@@ -709,10 +709,38 @@ function frame() {
 
 requestAnimationFrame(frame);
 
+// ── Screensaver (attract mode) constellation highlight ───────────────────────
+// While the idle screensaver dwells on this entity, the shell pulses
+// {type:'attract_highlight'} in. We PIN a well-connected doc so its constellation
+// (the doc + the co-entities it shares + their links) lights up in place — no
+// camera move; the disk is already framed. A real user input (notifyActivity
+// below) releases the auto-pin so a returning viewer isn't fighting a lock.
+let attractPinned = false;
+let _attractPool = null;
+function attractCycleHighlight() {
+  if (!docs.length) return;
+  if (!_attractPool) {
+    // Prefer docs wired to >=2 co-entities so the constellation reads as one; else any doc.
+    const rich = docs.filter(d => coEntities.reduce((n, c) => n + (c.sharedDocIds.includes(d.id) ? 1 : 0), 0) >= 2);
+    _attractPool = rich.length ? rich : docs;
+  }
+  let pick = pinnedId;
+  for (let i = 0; i < 8 && (!pick || pick === pinnedId); i++) {
+    pick = _attractPool[Math.floor(random() * _attractPool.length)].id;
+  }
+  pinnedId = pick;
+  attractPinned = true;
+}
+window.addEventListener('message', e => {
+  if (e.data?.type === 'attract_highlight') attractCycleHighlight();
+});
+
 // Report real user input to the shell so idle detection works while the star view
 // is up. Throttled; background/API work never triggers it.
 let _lastActivityPing = 0;
 function notifyActivity() {
+  // Real input ends any screensaver auto-pin so the viewer takes over cleanly.
+  if (attractPinned) { attractPinned = false; pinnedId = null; }
   const now = performance.now();
   if (now - _lastActivityPing < 400) return;
   _lastActivityPing = now;
