@@ -232,6 +232,7 @@ export default function VizPage() {
   const idleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const beatTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const lingerTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const attractHiTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const viewModeRef = useRef(viewMode);
   const exitToGalaxyRef = useRef(exitToGalaxy);
   useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
@@ -242,6 +243,7 @@ export default function VizPage() {
     attractRef.current = false;
     clearInterval(beatTimer.current);
     clearTimeout(lingerTimer.current);
+    clearInterval(attractHiTimer.current);
     galaxyRef.current?.contentWindow?.postMessage({ type: "attract_stop" }, "*");
   }, []);
 
@@ -281,8 +283,18 @@ export default function VizPage() {
         // attract dove into a star — dwell, then return to the map and resume.
         clearTimeout(lingerTimer.current);
         lingerTimer.current = setTimeout(() => {
+          clearInterval(attractHiTimer.current);
           if (attractRef.current) exitToGalaxyRef.current();
         }, ATTRACT_STAR_LINGER_MS);
+        // Pulse constellation highlights into the star view during the dwell: the
+        // iframe pins a well-connected doc so its co-entities + links light up in
+        // place (no camera move). It ignores these until its graph has loaded, so
+        // the first pulse is delayed; the rest cycle a few nodes over the dwell.
+        clearInterval(attractHiTimer.current);
+        const pulseHighlight = () =>
+          starRef.current?.contentWindow?.postMessage({ type: "attract_highlight" }, "*");
+        setTimeout(pulseHighlight, 1800);
+        attractHiTimer.current = setInterval(pulseHighlight, 5000);
       }
     };
     window.addEventListener("message", onMsg);
@@ -296,6 +308,7 @@ export default function VizPage() {
       clearTimeout(idleTimer.current);
       clearInterval(beatTimer.current);
       clearTimeout(lingerTimer.current);
+      clearInterval(attractHiTimer.current);
       // Reset so a re-mount (React StrictMode double-invokes effects in dev)
       // restarts cleanly — otherwise startAttract()'s `if (attractRef.current)
       // return` guard leaves the beat interval dead after remount.
