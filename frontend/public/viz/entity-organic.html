@@ -134,7 +134,36 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
 
 const collections = []; // collections this entity belongs to — periphery ring, gold tint
 const pulses = []; // traveling dots along connections
-let hoveredId = null;
+let hoveredId = null;   // node under the cursor
+let pinnedId = null;    // node locked by a click; overrides hover until cleared
+
+// Active node = pinned (locked) or, failing that, hovered — the collection-view model.
+// Its highlight set is the node itself plus everything it connects to: for a doc, the
+// central entity + every co-entity it shares; for a co-entity, the central entity + every
+// doc it shares. Everything outside the set dims. Memoized on the active id so the set is
+// rebuilt only when the active node changes, not every frame.
+let _hlCache = { id: undefined, set: null };
+function computeHighlight() {
+  const id = pinnedId ?? hoveredId;
+  if (id === _hlCache.id) return _hlCache.set;
+  let set = null;
+  if (id) {
+    const doc = docIndex.get(id);
+    const co = coEntities.find(c => c.id === id);
+    if (doc) {
+      set = new Set([id]);
+      if (centralEntity) set.add(centralEntity.id);
+      for (const c of coEntities) if (c.sharedDocIds && c.sharedDocIds.includes(id)) set.add(c.id);
+    } else if (co) {
+      set = new Set([id]);
+      if (centralEntity) set.add(centralEntity.id);
+      for (const did of (co.sharedDocIds || [])) set.add(did);
+    }
+    // central / collection active -> set stays null (no dimming, just its own panel)
+  }
+  _hlCache = { id, set };
+  return set;
+}
 
 const API_URL = new URLSearchParams(location.search).get('api') || window.API_URL || 'http://localhost:8100';
 const AUTH_TOKEN = new URLSearchParams(location.search).get('token') || '';
@@ -501,33 +530,46 @@ canvas.addEventListener('mouseup', e => {
     const w = camera.screenToWorld(e.clientX, e.clientY, W, H);
     const hit = hitTest(w.x, w.y);
     if (hit) {
-      if (hit.kind === 'co_entity') {
-        const params = new URLSearchParams(location.search);
-        params.set('entity', hit.id);
-        window.location.search = params.toString();
-      } else if (hit.kind === 'document') {
-        window.parent.postMessage({
-          type: 'node_selected', nodeType: 'document',
-          data: { id: hit.id, title: hit.title, content_type: hit.content_type || 'text' }
-        }, '*');
+      if (hit.kind === 'document') {
+        // Click LOCKS the highlight (pin) and opens the doc; click it again to release.
+        if (pinnedId === hit.id) {
+          pinnedId = null;
+          window.parent.postMessage({ type: 'node_cleared' }, '*');
+        } else {
+          pinnedId = hit.id;
+          window.parent.postMessage({
+            type: 'node_selected', nodeType: 'document',
+            data: { id: hit.id, title: hit.title, content_type: hit.content_type || 'text' }
+          }, '*');
+        }
+      } else if (hit.kind === 'co_entity') {
+        // Click LOCKS the highlight on this entity + its docs. Double-click re-centers.
+        pinnedId = (pinnedId === hit.id) ? null : hit.id;
       } else if (hit.kind === 'collection') {
-        // Jump to that collection's structure view (host swaps star.html -> collection.html)
+        // Jump to that collection's structure view (host swaps to collection.html)
         window.parent.postMessage({ type: 'enter_collection',
                                    collectionId: hit.collectionId,
                                    collectionName: hit.collectionName }, '*');
       } else if (hit.kind === 'central') {
-        window.parent.postMessage({
-          type: 'node_selected', nodeType: 'entity',
-          data: {
-            id: centralEntity.id,
-            name: centralEntity.name,
-            entityType: centralEntity.type,
-            source_count: centralEntity.sourceCount,
-          }
-        }, '*');
+        if (pinnedId === hit.id) {
+          pinnedId = null;
+          window.parent.postMessage({ type: 'node_cleared' }, '*');
+        } else {
+          pinnedId = hit.id;
+          window.parent.postMessage({
+            type: 'node_selected', nodeType: 'entity',
+            data: {
+              id: centralEntity.id,
+              name: centralEntity.name,
+              entityType: centralEntity.type,
+              source_count: centralEntity.sourceCount,
+            }
+          }, '*');
+        }
       }
     } else {
-      // Clicked empty space — close any open panel
+      // Clicked empty space — release the pin + close any open panel
+      pinnedId = null;
       window.parent.postMessage({ type: 'node_cleared' }, '*');
     }
   }
@@ -541,6 +583,13 @@ canvas.addEventListener('dblclick', e => {
   H = canvas.height / renderScale;
   const w = camera.screenToWorld(e.clientX, e.clientY, W, H);
   const hit = hitTest(w.x, w.y);
+  if (hit && hit.kind === 'co_entity') {
+    // Double-click a co-entity re-centers the star on it (single click just pins).
+    const params = new URLSearchParams(location.search);
+    params.set('entity', hit.id);
+    window.location.search = params.toString();
+    return;
+  }
   if (!hit) {
     userMoved = true;
     camera.flyTo(w.x, w.y, camera.zoom * 1.8, 400);
@@ -594,11 +643,14 @@ function frame() {
       bottom: camera.y + H / 2 / camera.zoom + _m,
     };
 
-    drawConnections(ctx, centralEntity.x, centralEntity.y, docs, coEntities, hoveredId, centralEntity.id, docIndex, view);
+    const activeId = pinnedId ?? hoveredId;
+    const hl = computeHighlight();
+
+    drawConnections(ctx, centralEntity.x, centralEntity.y, docs, coEntities, activeId, centralEntity.id, docIndex, view);
 
     // Center → repo peripheral connections (gold), distinguishing "belongs to repo"
     for (const rp of collections) {
-      const litR = hoveredId === centralEntity.id || hoveredId === rp.id;
+      const litR = activeId === centralEntity.id || activeId === rp.id;
       ctx.strokeStyle = `rgba(224,160,48,${litR ? 0.35 : 0.06})`;
       ctx.lineWidth = litR ? 1.6 : 0.5;
       ctx.setLineDash([3, 9]);
@@ -646,13 +698,13 @@ function frame() {
       ctx.fill();
     }
 
-    drawDocuments(ctx, docs, tick, hoveredId, view);
-    drawCoEntities(ctx, coEntities, tick, hoveredId, view);
+    drawDocuments(ctx, docs, tick, activeId, view, hl);
+    drawCoEntities(ctx, coEntities, tick, activeId, view, hl);
     // Repo nodes render as small glowing gold stars — brighter/sharper than
     // a co-entity dot, but smaller and dimmer than the central entity star.
     for (const rp of collections) {
       if (rp.x < view.left || rp.x > view.right || rp.y < view.top || rp.y > view.bottom) continue;
-      drawMiniStar(ctx, rp, tick, hoveredId, { color: '#e0a030', brightness: 0.55 });
+      drawMiniStar(ctx, rp, tick, activeId, { color: '#e0a030', brightness: 0.55 });
     }
     drawCentralStar(ctx, centralEntity, tick);
   }

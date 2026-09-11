@@ -93,13 +93,19 @@ export function drawCentralStar(ctx, entity, tick) {
   ctx.fillText(`${entity.type} · ${entity.sourceCount} docs`, entity.x, entity.y + sz * 3.5 + 20);
 }
 
-/** Draw document nodes orbiting the entity */
-export function drawDocuments(ctx, docs, tick, hoveredId, view) {
+/** Draw document nodes orbiting the entity.
+ *  `activeId` = pinned-or-hovered node; `hl` = Set of highlighted node ids (the active
+ *  node + everything it connects to) or null. When something is active, docs OUTSIDE the
+ *  highlight set dim right down and the active doc brightens — the collection-view model. */
+export function drawDocuments(ctx, docs, tick, activeId, view, hl) {
   const glow = docGlowSprite();
   for (const doc of docs) {
-    const hov = hoveredId === doc.id;
+    const isActive = activeId === doc.id;
+    const inHl = !hl || hl.has(doc.id);
+    const dim = hl && !inHl;
     const act = doc.activityGlow || 0;
-    const alpha = clamp(0.6 + act * 0.4, 0, 1) * (hov ? 1.3 : 1);
+    let alpha = clamp(0.7 + act * 0.4, 0, 1);
+    if (isActive) alpha = 1; else if (dim) alpha *= 0.14;
 
     // Orbital drift — always update _px/_py (used by hit-test + connections) even
     // when the node itself is culled, so those stay accurate.
@@ -111,36 +117,37 @@ export function drawDocuments(ctx, docs, tick, hoveredId, view) {
     doc._py = py;
     if (_culled(view, px, py)) continue;
 
-    // Document node — warm amber glow, pre-baked into an offscreen sprite and
-    // drawImage'd (scaled by radius, per-doc alpha via globalAlpha) instead of
-    // rebuilding a radial gradient per doc per frame.
-    const sz = doc.radius;
-    const half = (glow.width * 0.5) * (sz / DOC_R0);
+    // Document node — warm amber glow, pre-baked into an offscreen sprite. The active
+    // doc gets a bigger, hotter halo so it reads as the focus.
+    const sz = doc.radius * (isActive ? 1.5 : 1);
+    const half = (glow.width * 0.5) * (sz / DOC_R0) * (isActive ? 1.4 : 1);
     ctx.globalAlpha = min(1, alpha);
     ctx.drawImage(glow, px - half, py - half, half * 2, half * 2);
+    if (isActive) { ctx.drawImage(glow, px - half, py - half, half * 2, half * 2); } // double-pass = hotter core
     ctx.globalAlpha = 1;
 
     // Core
-    ctx.fillStyle = `rgba(255,220,160,${0.8 * alpha})`;
+    ctx.fillStyle = `rgba(255,228,175,${(isActive ? 1 : 0.8) * alpha})`;
     ctx.beginPath();
     ctx.arc(px, py, sz * 0.5, 0, TAU);
     ctx.fill();
 
-    // Tiny document icon — two horizontal lines
-    ctx.strokeStyle = `rgba(255,220,160,${0.5 * alpha})`;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(px - sz * 0.3, py - sz * 0.15);
-    ctx.lineTo(px + sz * 0.3, py - sz * 0.15);
-    ctx.moveTo(px - sz * 0.3, py + sz * 0.15);
-    ctx.lineTo(px + sz * 0.2, py + sz * 0.15);
-    ctx.stroke();
+    // Tiny document icon — two horizontal lines (skip when dimmed to cut noise)
+    if (!dim) {
+      ctx.strokeStyle = `rgba(255,220,160,${0.5 * alpha})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px - sz * 0.3, py - sz * 0.15);
+      ctx.lineTo(px + sz * 0.3, py - sz * 0.15);
+      ctx.moveTo(px - sz * 0.3, py + sz * 0.15);
+      ctx.lineTo(px + sz * 0.2, py + sz * 0.15);
+      ctx.stroke();
+    }
 
-    // Label — HOVER ONLY (borrowed from the repo view: titles are hidden until hover,
-    // which keeps a dense field of docs legible instead of a wall of overlapping text).
-    if (hov) {
+    // Label — the active doc only (its attached entities get their own labels).
+    if (isActive) {
       const label = doc.title.length > 30 ? doc.title.slice(0, 28) + '…' : doc.title;
-      ctx.fillStyle = `rgba(255,230,180,0.95)`;
+      ctx.fillStyle = `rgba(255,235,190,0.98)`;
       ctx.font = `16px 'Courier New', monospace`;
       ctx.textAlign = 'center';
       ctx.fillText(label, px, py + sz * 2 + 10);
@@ -149,13 +156,17 @@ export function drawDocuments(ctx, docs, tick, hoveredId, view) {
 }
 
 /** Draw co-occurring entities */
-export function drawCoEntities(ctx, coEntities, tick, hoveredId, view) {
+export function drawCoEntities(ctx, coEntities, tick, activeId, view, hl) {
   for (const e of coEntities) {
-    const hov = hoveredId === e.id;
+    const isActive = activeId === e.id;
+    const inHl = !hl || hl.has(e.id);         // in the active node's highlight set
+    const lit = hl && inHl;                    // highlighted because the active node links to it
+    const dim = hl && !inHl;
     const tc = typeColor(e.type);
     const [rc, gc, bc] = hexRGB(tc);
     const act = e.activityGlow || 0;
-    const alpha = clamp(0.4 + act * 0.5, 0, 1) * (hov ? 1.3 : 1);
+    let alpha = clamp(0.5 + act * 0.5, 0, 1);
+    if (isActive) alpha = 1.3; else if (lit) alpha = 1.1; else if (dim) alpha *= 0.12;
 
     // Slow drift — keep _px/_py current even when culled (hit-test + connections).
     const ox = sin(tick * 0.00015 * e.orbitSpeed + e.orbitPhase) * e.orbitDrift;
@@ -166,26 +177,34 @@ export function drawCoEntities(ctx, coEntities, tick, hoveredId, view) {
     e._py = py;
     if (_culled(view, px, py)) continue;
 
-    // Glow + hot core — pre-baked per type-color into an offscreen sprite and
-    // drawImage'd (scaled by radius, alpha via globalAlpha) rather than two fresh
-    // radial gradients per co-entity per frame.
+    // Glow — pre-baked sprite. Highlighted co-entities get a bigger, double-passed halo.
     const glow = coEntityGlowSprite(tc);
-    const half = (glow.width * 0.5) * (e.radius / CO_R0);
+    const boost = (isActive || lit) ? 1.4 : 1;
+    const half = (glow.width * 0.5) * (e.radius / CO_R0) * boost;
     ctx.globalAlpha = min(1, alpha);
     ctx.drawImage(glow, px - half, py - half, half * 2, half * 2);
+    if (isActive || lit) { ctx.drawImage(glow, px - half, py - half, half * 2, half * 2); }
     ctx.globalAlpha = 1;
 
-    // Label — HOVER-ONLY (like the collection/repo view): the resting cloud stays
-    // clean, details appear only when you point at a node. labelThreshold is ignored.
-    const showLabel = hov;
+    // Crisp core when highlighted (matches the collection node core).
+    if (!dim) {
+      ctx.fillStyle = `rgba(255,240,220,${isActive ? 0.98 : lit ? 0.85 : 0.6})`;
+      ctx.beginPath();
+      ctx.arc(px, py, Math.max(1.3, e.radius * 0.4), 0, TAU);
+      ctx.fill();
+    }
+
+    // Label — the active co-entity, AND every co-entity a hovered/pinned doc is attached
+    // to (so the doc's connected entities reveal their names). Resting cloud stays clean.
+    const showLabel = isActive || lit;
     if (showLabel) {
-      ctx.fillStyle = `rgba(255,240,220,${hov ? 0.9 : 0.45})`;
-      ctx.font = `${hov ? 16 : 12}px 'Courier New', monospace`;
+      ctx.fillStyle = `rgba(255,244,224,${isActive ? 0.95 : 0.85})`;
+      ctx.font = `${isActive ? 16 : 13}px 'Courier New', monospace`;
       ctx.textAlign = 'center';
       ctx.fillText(e.name, px, py - e.radius * 2 - 4);
-      if (hov) {
+      if (isActive) {
         ctx.font = "11px 'Courier New', monospace";
-        ctx.fillStyle = rgba(rc, gc, bc, 0.5);
+        ctx.fillStyle = rgba(rc, gc, bc, 0.55);
         ctx.fillText(`${e.type} · ${e.weight} shared`, px, py - e.radius * 2 + 10);
       }
     }
@@ -287,48 +306,55 @@ export function drawMiniStar(ctx, node, tick, hoveredId, opts = {}) {
  *  Hover highlights the full chain: hover doc → light up its co-entities,
  *  hover co-entity → light up its shared docs.
  */
-export function drawConnections(ctx, centerX, centerY, docs, coEntities, hoveredId, centralEntityId, docIndex, view) {
-  const hovDoc = docIndex ? docIndex.get(hoveredId) : docs.find(d => d.id === hoveredId);
-  const hovCo = coEntities.find(e => e.id === hoveredId);
-  const hovCenter = hoveredId === centralEntityId;
+export function drawConnections(ctx, centerX, centerY, docs, coEntities, activeId, centralEntityId, docIndex, view) {
+  if (!activeId) return;   // no resting spokes — links appear only for the active node
+  const actDoc = docIndex ? docIndex.get(activeId) : docs.find(d => d.id === activeId);
+  const actCo = coEntities.find(e => e.id === activeId);
+  const HILITE = 'rgba(255,222,150,0.6)';   // collection-view bright link
 
-  // Center → documents. Cull on BOTH endpoints, matching the doc↔co-entity rule below:
-  // a segment is only invisible when neither end is on screen. Testing the doc alone
-  // dropped every line from an on-screen center to an off-screen doc, even though such
-  // a line crosses the viewport — so zooming in made the center's spokes disappear.
-  for (const doc of docs) {
-    const lit = hovCenter || (hovDoc && doc.id === hovDoc.id);
-    if (!lit) continue;   // connections shown ONLY for the hovered node (no resting spokes)
-    ctx.strokeStyle = `rgba(255,200,120,${lit ? 0.35 : 0.04})`;
-    ctx.lineWidth = lit ? 1.8 : 0.5;
-    ctx.setLineDash([3, 8]);
-    ctx.beginPath();
-    ctx.moveTo(centerX, centerY);
-    ctx.lineTo(doc._px, doc._py);
-    ctx.stroke();
+  if (actDoc) {
+    // center → the active doc
+    ctx.strokeStyle = HILITE;
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash([3, 7]);
+    ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(actDoc._px, actDoc._py); ctx.stroke();
     ctx.setLineDash([]);
-  }
-
-  // Doc ↔ co-entity links — O(1) Map lookup instead of docs.find() inside the
-  // nested loop (was O(co × sharedDocs × docs) every frame).
-  for (const co of coEntities) {
-    if (!co.sharedDocIds) continue;
-    const coHov = hovCo && co.id === hovCo.id;
-    for (const docId of co.sharedDocIds) {
-      const doc = docIndex ? docIndex.get(docId) : docs.find(d => d.id === docId);
-      if (!doc) continue;
-      const lit = coHov || (hovDoc && doc.id === hovDoc.id);
-      if (!lit) continue;   // hover-only
-      const tc = typeColor(co.type);
-      const [rc, gc, bc] = hexRGB(tc);
-      ctx.strokeStyle = rgba(rc, gc, bc, lit ? 0.30 : 0.035);
-      ctx.lineWidth = lit ? 1.3 : 0.4;
+    // active doc → each co-entity it is attached to (in that entity's own colour)
+    for (const co of coEntities) {
+      if (!co.sharedDocIds || !co.sharedDocIds.includes(actDoc.id)) continue;
+      const [rc, gc, bc] = hexRGB(typeColor(co.type));
+      ctx.strokeStyle = rgba(rc, gc, bc, 0.5);
+      ctx.lineWidth = 1.4;
       ctx.setLineDash([2, 6]);
-      ctx.beginPath();
-      ctx.moveTo(doc._px, doc._py);
-      ctx.lineTo(co._px, co._py);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(actDoc._px, actDoc._py); ctx.lineTo(co._px, co._py); ctx.stroke();
       ctx.setLineDash([]);
     }
+  } else if (actCo) {
+    // center → the active co-entity
+    ctx.strokeStyle = HILITE;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([3, 7]);
+    ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(actCo._px, actCo._py); ctx.stroke();
+    ctx.setLineDash([]);
+    // active co-entity → each doc it shares
+    const [rc, gc, bc] = hexRGB(typeColor(actCo.type));
+    for (const docId of (actCo.sharedDocIds || [])) {
+      const doc = docIndex ? docIndex.get(docId) : docs.find(d => d.id === docId);
+      if (!doc) continue;
+      ctx.strokeStyle = rgba(rc, gc, bc, 0.32);
+      ctx.lineWidth = 1.1;
+      ctx.setLineDash([2, 6]);
+      ctx.beginPath(); ctx.moveTo(actCo._px, actCo._py); ctx.lineTo(doc._px, doc._py); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  } else if (activeId === centralEntityId) {
+    // center → every doc, faint, so the core's reach reads without drowning the field
+    ctx.strokeStyle = 'rgba(255,200,120,0.10)';
+    ctx.lineWidth = 0.6;
+    ctx.setLineDash([3, 8]);
+    for (const doc of docs) {
+      ctx.beginPath(); ctx.moveTo(centerX, centerY); ctx.lineTo(doc._px, doc._py); ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 }
