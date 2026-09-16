@@ -54,8 +54,9 @@ In `worker/pyproject.toml`, add to the `dependencies` array (keep alphabetical/g
     "pypdfium2>=4.30.0",
     "Pillow>=10.0.0",
     "sentencepiece>=0.2.0",
+    "protobuf>=4.0.0",
 ```
-(`sentencepiece` is required by transformers' SigLIP processor — without it page `image_embedding`s are silently NULL; the worker didn't have it.) **Do NOT add `pypdf`.** `import pypdf` triggers a `cryptography` import whose native binding SIGILLs (exit 132) in Docker Desktop's ARM VM on Apple Silicon (cryptography 50.0.1; same root cause as the local `simmer_domain` crash). `pypdfium2` does both rasterize AND text extraction and pulls no cryptography, so we use it for both. `Pillow` is needed by pypdfium2's `to_pil()` and by the mirrored `image_prep`/`image_embedding` (the worker currently lacks PIL).
+(`sentencepiece` AND `protobuf` are both required by transformers' SigLIP processor/tokenizer conversion — without them page `image_embedding`s are silently NULL; the worker had neither.) **Do NOT add `pypdf`.** `import pypdf` triggers a `cryptography` import whose native binding SIGILLs (exit 132) in Docker Desktop's ARM VM on Apple Silicon (cryptography 50.0.1; same root cause as the local `simmer_domain` crash). `pypdfium2` does both rasterize AND text extraction and pulls no cryptography, so we use it for both. `Pillow` is needed by pypdfium2's `to_pil()` and by the mirrored `image_prep`/`image_embedding` (the worker currently lacks PIL).
 
 - [ ] **Step 2: Rebuild the worker image and verify the imports resolve**
 
