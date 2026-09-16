@@ -507,8 +507,9 @@ async def ingest_pdf(request: PdfIngestRequest, auth: AuthStore = Depends(get_au
     p = Path(request.path)
     if not p.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {request.path}")
-    if p.read_bytes()[:4] != b"%PDF":
-        raise HTTPException(status_code=400, detail=f"Not a PDF: {request.path}")
+    with open(p, "rb") as _f:  # magic-byte check only — don't read a large PDF into memory
+        if _f.read(4) != b"%PDF":
+            raise HTTPException(status_code=400, detail=f"Not a PDF: {request.path}")
     if request.vision_mode not in ("always", "fallback", "off"):
         raise HTTPException(status_code=422, detail="vision_mode must be always|fallback|off")
 
