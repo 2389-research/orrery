@@ -532,26 +532,26 @@ Read the `ingest_repo` route (`orchestrator/src/routes/ingest.py:425-494`) — c
 
 - [ ] **Step 1: Write the failing endpoint test**
 
-`orchestrator/tests/test_ingest_pdf_route.py` — use the orchestrator test client fixture (see `orchestrator/tests/conftest.py`). Write the fixture PDF to a `tmp_path` file and POST its path:
+`orchestrator/tests/test_ingest_pdf_route.py` — use the orchestrator test-client fixture. **The fixture is named `test_client`** (confirm in `orchestrator/tests/conftest.py`; sibling tests `test_ingest_repo.py`/`test_ingest_ccvault_route.py` use `test_client, test_store`). Write the fixture PDF to a `tmp_path` file and POST its path:
 ```python
-def test_ingest_pdf_creates_collection_and_enqueues(client, tmp_path):
+def test_ingest_pdf_creates_collection_and_enqueues(test_client, tmp_path):
     pdf = tmp_path / "s.pdf"; pdf.write_bytes(_two_page_pdf_bytes())  # reuse the fpdf2 gen or copy the worker fixture
-    r = client.post("/ingest/pdf", json={"path": str(pdf), "name": "s"})
+    r = test_client.post("/ingest/pdf", json={"path": str(pdf), "name": "s"})
     assert r.status_code == 202
     body = r.json(); assert "job_id" in body and "collection_id" in body
 
-def test_ingest_pdf_rejects_non_pdf(client, tmp_path):
+def test_ingest_pdf_rejects_non_pdf(test_client, tmp_path):
     f = tmp_path / "x.pdf"; f.write_bytes(b"not a pdf")
-    assert client.post("/ingest/pdf", json={"path": str(f), "name": "x"}).status_code == 400
+    assert test_client.post("/ingest/pdf", json={"path": str(f), "name": "x"}).status_code == 400
 
-def test_ingest_pdf_rejects_bad_vision_mode(client, tmp_path):
+def test_ingest_pdf_rejects_bad_vision_mode(test_client, tmp_path):
     pdf = tmp_path / "s.pdf"; pdf.write_bytes(_two_page_pdf_bytes())
-    assert client.post("/ingest/pdf", json={"path": str(pdf), "name": "s", "vision_mode": "bogus"}).status_code == 422
+    assert test_client.post("/ingest/pdf", json={"path": str(pdf), "name": "s", "vision_mode": "bogus"}).status_code == 422
 
-def test_ingest_pdf_duplicate_name_conflicts(client, tmp_path):
+def test_ingest_pdf_duplicate_name_conflicts(test_client, tmp_path):
     pdf = tmp_path / "s.pdf"; pdf.write_bytes(_two_page_pdf_bytes())
-    client.post("/ingest/pdf", json={"path": str(pdf), "name": "dup"})
-    assert client.post("/ingest/pdf", json={"path": str(pdf), "name": "dup"}).status_code == 409
+    test_client.post("/ingest/pdf", json={"path": str(pdf), "name": "dup"})
+    assert test_client.post("/ingest/pdf", json={"path": str(pdf), "name": "dup"}).status_code == 409
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -688,3 +688,4 @@ EOF
 - **Mirror discipline:** `image_prep.py`/`image_embedding.py` stay byte-identical between orchestrator and worker; the mirror test enforces it. If you must change one, change both.
 - **Ollama vision:** the worker relay already routes Ollama through native `/api/chat` with `think:false`; `settings.classification_model` (gemma4:26b on the local tier) is the vision-capable model — do not switch it to `extraction_model`.
 - **Don't hold the DB connection across vision calls** — the job builds page content first (slow, no conn), then writes in one short transaction (mirrors why `ingest_repo` runs codesum off the connection).
+- **Job test mocking:** `run_ingest_pdf` calls `Relay.from_settings(settings)` at the top. `classify_document`/`describe_page`/`embed_image` are monkeypatched, but if `Relay.from_settings` requires live credentials at construction in the test env, patch it too (`monkeypatch.setattr(mod, "Relay", <stub with from_settings>)`). Under the default `gateway` backend it should construct without network — confirm during Step 4.
