@@ -216,15 +216,13 @@ _WORKER_IMAGE_EMBEDDING = _ROOT / "worker" / "src" / "image_embedding.py"
 
 
 def test_image_prep_is_mirrored():
-    orch = _ROOT / "orchestrator" / "src" / "pipeline" / "image_prep.py"
-    work = _ROOT / "worker" / "src" / "image_prep.py"
-    assert _below_header(orch) == _below_header(work), "image_prep.py drifted between orchestrator and worker"
+    assert _below_header(_ORCH_IMAGE_PREP) == _below_header(_WORKER_IMAGE_PREP), \
+        "image_prep.py drifted between orchestrator and worker"
 
 
 def test_image_embedding_is_mirrored():
-    orch = _ROOT / "orchestrator" / "src" / "pipeline" / "image_embedding.py"
-    work = _ROOT / "worker" / "src" / "image_embedding.py"
-    assert _below_header(orch) == _below_header(work), "image_embedding.py drifted between orchestrator and worker"
+    assert _below_header(_ORCH_IMAGE_EMBEDDING) == _below_header(_WORKER_IMAGE_EMBEDDING), \
+        "image_embedding.py drifted between orchestrator and worker"
 
 
 def _fn_source(path, name):
