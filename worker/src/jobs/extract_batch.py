@@ -44,6 +44,12 @@ async def run_extract_batch(job: dict, db_path: str) -> None:
         docs = conn.execute(
             "SELECT id FROM documents WHERE content_type = 'session_intent' AND status = 'classified'"
         ).fetchall()
+    elif scope == "pdf_page":
+        # Phase 2 of PDF ingest — scoped by content_type so a PDF batch never sweeps
+        # another collection's docs. status='classified' keeps it idempotent.
+        docs = conn.execute(
+            "SELECT id FROM documents WHERE content_type = 'pdf_page' AND status = 'classified'"
+        ).fetchall()
     else:
         domain = config.get("domain")
         docs = conn.execute("""SELECT d.id FROM documents d
