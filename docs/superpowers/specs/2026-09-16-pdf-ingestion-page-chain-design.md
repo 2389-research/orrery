@@ -140,9 +140,11 @@ extract_batch  (Phase 2, EXISTING, unchanged)
   ~L114 onward, alongside `ingest_repo`/`ingest_ccvault`).
 
 ### 5.5 Dependencies
-- Add `pypdfium2` + `Pillow` to `worker/pyproject.toml` (NOT `pypdf` — cryptography SIGILL, see the
-  decisions table); rebuild the worker image. Orchestrator `pyproject.toml` unchanged. SigLIP's other
-  deps are already present in the worker: `torch` is declared
+- Add `pypdfium2` + `Pillow` + `sentencepiece` to `worker/pyproject.toml` (NOT `pypdf` — cryptography
+  SIGILL, see the decisions table); rebuild the worker image. Orchestrator `pyproject.toml` unchanged.
+  **`sentencepiece` is required** — transformers' SigLIP `AutoProcessor`/`SiglipTokenizer` needs it, and
+  the worker did not have it (verified in acceptance: without it, page `image_embedding`s are all NULL).
+  SigLIP's other deps are already present in the worker: `torch` is declared
   directly and `transformers` arrives **transitively via `sentence-transformers`** (same as the
   orchestrator today) — do **not** add an explicit `transformers` dep assuming it's missing.
   Note: `google/siglip-base-patch16-224` weights (~400MB) download on first call, identical to
