@@ -56,7 +56,7 @@ feature stacks those two existing capabilities for PDFs, with **no schema change
 | Image path | **Full reuse of the image pipeline** — vision description + SigLIP — via **mirrored** `image_prep`/`image_embedding` (+ already-mirrored `classify_image`) | It IS the image pipeline; mirroring is how orrery shares code across the two processes. |
 | Vision policy | **`always` (default), configurable** via `vision_mode: always\|fallback\|off` | Richest graph by default; `fallback` for cost/scanned; `off` for text-only. |
 | Entry point | **New `POST /ingest/pdf`**, two-phase async | Per-page vision+SigLIP = many calls → worker job, exactly like repo/tracker; existing PDF path untouched. |
-| Rasterizer | **`pypdfium2`** (worker dep) | Self-contained wheel, no system deps, permissive license. |
+| Rasterize + text | **`pypdfium2`** (both) + **`Pillow`** (worker deps) | Self-contained wheels, no system deps. `pypdf` dropped: `import pypdf` pulls `cryptography` whose native binding SIGILLs in Docker Desktop's ARM VM (cryptography 50.0.1); pypdfium2 does rasterize AND text with no cryptography. |
 | Ordering | `page_number` in `documents.metadata`; membership via `document_collections`; writes via **raw SQL** | Order derivable/viz-renderable; `collection_edges` `chain_next` reserved for chaining *PDFs into a series* later. |
 
 ## 4. Cross-Package Placement (the load-bearing constraint)
@@ -74,7 +74,7 @@ Cross-package imports are forbidden — **"neither process imports the other's p
 | Vision description call | **worker** | The `_ingest_image` "describe this image" pattern: `relay.complete(model=classification_model, image block + describe prompt)`, using the mirrored `image_prep` for the base64/resize block. |
 | Doc + membership + metadata + `image_embedding` writes | **worker** | Raw `conn.execute` INSERT/UPDATE, mirroring `ingest_repo.py:280–303` (the store's `documents.create()` writes neither `metadata` nor membership nor `image_embedding`). |
 | `%PDF` magic-byte validation | **orchestrator route** | Inline byte check; the route does not rasterize → no new orchestrator dep. |
-| Deps | `pypdfium2` **+** `pypdf` in `worker/pyproject.toml` | Orchestrator already has `pypdf`; needs no new dep. |
+| Deps | `pypdfium2` **+** `Pillow` in `worker/pyproject.toml` | pypdfium2 = rasterize + text; Pillow for render→PNG and the SigLIP path (worker lacks PIL). NOT `pypdf` (cryptography SIGILL). Orchestrator needs no new dep. |
 
 ## 5. Architecture & Components
 
@@ -112,7 +112,7 @@ extract_batch  (Phase 2, EXISTING, unchanged)
 
 ### 5.1 `worker/src/pdf_pages.py` (new, pure)
 - `rasterize_pdf(file_bytes, dpi=150) -> list[bytes]` (per-page PNG via `pypdfium2`, in-memory).
-- `pdf_page_texts(file_bytes) -> list[str]` (per-page text via `pypdf`, same order/length).
+- `pdf_page_texts(file_bytes) -> list[str]` (per-page text via `pypdfium2` `get_textpage().get_text_range()`, same order/length — NOT pypdf).
 - `THIN_TEXT_CHARS = 40`; a local `%PDF` magic check.
 
 ### 5.2 `worker/src/image_prep.py`, `worker/src/image_embedding.py` (new — byte-identical mirrors)
@@ -140,8 +140,9 @@ extract_batch  (Phase 2, EXISTING, unchanged)
   ~L114 onward, alongside `ingest_repo`/`ingest_ccvault`).
 
 ### 5.5 Dependencies
-- Add `pypdfium2` + `pypdf` to `worker/pyproject.toml`; rebuild the worker image. Orchestrator
-  `pyproject.toml` unchanged. SigLIP's deps are already present in the worker: `torch` is declared
+- Add `pypdfium2` + `Pillow` to `worker/pyproject.toml` (NOT `pypdf` — cryptography SIGILL, see the
+  decisions table); rebuild the worker image. Orchestrator `pyproject.toml` unchanged. SigLIP's other
+  deps are already present in the worker: `torch` is declared
   directly and `transformers` arrives **transitively via `sentence-transformers`** (same as the
   orchestrator today) — do **not** add an explicit `transformers` dep assuming it's missing.
   Note: `google/siglip-base-patch16-224` weights (~400MB) download on first call, identical to

@@ -51,9 +51,10 @@
 
 In `worker/pyproject.toml`, add to the `dependencies` array (keep alphabetical/grouped as the file does):
 ```toml
-    "pypdf>=4.0.0",
     "pypdfium2>=4.30.0",
+    "Pillow>=10.0.0",
 ```
+**Do NOT add `pypdf`.** `import pypdf` triggers a `cryptography` import whose native binding SIGILLs (exit 132) in Docker Desktop's ARM VM on Apple Silicon (cryptography 50.0.1; same root cause as the local `simmer_domain` crash). `pypdfium2` does both rasterize AND text extraction and pulls no cryptography, so we use it for both. `Pillow` is needed by pypdfium2's `to_pil()` and by the mirrored `image_prep`/`image_embedding` (the worker currently lacks PIL).
 
 - [ ] **Step 2: Rebuild the worker image and verify the imports resolve**
 
@@ -63,9 +64,9 @@ docker compose -f docker-compose.yml -f docker-compose.ollama.yml build worker \
   || docker-compose -f docker-compose.yml -f docker-compose.ollama.yml build worker
 docker compose -f docker-compose.yml -f docker-compose.ollama.yml up -d worker \
   || docker-compose -f docker-compose.yml -f docker-compose.ollama.yml up -d worker
-docker exec noospheric-orrery-worker-1 /app/worker/.venv/bin/python -c "import pypdfium2, pypdf; print('ok', pypdfium2.__version__)"
+docker exec noospheric-orrery-worker-1 /app/worker/.venv/bin/python -c "import pypdfium2, PIL; print('ok', pypdfium2.__version__)"
 ```
-Expected: `ok <version>` (no ImportError).
+Expected: `ok <version>` (no ImportError). Do NOT verify `import pypdf` — it SIGILLs (see above) and is not a dependency.
 
 - [ ] **Step 3: Commit**
 ```bash
@@ -230,14 +231,22 @@ def rasterize_pdf(file_bytes: bytes, dpi: int = 150) -> list[bytes]:
 
 
 def pdf_page_texts(file_bytes: bytes) -> list[str]:
-    """Extract per-page text (pypdf), same length/order as rasterize_pdf."""
-    import io
-    import pypdf
+    """Extract per-page text via pypdfium2, same length/order as rasterize_pdf.
 
-    reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-    return [(page.extract_text() or "") for page in reader.pages]
+    Uses pypdfium2 (NOT pypdf) — pypdf pulls in cryptography, whose native binding
+    SIGILLs in Docker Desktop's ARM VM on this machine.
+    """
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(file_bytes)
+    try:
+        return [pdf[i].get_textpage().get_text_range() for i in range(len(pdf))]
+    finally:
+        pdf.close()
 ```
-Note: `pypdfium2`'s render/`to_pil` API can vary slightly by version — if `.to_pil()` is unavailable, use `bitmap.to_numpy()` + `PIL.Image.fromarray`. Confirm against the installed version during Step 5.
+Notes (verified against pypdfium2 5.13.0 in the worker container):
+- Text: `page.get_textpage().get_text_range()` returns the full page text (born-digital pages give clean text; may contain `\r\n`).
+- Render→PNG needs `Pillow`: `bitmap.to_pil().save(buf, "PNG")`. If `.to_pil()` is unavailable in a different version, fall back to `bitmap.to_numpy()` + `PIL.Image.fromarray`.
 
 - [ ] **Step 5: Run to verify it passes**
 ```bash
