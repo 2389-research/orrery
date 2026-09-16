@@ -11,6 +11,22 @@
 #
 # Data is written to /data/local/orrery.db (a separate workspace file in the
 # same ./data volume) so it never mixes with the existing Bedrock-extracted graph.
+#
+# OPENSSL_armcap=0 (set on both services below) works around a SIGILL (exit 132) on
+# Apple Silicon. Docker Desktop's / Colima's ARM VM ADVERTISES crypto CPU features
+# (SME / SVE2) that its guest kernel cannot actually execute, so OpenSSL — bundled in
+# `cryptography`, and pulled in transitively by pypdf, simmer-sdk, etc. — emits
+# instructions that fault the instant those modules are imported. OPENSSL_armcap=0
+# disables OpenSSL's ARM crypto-capability probe, so it never reaches for the bad
+# instructions (it only turns off a crypto ACCELERATION path — correctness is unchanged).
+#
+#   WHEN it's needed: local dev on Apple-Silicon Docker Desktop / Colima that SIGILLs
+#     on import of cryptography / pypdf / simmer-sdk (worker exits 132 on job pickup).
+#   WHEN it is NOT: real Linux hosts on real hardware (e.g. the Spark) execute SME/SVE2
+#     fine and should keep hardware crypto — so it lives ONLY in this Mac-local override,
+#     never in the base compose or the Spark override.
+#   Robustness: harmless to leave set (no-op where the CPU works); the permanent fix is a
+#     newer VM guest kernel. See docs/troubleshooting-local-dev.md.
 
 services:
   orchestrator:
@@ -19,6 +35,7 @@ services:
       - OLLAMA_URL=http://host.docker.internal:11434
       - CLASSIFICATION_MODEL=gemma4:26b   # judge / generator / clerk (refinement)
       - EXTRACTION_MODEL=gemma4:e4b        # entity extraction
+      - OPENSSL_armcap=0                   # Apple-Silicon Docker VM SIGILL workaround (see header)
       - DB_PATH=/data/local/orrery.db
       - DOCUMENTS_DIR=/data/local/documents
       - SPECS_DIR=/data/local/specs
@@ -32,6 +49,7 @@ services:
       - CLASSIFICATION_MODEL=gemma4:26b
       - EXTRACTION_MODEL=gemma4:e4b
       - SIMMER_ITERATIONS=2   # bounded first run — local simmer is slow
+      - OPENSSL_armcap=0      # Apple-Silicon Docker VM SIGILL workaround (see header)
       - DB_PATH=/data/local/orrery.db
       - DOCUMENTS_DIR=/data/local/documents
       - SPECS_DIR=/data/local/specs
