@@ -94,10 +94,11 @@ worker job 'ingest_pdf'  (Phase 1) — each page ingested like an image + text:
   pages_txt = pdf_page_texts(bytes)  # worker/src/pdf_pages.py (pypdf), same order/length
   for N, (png_bytes, text_N) in enumerate(...):
      run_vision = vision_mode=='always' or (vision_mode=='fallback' and len(text_N.strip())<THIN_TEXT_CHARS)
+     write page PNG artifact to disk under documents_dir; art_path; source_path=f"{file}#page={N}"
      desc_N = <relay.complete vision "describe" call, model=classification_model,
-               image block via mirrored image_prep>            if run_vision else ""
-     img_emb = embed_image(png)  (mirrored SigLIP; fallback embed_image_text(desc_N))  if run_vision else None
-     write page PNG artifact under documents_dir; source_path=f"{file}#page={N}"
+               image block via mirrored image_prep(art_path)>  if run_vision else ""
+     img_emb = embed_image(art_path)  (mirrored SigLIP; needs the file on disk;
+               fallback embed_image_text(desc_N))              if run_vision else None
      raw-SQL INSERT documents(content=join(text_N,desc_N), content_type='pdf_page',
                               metadata={"page":N}, status=...)
      raw-SQL INSERT document_collections(document_id, collection_id, role='leaf', parent_path=<pdf root>)
@@ -140,7 +141,12 @@ extract_batch  (Phase 2, EXISTING, unchanged)
 
 ### 5.5 Dependencies
 - Add `pypdfium2` + `pypdf` to `worker/pyproject.toml`; rebuild the worker image. Orchestrator
-  `pyproject.toml` unchanged. (transformers/torch for SigLIP are already in the worker image.)
+  `pyproject.toml` unchanged. SigLIP's deps are already present in the worker: `torch` is declared
+  directly and `transformers` arrives **transitively via `sentence-transformers`** (same as the
+  orchestrator today) — do **not** add an explicit `transformers` dep assuming it's missing.
+  Note: `google/siglip-base-patch16-224` weights (~400MB) download on first call, identical to
+  existing image ingest — bake/cache them if the worker must run fully offline (pre-existing behavior,
+  not introduced here).
 
 ## 6. Data Model (no schema change)
 
