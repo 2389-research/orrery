@@ -13,7 +13,8 @@ from orrery_relay import Relay
 from ..config import get_settings
 from ..dependencies import get_auth_store, AuthStore
 from ..models import (IngestResult, DirectoryIngestRequest, RepoIngestRequest,
-                      TrackerRunsIngestRequest, TextIngestRequest, CcvaultIngestRequest)
+                      TrackerRunsIngestRequest, TextIngestRequest, CcvaultIngestRequest,
+                      PdfIngestRequest)
 from ..pipeline.chunker import chunk_document
 from ..pipeline.excerpt import build_classification_excerpt
 from ..pipeline.classifier import classify_document
@@ -486,6 +487,74 @@ async def ingest_repo(request: RepoIngestRequest, auth: AuthStore = Depends(get_
             # with no job behind — and because the name is UNIQUE and this route answers
             # 409 on a repeat, that orphan would block every retry of the same repo
             # permanently. Undo it so the request is genuinely retryable.
+            store.collections.delete(collection_id)
+            raise
+    finally:
+        store.close()
+
+    return {"job_id": job_id, "collection_id": collection_id}
+
+
+@router.post("/ingest/pdf", status_code=status.HTTP_202_ACCEPTED)
+async def ingest_pdf(request: PdfIngestRequest, auth: AuthStore = Depends(get_auth_store)):
+    """Ingest a server-side PDF as an ordered chain of page-documents.
+
+    Two-phase, like /ingest/repo: this does NO model work and NO rasterization. It
+    validates the path (must exist and start with the %PDF magic bytes), creates a
+    kind='pdf' collection, and enqueues the ingest_pdf worker job. The worker rasterizes
+    each page and does all model work, then enqueues phase 2 (extract_batch) itself.
+    """
+    p = Path(request.path)
+    if not p.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {request.path}")
+    with open(p, "rb") as _f:  # magic-byte check only — don't read a large PDF into memory
+        if _f.read(4) != b"%PDF":
+            raise HTTPException(status_code=400, detail=f"Not a PDF: {request.path}")
+    if request.vision_mode not in ("always", "fallback", "off"):
+        raise HTTPException(status_code=422, detail="vision_mode must be always|fallback|off")
+
+    store = auth.store
+    try:
+        # `collections.path` is UNIQUE — report a repeat ingest of the same name as a 409
+        # with the existing id rather than letting the IntegrityError surface as a 500.
+        existing = store.collections.get_by_path(request.name)
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Collection '{request.name}' already exists (id {existing['id']})")
+
+        # Reuse the workspace's general spec if present, else seed the built-in general_text
+        # spec — the page-documents are extracted by extract_batch, which is spec-driven.
+        spec = store.specs.get_general()
+        if spec:
+            spec_id = spec.id
+        else:
+            spec_id = str(uuid.uuid4())
+            store.specs.create(spec_id, None, 1, GENERAL_TEXT_SPEC)
+
+        collection_id = str(uuid.uuid4())
+        try:
+            store.collections.create(collection_id, request.name, request.name, request.path,
+                                     kind="pdf", provenance_kind=request.provenance_kind)
+        except sqlite3.IntegrityError:
+            # get_by_path isn't a lock; a concurrent create wins the UNIQUE(path) race.
+            # Report the loser as the same 409 so a race and a repeat look identical.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Collection '{request.name}' already exists")
+
+        job_id = str(uuid.uuid4())
+        try:
+            store.jobs.create(job_id, "ingest_pdf", collection_id, {
+                "root_path": request.path,
+                "collection_id": collection_id,
+                "collection_name": request.name,
+                "spec_id": spec_id,
+                "vision_mode": request.vision_mode,
+            })
+        except Exception:
+            # `collections.create` commits; a failure here would orphan a collection whose
+            # UNIQUE name then blocks every retry. Undo it so the request is retryable.
             store.collections.delete(collection_id)
             raise
     finally:

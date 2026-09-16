@@ -92,6 +92,14 @@ class RepoIngestRequest(BaseModel):
                                          # a git_repo collection if absent/invalid
 
 
+class PdfIngestRequest(BaseModel):
+    """A server-side PDF to ingest as an ordered chain of page-documents."""
+    path: str
+    name: str
+    vision_mode: str = "always"          # always | fallback | off
+    provenance_kind: str | None = None
+
+
 class TrackerRunsIngestRequest(BaseModel):
     """A corpus of tracker code-gen runs. One run becomes one collection.
 

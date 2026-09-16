@@ -27,6 +27,7 @@ FLOW_DEFAULT_KIND = {
     "repo": "neutral_summary", "git_repo": "neutral_summary",
     "tracker": "neutral_summary", "tracker_run": "neutral_summary",
     "codesum": "neutral_summary", "tracksum": "neutral_summary",
+    "pdf": "neutral_summary",
     "ccvault": "agent_report",
 }
 

@@ -202,6 +202,29 @@ def test_silo_is_mirrored():
         "process ingested it.")
 
 
+# ── image_prep.py / image_embedding.py ────────────────────────────────────────────
+# The upcoming ingest_pdf worker job ingests each PDF page like an image and needs the
+# orchestrator's image helpers, but the worker cannot import the orchestrator's package.
+# Both modules are self-contained (stdlib + numpy + lazy torch/PIL/transformers), so they
+# are mirrored byte-identical below the ABOUTME header for the same reason as classifier.py
+# and silo.py: a one-sided edit means a PDF page gets prepared/embedded differently
+# depending on which process handled it, and the shared vision-language space breaks.
+_ORCH_IMAGE_PREP = _ROOT / "orchestrator" / "src" / "pipeline" / "image_prep.py"
+_WORKER_IMAGE_PREP = _ROOT / "worker" / "src" / "image_prep.py"
+_ORCH_IMAGE_EMBEDDING = _ROOT / "orchestrator" / "src" / "pipeline" / "image_embedding.py"
+_WORKER_IMAGE_EMBEDDING = _ROOT / "worker" / "src" / "image_embedding.py"
+
+
+def test_image_prep_is_mirrored():
+    assert _below_header(_ORCH_IMAGE_PREP) == _below_header(_WORKER_IMAGE_PREP), \
+        "image_prep.py drifted between orchestrator and worker"
+
+
+def test_image_embedding_is_mirrored():
+    assert _below_header(_ORCH_IMAGE_EMBEDDING) == _below_header(_WORKER_IMAGE_EMBEDDING), \
+        "image_embedding.py drifted between orchestrator and worker"
+
+
 def _fn_source(path, name):
     """Extract a top-level function's source text (def line through the last indented
     line before the next top-level statement or EOF)."""

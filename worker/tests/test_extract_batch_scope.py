@@ -135,6 +135,36 @@ async def test_a_rerun_is_a_no_op_because_status_leaves_the_scope(tmp_path, monk
     assert result["docs_processed"] == 0
 
 
+async def test_the_pdf_page_scope_selects_only_the_pdf_page_documents(tmp_path, monkeypatch):
+    """Phase 2 of PDF ingest is scoped by content_type, so a pdf_page batch extracts
+    the page-docs and leaves an unrelated code_intent doc untouched — otherwise a PDF
+    batch would sweep another collection's docs with the wrong spec."""
+    db_path = str(tmp_path / "test.db")
+    spec_id, page_ids = _seed(db_path, content_type="pdf_page", n=1)
+
+    # A code_intent doc in the same workspace that must NOT be swept by the pdf batch.
+    conn = get_connection(db_path)
+    other_id = str(uuid.uuid4())
+    conn.execute("INSERT INTO documents (id, title, content, status, content_type) "
+                 "VALUES (?, 'code', 'body', 'classified', 'code_intent')", (other_id,))
+    conn.execute("INSERT INTO chunks (id, document_id, chunk_index, offset, length, text) "
+                 "VALUES (?, ?, 0, 0, 5, 'CHUNKX')", (str(uuid.uuid4()), other_id))
+    conn.commit()
+    conn.close()
+
+    await _run(db_path, spec_id, "pdf_page", monkeypatch)
+
+    conn = get_connection(db_path)
+    extracted = [r[0] for r in conn.execute(
+        "SELECT id FROM documents WHERE status = 'extracted'").fetchall()]
+    other_status = conn.execute(
+        "SELECT status FROM documents WHERE id = ?", (other_id,)).fetchone()[0]
+    conn.close()
+
+    assert extracted == page_ids, "pdf_page scope did not select exactly the page-docs"
+    assert other_status == "classified", "pdf_page scope swept a code_intent doc"
+
+
 # --- the normalization gate -------------------------------------------------
 
 @pytest.mark.parametrize("prime_first,expect_normalized", [
