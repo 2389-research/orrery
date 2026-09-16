@@ -156,6 +156,35 @@ def test_vision_off_writes_text_docs_but_no_embeddings(test_db, tmp_path, monkey
         conn.close()
 
 
+def test_empty_classification_files_under_unclassified(test_db, tmp_path, monkeypatch):
+    """A local-model parse failure makes classify_document return {} — the job must
+    still produce both page-docs (not raise) and file them under a holding domain."""
+    mod = _patch(monkeypatch, tmp_path)
+
+    async def empty_classify(relay, title, excerpt, existing_taxonomy, model):
+        return {}
+    monkeypatch.setattr(mod, "classify_document", empty_classify)
+
+    job, collection_id, spec_id = _seed(test_db)
+    _run(job, test_db)  # must NOT raise
+
+    conn = get_connection(test_db)
+    try:
+        docs = conn.execute(
+            "SELECT id FROM documents WHERE content_type = 'pdf_page'"
+        ).fetchall()
+        assert len(docs) == 2
+        paths = {
+            r["domain_path"]
+            for r in conn.execute(
+                "SELECT DISTINCT domain_path FROM document_domains"
+            ).fetchall()
+        }
+        assert paths == {"unclassified/needs-review"}
+    finally:
+        conn.close()
+
+
 def test_vision_exception_on_one_page_still_yields_two_docs(test_db, tmp_path, monkeypatch):
     async def flaky_describe(relay, model, png_path):
         if "page-0" in png_path:

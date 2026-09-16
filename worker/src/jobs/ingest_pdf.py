@@ -23,6 +23,11 @@ _DESCRIBE_PROMPT = (
     "Note any diagrams, tables, or figures."
 )
 
+# Where a PDF lands when classification comes back empty (a local-model parse
+# failure returns {}). A real holding path rather than a KeyError that discards
+# every page already rasterized/described/embedded — mirrors ingest_repo.py.
+_UNCLASSIFIED_DOMAIN = "unclassified/needs-review"
+
 
 async def describe_page(relay: Relay, model: str, png_path: str) -> str:
     """Vision-LLM description of one rasterized page."""
@@ -81,7 +86,14 @@ async def run_ingest_pdf(job: dict, db_path: str) -> None:
         existing_taxonomy=taxonomy,
         model=settings.classification_model,
     )
-    primary_dom = classification["primary_domain"]
+    # `.get(...) or fallback`, not a direct index: `classify_document` returns {} on an
+    # unparseable payload (a real local-model outcome), and indexing here would raise
+    # AFTER every page was rasterized/described/embedded — throwing away the expensive
+    # work. File under a holding domain instead; a re-run or graph correction reclassifies.
+    primary_dom = classification.get("primary_domain") or _UNCLASSIFIED_DOMAIN
+    if not classification.get("primary_domain"):
+        print(f"[ingest_pdf] {collection_name}: classification returned no primary "
+              f"domain; filing under {_UNCLASSIFIED_DOMAIN!r}", flush=True)
     confidence = classification.get("confidence", 1.0)
 
     # Build each page's document payload OUTSIDE the DB transaction: the vision calls
