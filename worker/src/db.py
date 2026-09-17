@@ -300,6 +300,54 @@ CREATE TABLE IF NOT EXISTS collection_edges (
     PRIMARY KEY (source, target, type)
 );
 
+-- A TRACE is one agent session (Claude Code jsonl / tracker activity.jsonl) replayed
+-- over a repo COLLECTION's file tree: the map is the collection's structure
+-- (document_collections), a trace is the MOTION on it. `traces` is one session; its
+-- events are the ordered file-touch trajectory; its segments are the recursive-summary
+-- units (ccvault segments / tracker trace-nodes) that ride the timeline.
+--
+-- Ingested + served by the ORCHESTRATOR only today; mirrored into the worker's db.py so
+-- the shared DB has one shape no matter which process opens a workspace first.
+CREATE TABLE IF NOT EXISTS traces (
+    id TEXT PRIMARY KEY,
+    collection_id TEXT NOT NULL REFERENCES collections(id),
+    source TEXT,                 -- 'claude_code' | 'tracker'
+    title TEXT,
+    model TEXT,
+    n_events INTEGER DEFAULT 0,
+    n_segments INTEGER DEFAULT 0,
+    n_files INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_traces_collection ON traces(collection_id);
+
+-- Ordered file-touch events (the trajectory). `file_path` is collection-relative so it
+-- joins the leaf titles GET /collections/{id}/structure renders; NULL for a non-file
+-- step (exec/other) that still advances the playhead but lights nothing.
+CREATE TABLE IF NOT EXISTS trace_events (
+    trace_id TEXT NOT NULL REFERENCES traces(id),
+    seq INTEGER NOT NULL,
+    action TEXT,                 -- read|edit|search|exec|verify|subagent|other
+    file_path TEXT,
+    is_error INTEGER DEFAULT 0,
+    segment_idx INTEGER,
+    PRIMARY KEY (trace_id, seq)
+);
+
+-- Recursive-summary units — the timeline's clickable currency nodes. Ordered by idx;
+-- each spans events [start_seq, end_seq). Summary + request stand in for the node-local
+-- summary the ccvault/tracksum pipeline produces.
+CREATE TABLE IF NOT EXISTS trace_segments (
+    trace_id TEXT NOT NULL REFERENCES traces(id),
+    idx INTEGER NOT NULL,
+    title TEXT,
+    summary TEXT,
+    request TEXT,
+    start_seq INTEGER,
+    end_seq INTEGER,
+    PRIMARY KEY (trace_id, idx)
+);
+
 -- A WATCHED SOURCE is a vault dir or a repo the worker re-scans on a cadence to keep
 -- the graph in sync (spec 2026-08-14 incremental-source-sync). Lives per-workspace DB,
 -- so (source_id, source_path) identity is unambiguous within a file. The worker sweep
