@@ -4,6 +4,8 @@
 import json
 import hashlib
 import logging
+import os
+from pathlib import Path
 from orrery_relay import Relay
 from ..db import get_connection
 from ..config import get_settings
@@ -273,6 +275,25 @@ async def run_generate_commentary(job: dict, db_path: str) -> None:
 # ---- idle sweep ----
 
 DEFAULT_SWEEP_NODE_TYPES = ("domain", "collection")
+
+
+def commentary_enrolled_dbs(db_paths, base_db_path) -> list:
+    """Filter db_paths to the workspaces opted into the commentary sweep.
+
+    The sweep is a heavier background operation, so it is OPT-IN per workspace rather
+    than global: a workspace enrolls by setting `commentary_sweep: true` on its entry in
+    the shared workspace registry (`<data>/workspaces/registry.json`, written by the
+    orchestrator when you POST /commentary/backfill). Default is off. A missing or
+    unreadable registry means nothing is enrolled, so the sweep is a safe no-op —
+    it never fans out across every workspace on its own."""
+    registry_path = os.path.join(os.path.dirname(base_db_path), "workspaces", "registry.json")
+    try:
+        with open(registry_path) as f:
+            registry = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+    enrolled = {w.get("id") for w in registry if w.get("commentary_sweep")}
+    return [p for p in db_paths if Path(p).parent.name in enrolled]
 
 
 def _select_missing_batch(conn, node_types, batch_size):

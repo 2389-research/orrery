@@ -184,7 +184,7 @@ async def poll_loop():
     from orrery_relay import Relay
     from .jobs.graph_repair import run_judge_sweep
     from .jobs.normalization_judge import resolve_judge_relay, run_normalization_judge_sweep
-    from .jobs.generate_commentary import run_commentary_sweep
+    from .jobs.generate_commentary import run_commentary_sweep, commentary_enrolled_dbs
     relay = Relay.from_settings(settings)
     last_sweep = 0.0  # 0 → sweep on the first iteration
     last_source_sweep = 0.0  # watched-source scan cadence, same first-iteration behaviour
@@ -335,15 +335,20 @@ async def poll_loop():
                 print(f"norm_judge error: {e}", flush=True)
 
         # Magos Lex commentary sweep: same idle-only, small-batch contract as the norm
-        # judge, and yields to it (runs only when neither a real job nor a norm-judge
-        # batch ran this pass) so at most one LLM sweep competes for the model per pass.
-        # only_missing is implicit, so a caught-up graph costs one cheap query and new
-        # nodes are backfilled automatically on a later idle pass.
+        # judge, and the same tier — gated on real jobs only (`not did_work`), NOT on the
+        # norm judge. Gating on norm_did would starve it whenever a normalization backlog
+        # exists (measured: 1673 pending pairs keep the judge busy every idle pass), and
+        # there is nothing to protect against — the poll loop is single-threaded, so the
+        # two sweeps run sequentially and Ollama serializes them regardless. Opt-in per
+        # workspace + only_missing keep it cheap: a caught-up enrolled graph costs one
+        # query, and new domains/collections are backfilled automatically on a later pass.
         comm_did = False
-        if settings.commentary_sweep_enabled and not did_work and not norm_did:
+        enrolled_dbs = (commentary_enrolled_dbs(db_paths, settings.db_path)
+                        if settings.commentary_sweep_enabled else [])
+        if enrolled_dbs and not did_work:
             try:
                 cr = await run_commentary_sweep(
-                    db_paths, relay, settings.extraction_model,
+                    enrolled_dbs, relay, settings.extraction_model,
                     batch_size=settings.commentary_sweep_batch)
                 if cr["made"] or cr["failed"]:
                     comm_did = cr["made"] > 0

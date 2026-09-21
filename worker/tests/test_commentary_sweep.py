@@ -1,8 +1,11 @@
+import json
+
 import pytest
 
 from src.db import get_connection, init_db
 from src.jobs.generate_commentary import (
     _select_missing_batch,
+    commentary_enrolled_dbs,
     run_commentary_sweep,
 )
 
@@ -72,6 +75,26 @@ async def test_sweep_drains_in_bounded_batches_and_is_idempotent(test_db):
     conn = get_connection(test_db)
     assert len(_commentary_ids(conn)) == 4   # every node commented exactly once
     conn.close()
+
+
+def test_enrolled_dbs_filters_to_opted_in_workspaces(tmp_path):
+    base = tmp_path / "orrery.db"
+    ws = tmp_path / "workspaces"
+    (ws / "aaa").mkdir(parents=True); (ws / "bbb").mkdir(parents=True); (ws / "ccc").mkdir(parents=True)
+    db = lambda i: str(ws / i / "orrery.db")
+    (ws / "registry.json").write_text(json.dumps([
+        {"id": "aaa", "name": "A", "commentary_sweep": True},
+        {"id": "bbb", "name": "B"},                          # no flag → not enrolled
+        {"id": "ccc", "name": "C", "commentary_sweep": False},
+    ]))
+    got = commentary_enrolled_dbs([db("aaa"), db("bbb"), db("ccc")], str(base))
+    assert got == [db("aaa")]
+
+
+def test_enrolled_dbs_no_registry_is_noop(tmp_path):
+    # No registry at all → nothing enrolled → sweep never fans out on its own.
+    assert commentary_enrolled_dbs([str(tmp_path / "workspaces" / "x" / "orrery.db")],
+                                   str(tmp_path / "orrery.db")) == []
 
 
 @pytest.mark.asyncio
