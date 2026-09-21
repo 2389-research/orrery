@@ -191,6 +191,57 @@ def _clean_payload(raw):
     return [by_kind[k] for k in _KIND_ORDER]
 
 
+async def _generate_for_nodes(conn, relay, model, nodes) -> tuple[int, int, int]:
+    """Generate + upsert commentary for a pre-selected list of nodes.
+
+    Shared by the on-demand job (`run_generate_commentary`) and the idle sweep
+    (`run_commentary_sweep`) so the fail-silent-per-node semantics live in one place.
+    Returns (made, skipped, failed)."""
+    made = skipped = failed = 0
+    for nt, node_id, name, ctx_args in nodes:
+        # Context build + the LLM call share one try, so a bad node (query
+        # error, timeout, malformed output) is skipped, never fatal.
+        try:
+            ctx = _build_context(conn, nt, ctx_args)
+            user = f"Archive entry — {nt}: {name}\n\n{ctx}\n\n{TASK}"
+            raw = await relay.complete_structured(
+                model=model, system=PERSONA,
+                messages=[{"role": "user", "content": user}],
+                max_tokens=1500, temperature=0.7, schema=SCHEMA,
+                tool_name="magos_commentary",
+                tool_description="Three Magos Lex annotations of an archive entry",
+            )
+        except Exception as e:
+            failed += 1
+            logger.warning("generate_commentary: %s %s failed: %s", nt, node_id, e)
+            continue
+        comments = _clean_payload(raw)
+        if not comments:
+            skipped += 1
+            logger.warning("generate_commentary: %s %s produced no usable comments", nt, node_id)
+            continue
+        src_hash = hashlib.sha256((model + "\n" + ctx).encode("utf-8")).hexdigest()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO node_commentary "
+                "(node_type, node_id, comments_json, model, source_hash, created_at) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (nt, node_id, json.dumps(comments, ensure_ascii=False), model, src_hash))
+            conn.commit()
+        except Exception as e:
+            # Persisting is fail-silent-per-node too. A transient write lock here
+            # would otherwise propagate and abandon every node still in the loop —
+            # unlike a context/LLM error above, which only skips its own node. Roll
+            # back so the shared connection stays usable, count it, and move on;
+            # only_missing=True picks it up on a re-run.
+            conn.rollback()
+            failed += 1
+            logger.warning("generate_commentary: %s %s persist failed: %s", nt, node_id, e)
+            continue
+        made += 1
+    return made, skipped, failed
+
+
 async def run_generate_commentary(job: dict, db_path: str) -> None:
     settings = get_settings()
     config = json.loads(job["config"]) if job["config"] else {}
@@ -210,49 +261,48 @@ async def run_generate_commentary(job: dict, db_path: str) -> None:
             nodes = _select_nodes(conn, node_type, limit, only_missing)
             logger.info("generate_commentary: %d %s nodes to process (limit=%d, only_missing=%s)",
                         len(nodes), node_type, limit, only_missing)
-            for nt, node_id, name, ctx_args in nodes:
-                # Context build + the LLM call share one try, so a bad node (query
-                # error, timeout, malformed output) is skipped, never fatal.
-                try:
-                    ctx = _build_context(conn, nt, ctx_args)
-                    user = f"Archive entry — {nt}: {name}\n\n{ctx}\n\n{TASK}"
-                    raw = await relay.complete_structured(
-                        model=model, system=PERSONA,
-                        messages=[{"role": "user", "content": user}],
-                        max_tokens=1500, temperature=0.7, schema=SCHEMA,
-                        tool_name="magos_commentary",
-                        tool_description="Three Magos Lex annotations of an archive entry",
-                    )
-                except Exception as e:
-                    failed += 1
-                    logger.warning("generate_commentary: %s %s failed: %s", nt, node_id, e)
-                    continue
-                comments = _clean_payload(raw)
-                if not comments:
-                    skipped += 1
-                    logger.warning("generate_commentary: %s %s produced no usable comments", nt, node_id)
-                    continue
-                src_hash = hashlib.sha256((model + "\n" + ctx).encode("utf-8")).hexdigest()
-                try:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO node_commentary "
-                        "(node_type, node_id, comments_json, model, source_hash, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                        (nt, node_id, json.dumps(comments, ensure_ascii=False), model, src_hash))
-                    conn.commit()
-                except Exception as e:
-                    # Persisting is fail-silent-per-node too. A transient write lock here
-                    # would otherwise propagate and abandon every node still in the loop —
-                    # unlike a context/LLM error above, which only skips its own node. Roll
-                    # back so the shared connection stays usable, count it, and move on;
-                    # only_missing=True picks it up on a re-run.
-                    conn.rollback()
-                    failed += 1
-                    logger.warning("generate_commentary: %s %s persist failed: %s", nt, node_id, e)
-                    continue
-                made += 1
+            m, s, f = await _generate_for_nodes(conn, relay, model, nodes)
+            made += m; skipped += s; failed += f
 
         logger.info("generate_commentary done: made=%d skipped=%d failed=%d (model=%s)",
                     made, skipped, failed, model)
     finally:
         conn.close()
+
+
+# ---- idle sweep ----
+
+DEFAULT_SWEEP_NODE_TYPES = ("domain", "collection")
+
+
+def _select_missing_batch(conn, node_types, batch_size):
+    """Up to `batch_size` still-uncommented nodes across `node_types` (only_missing)."""
+    nodes = []
+    for nt in node_types:
+        if len(nodes) >= batch_size:
+            break
+        nodes.extend(_select_nodes(conn, nt, batch_size - len(nodes), only_missing=True))
+    return nodes[:batch_size]
+
+
+async def run_commentary_sweep(db_paths, relay, model, *, batch_size,
+                               node_types=DEFAULT_SWEEP_NODE_TYPES) -> dict:
+    """One bounded batch of Magos Lex commentary for the FIRST workspace with missing nodes.
+
+    Mirrors the normalization-judge sweep: idle-only work in small chunks, one workspace
+    per pass so a big backlog drains across passes without ever blocking the poll loop or
+    starving real jobs. `only_missing` is implicit, so this is idempotent — a fully
+    commented workspace is skipped after one cheap indexed query, and newly-added
+    domains/collections are picked up on a later pass. Returns
+    {made, skipped, failed, workspace}; workspace is None when nothing needed work."""
+    for db_path in db_paths:
+        conn = get_connection(db_path)
+        try:
+            nodes = _select_missing_batch(conn, node_types, batch_size)
+            if not nodes:
+                continue
+            made, skipped, failed = await _generate_for_nodes(conn, relay, model, nodes)
+            return {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
+        finally:
+            conn.close()
+    return {"made": 0, "skipped": 0, "failed": 0, "workspace": None}

@@ -184,6 +184,7 @@ async def poll_loop():
     from orrery_relay import Relay
     from .jobs.graph_repair import run_judge_sweep
     from .jobs.normalization_judge import resolve_judge_relay, run_normalization_judge_sweep
+    from .jobs.generate_commentary import run_commentary_sweep
     relay = Relay.from_settings(settings)
     last_sweep = 0.0  # 0 → sweep on the first iteration
     last_source_sweep = 0.0  # watched-source scan cadence, same first-iteration behaviour
@@ -333,7 +334,26 @@ async def poll_loop():
             except Exception as e:
                 print(f"norm_judge error: {e}", flush=True)
 
-        await asyncio.sleep(1 if norm_did else settings.worker_poll_interval)
+        # Magos Lex commentary sweep: same idle-only, small-batch contract as the norm
+        # judge, and yields to it (runs only when neither a real job nor a norm-judge
+        # batch ran this pass) so at most one LLM sweep competes for the model per pass.
+        # only_missing is implicit, so a caught-up graph costs one cheap query and new
+        # nodes are backfilled automatically on a later idle pass.
+        comm_did = False
+        if settings.commentary_sweep_enabled and not did_work and not norm_did:
+            try:
+                cr = await run_commentary_sweep(
+                    db_paths, relay, settings.extraction_model,
+                    batch_size=settings.commentary_sweep_batch)
+                if cr["made"] or cr["failed"]:
+                    comm_did = cr["made"] > 0
+                    ws = Path(cr["workspace"]).parent.name if cr["workspace"] else "?"
+                    print(f"commentary sweep ws={ws}: made {cr['made']}, "
+                          f"skipped {cr['skipped']}, failed {cr['failed']}", flush=True)
+            except Exception as e:
+                print(f"commentary sweep error: {e}", flush=True)
+
+        await asyncio.sleep(1 if (norm_did or comm_did) else settings.worker_poll_interval)
 
 def main():
     asyncio.run(poll_loop())

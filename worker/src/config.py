@@ -56,6 +56,14 @@ class Settings:
     # Not 0: greedy decoding loops on a bad generation and never terminates.
     normalization_judge_temperature: float = 0.3
     normalization_judge_max_attempts: int = 3  # skip a pair after N failed sweeps
+    # Magos Lex commentary sweep — backfills node_commentary for domains + collections.
+    # Like the normalization judge, it runs ONLY when the worker is otherwise idle (no
+    # real job ran this pass) and in small bounded batches, so it never competes with
+    # ingest/extract/simmer for the (possibly local) model. only_missing is implicit:
+    # a node that already has commentary is skipped, so a caught-up graph costs one cheap
+    # indexed query per idle pass, and newly-added nodes are picked up automatically.
+    commentary_sweep_enabled: bool = True
+    commentary_sweep_batch: int = 5          # nodes per idle pass (one small chunk)
 
 
 # Env var name mapping — keys are Settings field names, values are env var names.
@@ -93,6 +101,8 @@ _ENV_MAP = {
     "normalization_judge_min_confidence": "NORMALIZATION_JUDGE_MIN_CONFIDENCE",
     "normalization_judge_temperature": "NORMALIZATION_JUDGE_TEMPERATURE",
     "normalization_judge_max_attempts": "NORMALIZATION_JUDGE_MAX_ATTEMPTS",
+    "commentary_sweep_enabled": "COMMENTARY_SWEEP_ENABLED",
+    "commentary_sweep_batch": "COMMENTARY_SWEEP_BATCH",
 }
 
 
@@ -156,6 +166,11 @@ def _validated(s: "Settings") -> "Settings":
     fixes: dict = {}
     if s.normalization_judge_batch < 1:
         fixes["normalization_judge_batch"] = 1
+    if s.commentary_sweep_batch < 1:
+        # Same trap as the judge batch: LIMIT -1 means NO LIMIT in SQLite, so a batch of
+        # -1 makes one "idle" pass generate commentary for the ENTIRE graph — the exact
+        # contention the idle gate exists to prevent.
+        fixes["commentary_sweep_batch"] = 1
     if s.normalization_judge_max_attempts < 1:
         fixes["normalization_judge_max_attempts"] = 1
     if not 0.0 <= s.normalization_judge_min_confidence <= 1.0:
