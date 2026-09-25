@@ -95,8 +95,10 @@ async def test_ingest_repo_requires_selected_noosphere(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ingest_repo_reports_conflict(monkeypatch):
+    # Match call_api's real envelope: status errors wrap the response body in `detail`.
     async def fake(path, **k):
-        return {"status": 409, "detail": "Collection 'r' already exists (id c9)"}
+        return {"status": 409,
+                "detail": "API 409: {\"detail\":\"Collection 'r' already exists (id c9)\"}"}
 
     monkeypatch.setattr(mcp_server, "call_api", fake)
     out = await mcp_server.ingest_repo("/data/repos/r", "r")
@@ -105,12 +107,24 @@ async def test_ingest_repo_reports_conflict(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ingest_repo_bad_path_gets_hint(monkeypatch):
+    # The "Not a directory" substring must survive inside call_api's wrapped envelope.
     async def fake(path, **k):
-        return {"status": 400, "detail": "Not a directory: /tmp/nope"}
+        return {"status": 400, "detail": "API 400: {\"detail\":\"Not a directory: /tmp/nope\"}"}
 
     monkeypatch.setattr(mcp_server, "call_api", fake)
     out = await mcp_server.ingest_repo("/tmp/nope", "r")
     assert "failed" in out.lower() and "bind-mount" in out
+
+
+@pytest.mark.asyncio
+async def test_ingest_repo_generic_failure_no_hint(monkeypatch):
+    # A non-409, non-"Not a directory" failure (e.g. 500): report the detail, no path hint.
+    async def fake(path, **k):
+        return {"status": 500, "detail": "API 500: {\"detail\":\"boom\"}"}
+
+    monkeypatch.setattr(mcp_server, "call_api", fake)
+    out = await mcp_server.ingest_repo("/data/repos/r", "r")
+    assert "failed" in out.lower() and "boom" in out and "bind-mount" not in out
 
 
 @pytest.mark.asyncio
