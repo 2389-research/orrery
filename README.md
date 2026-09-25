@@ -168,7 +168,12 @@ Each test creates a throwaway noosphere via the `/workspaces` API and soft-delet
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/ingest` | Upload file (text or image) |
+| `POST` | `/ingest` | Upload a single file (text or image, multipart) |
+| `POST` | `/ingest/text` | Ingest a document from raw JSON text (no file) |
+| `POST` | `/ingest/repo` | Ingest a git checkout → codesum summaries + entities (async, 202) |
+| `POST` | `/ingest/pdf` | Ingest a PDF as a page-chain (per-page text + image, async, 202) |
+| `POST` | `/ingest/tracker-runs` | Ingest a corpus of tracker runs as collections (async, 202) |
+| `POST` | `/watched-sources` | Register a vault/repo dir for ongoing incremental sync |
 | `GET` | `/documents` | List documents with content_type |
 | `GET` | `/domains` | Domain taxonomy with text/image counts |
 | `GET` | `/entities` | Entities, filterable by type/domain/job |
@@ -188,6 +193,38 @@ Each test creates a throwaway noosphere via the `/workspaces` API and soft-delet
 All data endpoints (ingest, documents, entities, graph, search, simmer, …) accept an optional `X-Workspace-Id: <id>` header to scope the request to a specific noosphere. Omit the header to target `default`. The `/workspaces` path is the legacy name from a cloud-era multi-tenancy design — the UI calls these "noospheres."
 
 Full interactive docs at http://localhost:8100/docs
+
+### Ingesting a repository
+
+The graph is a **map over code, not a copy of it**: `POST /ingest/repo` runs codesum over a
+git checkout and stores per-file/-module summaries (plus extracted entities) as a collection.
+
+**Agents: use the `ingest_repo` MCP tool** (`ingest_repo(path, name)`) — it's the discoverable
+surface and its result gives you a `job_id` to poll with `get_job_status`.
+
+Key rule (the thing that trips people up): **`path` is a server-side directory the Orrery
+services can already see** — the mounted `./data` volume (`/data/...` inside the container) or a
+directory bind-mounted into both the orchestrator and worker. It is **not** a file upload and
+**not** a GitHub URL. Clone/copy the checkout somewhere under `./data` first, then point at it.
+
+```bash
+# 1. Put the checkout where the containers can read it (./data is mounted at /data)
+git clone --depth 1 https://github.com/you/my-repo ./data/repos/my-repo
+
+# 2. Kick off the ingest (async → 202 with a job id + collection id)
+curl -s -X POST http://localhost:8100/ingest/repo \
+  -H 'Content-Type: application/json' -H 'X-Workspace-Id: <noosphere-id>' \
+  -d '{"path": "/data/repos/my-repo", "name": "my-repo"}'
+# → {"job_id": "…", "collection_id": "…"}
+
+# 3. Poll until done
+curl -s "http://localhost:8100/jobs" -H 'X-Workspace-Id: <noosphere-id>'
+```
+
+For **ongoing** repo sync (re-summarize on a cadence as the code changes) register a watched
+source instead: `POST /watched-sources` with `type: "repo"`. See
+[docs/ingesting-repos.md](docs/ingesting-repos.md) for the full guide, gotchas, and the
+one-shot-vs-watched decision.
 
 ## Design Principles
 
