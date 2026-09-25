@@ -29,6 +29,8 @@ Tools — Graph Traversal:
 
 Tools — Write (ingestion & jobs; direct writes, no human gate):
 - ingest_text(title, content) — ingest a document from raw text into the active noosphere
+- ingest_repo(path, name, provenance_kind) — ingest a git repo (codesum summaries + entities)
+    into a collection; `path` is a SERVER-SIDE dir the services can see, not a URL/upload. Async — poll get_job_status.
 - create_noosphere(name, description) — create a new workspace
 - trigger_simmer(domain) — start a spec-simmer job (general, or a domain path)
 - trigger_normalization() — cluster + merge near-duplicate entities (uncertain pairs → review queue)
@@ -557,6 +559,45 @@ async def ingest_text(title: str, content: str) -> str:
     domains = ", ".join(result.get("domains") or []) or "none"
     return (f"Ingested '{result['title']}' (id: {result['document_id']}) — "
             f"domains: {domains}, {result.get('entity_count', 0)} entities extracted.")
+
+
+@mcp.tool()
+async def ingest_repo(path: str, name: str, provenance_kind: str = "") -> str:
+    """Ingest a git repository into the active noosphere: summarize the code with codesum
+    into a collection of per-file/-module "code intent" documents, then extract entities —
+    so the graph is a MAP over the code, not a copy of it.
+
+    IMPORTANT — `path` is a SERVER-SIDE directory the orchestrator can already see, NOT an
+    upload and NOT a GitHub URL. The repo must live on a path the Orrery services can read
+    (the mounted data volume, e.g. `/data/repos/my-repo`, or a directory bind-mounted into
+    the orchestrator + worker). Clone/copy the checkout there first, then pass that path.
+    `name` becomes the collection's name (must be unique in the noosphere).
+
+    This is asynchronous: it returns immediately with a job id and collection id, and the
+    worker does the (many-LLM-call) summarization in the background. Poll it with
+    get_job_status(job_id). Select a noosphere first with select_noosphere().
+
+    For ongoing/auto-updating repo sync instead of a one-shot import, register a watched
+    source (`POST /watched-sources` with type='repo') so the worker re-syncs on a cadence."""
+    if _active_workspace is None:
+        return "No noosphere selected — call select_noosphere() first so the repo lands in the right workspace."
+    body = {"path": path, "name": name}
+    if provenance_kind:
+        body["provenance_kind"] = provenance_kind
+    result = await call_api("/ingest/repo", method="POST", body=body)
+    if result.get("status") == 409:
+        return (f"A collection named '{name}' already exists in this noosphere. "
+                f"Re-ingest under a different name, or inspect what is already there. ({result.get('detail')})")
+    if "job_id" not in result:
+        detail = result.get("detail", result)
+        hint = ""
+        if isinstance(detail, str) and "Not a directory" in detail:
+            hint = (" — the path must be a directory the Orrery services can see "
+                    "(under the data volume or a bind-mount), not a local-only path or a URL.")
+        return f"Repo ingest failed: {detail}{hint}"
+    return (f"Started repo ingest of '{name}' (collection {result['collection_id']}) — "
+            f"job {result['job_id']}. The worker is summarizing + extracting in the background; "
+            f"poll with get_job_status('{result['job_id']}').")
 
 
 @mcp.tool()

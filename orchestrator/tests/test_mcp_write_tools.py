@@ -51,6 +51,69 @@ async def test_ingest_text_reports_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ingest_repo_posts_to_endpoint(monkeypatch):
+    seen = {}
+
+    async def fake(path, method="GET", body=None):
+        seen.update(path=path, method=method, body=body)
+        return {"job_id": "j1", "collection_id": "c1"}
+
+    monkeypatch.setattr(mcp_server, "call_api", fake)
+    out = await mcp_server.ingest_repo("/data/repos/my-repo", "my-repo")
+    assert seen == {"path": "/ingest/repo", "method": "POST",
+                    "body": {"path": "/data/repos/my-repo", "name": "my-repo"}}
+    assert "j1" in out and "c1" in out and "get_job_status" in out
+
+
+@pytest.mark.asyncio
+async def test_ingest_repo_passes_provenance_when_given(monkeypatch):
+    seen = {}
+
+    async def fake(path, method="GET", body=None):
+        seen.update(body=body)
+        return {"job_id": "j1", "collection_id": "c1"}
+
+    monkeypatch.setattr(mcp_server, "call_api", fake)
+    await mcp_server.ingest_repo("/data/repos/r", "r", provenance_kind="neutral_summary")
+    assert seen["body"]["provenance_kind"] == "neutral_summary"
+
+
+@pytest.mark.asyncio
+async def test_ingest_repo_requires_selected_noosphere(monkeypatch):
+    monkeypatch.setattr(mcp_server, "_active_workspace", None)
+    called = False
+
+    async def fake(*a, **k):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr(mcp_server, "call_api", fake)
+    out = await mcp_server.ingest_repo("/data/repos/r", "r")
+    assert "select_noosphere" in out and not called
+
+
+@pytest.mark.asyncio
+async def test_ingest_repo_reports_conflict(monkeypatch):
+    async def fake(path, **k):
+        return {"status": 409, "detail": "Collection 'r' already exists (id c9)"}
+
+    monkeypatch.setattr(mcp_server, "call_api", fake)
+    out = await mcp_server.ingest_repo("/data/repos/r", "r")
+    assert "already exists" in out and "c9" in out
+
+
+@pytest.mark.asyncio
+async def test_ingest_repo_bad_path_gets_hint(monkeypatch):
+    async def fake(path, **k):
+        return {"status": 400, "detail": "Not a directory: /tmp/nope"}
+
+    monkeypatch.setattr(mcp_server, "call_api", fake)
+    out = await mcp_server.ingest_repo("/tmp/nope", "r")
+    assert "failed" in out.lower() and "bind-mount" in out
+
+
+@pytest.mark.asyncio
 async def test_create_noosphere(monkeypatch):
     async def fake(path, method="GET", body=None):
         assert path == "/workspaces" and method == "POST"
