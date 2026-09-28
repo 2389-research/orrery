@@ -169,7 +169,33 @@ def _collection_positions(store, collections: list[dict], domain_positions: dict
 
     missing = [c for c in collections if c["id"] not in positions]
     positions.update(_circular_collection_positions(collections, missing))
+    _declump_collection_positions(positions)
     return positions
+
+
+def _declump_collection_positions(positions: dict) -> None:
+    """Fan out collections that resolved to the SAME centroid so they don't render on one
+    pixel. A collection whose documents are ~entirely in one domain lands at that domain's
+    exact coordinate, so several such collections (e.g. three pure-`llm-orchestration`
+    repos) stack perfectly and become one unreadable blob. Group by exact coordinate and,
+    for any group of >1, spread the members onto a small deterministic circle around the
+    shared point — they stay *inside* their domain (the radius is tiny) but are individually
+    visible. Deterministic by sorted id; groups of 1 (the common case) are untouched, so
+    this never moves a collection that wasn't already colliding. Mutates `positions`."""
+    from collections import defaultdict
+
+    groups: dict = defaultdict(list)
+    for cid, p in positions.items():
+        groups[(round(p["x"], 6), round(p["y"], 6))].append(cid)
+    for (cx, cy), cids in groups.items():
+        if len(cids) < 2:
+            continue
+        cids.sort()
+        # small, count-scaled so a big stack's own members don't re-collide; capped.
+        r = min(0.035, 0.008 * math.sqrt(len(cids)))
+        for i, cid in enumerate(cids):
+            ang = (2 * math.pi * i) / len(cids) - math.pi / 2
+            positions[cid] = {"x": cx + r * math.cos(ang), "y": cy + r * math.sin(ang)}
 
 
 def build_graph_payload(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -> dict:

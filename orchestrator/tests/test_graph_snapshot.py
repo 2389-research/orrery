@@ -174,3 +174,41 @@ def test_a_snapshot_from_another_contract_version_is_discarded(test_store):
 
     assert load_snapshot(test_store) is None, \
         "a payload from another contract version must be discarded so it gets rebuilt"
+
+
+def _seed_collection_in_domain(store, cid, domain):
+    """One collection whose single doc is classified into `domain`."""
+    c = store.conn
+    store.collections.create(cid, cid, cid, f"/{cid}")
+    c.execute("INSERT INTO documents (id, title) VALUES (?, ?)", (f"{cid}-d", cid))
+    store.collections.link_document(f"{cid}-d", cid, role="leaf")
+    c.execute("INSERT INTO document_domains (document_id, domain_path, is_primary, confidence) "
+              "VALUES (?, ?, 1, 1.0)", (f"{cid}-d", domain))
+    c.commit()
+
+
+def test_same_domain_collections_are_declumped(test_store):
+    # Three collections whose docs are ~entirely in ONE domain resolve to that domain's
+    # exact centroid — the real pile-up (e.g. pure llm-orchestration repos). They must be
+    # fanned out to distinct points, all still near the domain.
+    from src.pipeline.graph_snapshot import _collection_positions
+    import math
+
+    for cid in ("ca", "cb", "cc"):
+        _seed_collection_in_domain(test_store, cid, "alpha")
+    dom = {"alpha": {"x": 0.40, "y": 0.90}}
+    pos = _collection_positions(test_store, [{"id": "ca"}, {"id": "cb"}, {"id": "cc"}], dom)
+
+    pts = {(round(p["x"], 6), round(p["y"], 6)) for p in pos.values()}
+    assert len(pts) == 3, "same-domain collections must not stack on one pixel"
+    for k in ("ca", "cb", "cc"):
+        assert math.dist((pos[k]["x"], pos[k]["y"]), (0.40, 0.90)) < 0.05, "stay inside the domain"
+
+
+def test_single_collection_position_is_unchanged_by_declump(test_store):
+    # A collection alone at its centroid must NOT be moved (declump only touches collisions).
+    from src.pipeline.graph_snapshot import _collection_positions
+    _seed_collection_in_domain(test_store, "solo", "beta")
+    dom = {"beta": {"x": 0.30, "y": 0.70}}
+    pos = _collection_positions(test_store, [{"id": "solo"}], dom)
+    assert pos["solo"] == {"x": 0.30, "y": 0.70}
