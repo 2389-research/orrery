@@ -122,3 +122,25 @@ async def test_does_not_steal_a_path_owned_by_another_source(tmp_path):
     r = await _upsert(conn, source_path="/v/note.md", title="N", content="new", source_id="src1")
     assert r["action"] == "conflict"
     assert conn.execute("SELECT source_id FROM documents WHERE id='owned'").fetchone()["source_id"] == "other"
+
+
+def test_recount_collection_counts_active_members(tmp_path):
+    """_recount_collection rebuilds collections.document_count from active membership —
+    the fix for sync_repo (watched-source repos) leaving it at 0. Excludes soft-deleted."""
+    from src.jobs.upsert_document import _recount_collection
+    db = str(tmp_path / "rc.db"); init_db(db); conn = get_connection(db)
+    conn.execute("INSERT INTO collections (id, name, path, root_path, document_count) "
+                 "VALUES ('c1','c1','c1','/c1', 0)")   # stale 0, like a synced repo
+    for i in range(3):
+        conn.execute("INSERT INTO documents (id, title) VALUES (?, ?)", (f"d{i}", f"f{i}"))
+        conn.execute("INSERT INTO document_collections (document_id, collection_id, role) "
+                     "VALUES (?, 'c1', 'leaf')", (f"d{i}",))
+    # one soft-deleted doc must NOT be counted
+    conn.execute("INSERT INTO documents (id, title, invalid_at) VALUES ('dx','fx', CURRENT_TIMESTAMP)")
+    conn.execute("INSERT INTO document_collections (document_id, collection_id, role) VALUES ('dx','c1','leaf')")
+    conn.commit()
+
+    _recount_collection(conn, "c1"); conn.commit()
+    assert conn.execute("SELECT document_count FROM collections WHERE id='c1'").fetchone()[0] == 3
+    _recount_collection(conn, None)   # no-op, must not raise
+    conn.close()

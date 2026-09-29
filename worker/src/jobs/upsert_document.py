@@ -167,6 +167,22 @@ async def _classify_and_assign(conn, relay, settings, doc_id, title, content) ->
     return assigned
 
 
+def _recount_collection(conn, collection_id) -> None:
+    """Refresh a collection's denormalized documents-per-collection count from its active
+    membership. The one-shot ingest paths (ingest_repo/pdf/ccvault/tracker) increment it
+    inline per doc; the sync path (sync_repo) rebuilds membership via upsert_document +
+    soft-delete and never touched it — so watched-source repos read document_count=0
+    despite having documents. Recount from the join so create/update/delete all settle."""
+    if not collection_id:
+        return
+    conn.execute(
+        "UPDATE collections SET document_count = ("
+        "  SELECT COUNT(*) FROM document_collections dc "
+        "  JOIN documents d ON d.id = dc.document_id "
+        "  WHERE dc.collection_id = ? AND d.invalid_at IS NULL) WHERE id = ?",
+        (collection_id, collection_id))
+
+
 def _recount_domains(conn, paths) -> None:
     """Refresh the denormalized documents-per-domain count. The viz layout
     (domain_layout.ensure_layout -> _get_domain_paths) only positions domains with

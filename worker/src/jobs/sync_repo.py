@@ -22,7 +22,7 @@ from orrery_codesum import summarize_repo_incremental, make_summarize_fn
 
 from ..classifier import classify_document
 from ..silo import flow_default_kind, resolve_kind
-from .upsert_document import upsert_document
+from .upsert_document import upsert_document, _recount_collection
 from .scan_source import apply_deletions
 from .ingest_repo import _git_coordinates
 
@@ -171,6 +171,10 @@ async def sync_repo(conn, relay, settings, ws, source_config, source_id) -> dict
             if commit_sha and remote_url:
                 conn.execute("UPDATE collections SET commit_sha = ?, remote_url = ? WHERE id = ?",
                              (commit_sha, remote_url, collection_id))
+        # Heal document_count on unchanged-HEAD scans too: repos synced before this recount
+        # existed read 0 despite having docs, and their HEAD may never move again.
+        _recount_collection(conn, collection_id)
+        conn.commit()
         return {"actions": {"created": 0, "updated": 0, "skipped": 0, "conflict": 0},
                 "deleted": 0, "unchanged": True}
 
@@ -228,4 +232,6 @@ async def sync_repo(conn, relay, settings, ws, source_config, source_id) -> dict
         # valid for the next scan's short-circuit comparison.
         conn.execute("UPDATE collections SET commit_sha = ? WHERE id = ?", (head_sha, collection_id))
 
+    _recount_collection(conn, collection_id)
+    conn.commit()
     return {"actions": actions, "deleted": deleted}
