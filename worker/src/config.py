@@ -45,10 +45,12 @@ class Settings:
     #   advise — write verdicts only, a human still resolves
     #   apply  — also auto-resolve confident keeps
     normalization_judge_mode: str = "advise"
-    # Prefer a local Ollama model when reachable, else the cloud model: local gemma4:26b
-    # matched Haiku on this task in evaluation, so the queue drains for free when Ollama
-    # is up. Re-checked on a TTL rather than once at startup.
-    normalization_judge_prefer_local: bool = True
+    # By default the judge uses the configured small/extraction tier like every other
+    # pipeline task, so a deployment that points its models at a remote provider loads no
+    # local LLM here and does no Ollama probe. OPT-IN: set prefer_local=1 to run this one
+    # idle task on a local Ollama model (gemma4:26b matched Haiku on it in evaluation), so
+    # the review queue drains for free when Ollama is up. Re-checked on a TTL, not startup.
+    normalization_judge_prefer_local: bool = False
     normalization_judge_local_model: str = "gemma4:26b"
     normalization_judge_model: str = ""      # cloud fallback; empty -> extraction_model
     normalization_judge_batch: int = 10      # pairs per relay call (one idle chunk)
