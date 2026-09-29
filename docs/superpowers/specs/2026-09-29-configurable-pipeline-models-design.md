@@ -36,9 +36,14 @@ provider and load **no local LLM at all**.
   **re-embedding the whole corpus + rebuilding the faiss index** (query-time and stored
   vectors must match). That data migration — not the abstraction — is the real cost, so
   it is its own project.
-- **LunaRoute as a first-class backend/router.** Today a router that speaks the
-  gateway/OpenAI-compat or Anthropic-compat protocol is usable via `ANTHROPIC_BACKEND=gateway`
-  + `GATEWAY_URL`. A dedicated LunaRoute backend is deferred pending Dylan's setup details.
+- **LunaRoute as a first-class backend/router.** RESOLVED — no backend needed.
+  LunaRoute exposes an Anthropic Messages endpoint (`gw.lunaroute.com`, models advertise
+  `anthropic_messages: true` + `json_schema: true`), so it works through the existing
+  `gateway` backend by configuration alone. Verified end-to-end (`complete()` +
+  `complete_structured()`) against real models. Config is documented in
+  `docs/model-configuration.md` (incl. the `GATEWAY_URL` = bare host, no `/v1`, gotcha).
+  A dedicated OpenAI-compatible backend is only worth building if a router that is
+  OpenAI-*only* (no Anthropic endpoint) needs supporting later.
 
 ## Background: how model selection works today
 
