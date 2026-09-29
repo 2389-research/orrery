@@ -184,6 +184,7 @@ async def poll_loop():
     from orrery_relay import Relay
     from .jobs.graph_repair import run_judge_sweep
     from .jobs.normalization_judge import resolve_judge_relay, run_normalization_judge_sweep
+    from .jobs.generate_commentary import run_commentary_sweep, commentary_enrolled_dbs
     relay = Relay.from_settings(settings)
     last_sweep = 0.0  # 0 → sweep on the first iteration
     last_source_sweep = 0.0  # watched-source scan cadence, same first-iteration behaviour
@@ -333,7 +334,31 @@ async def poll_loop():
             except Exception as e:
                 print(f"norm_judge error: {e}", flush=True)
 
-        await asyncio.sleep(1 if norm_did else settings.worker_poll_interval)
+        # Magos Lex commentary sweep: same idle-only, small-batch contract as the norm
+        # judge, and the same tier — gated on real jobs only (`not did_work`), NOT on the
+        # norm judge. Gating on norm_did would starve it whenever a normalization backlog
+        # exists (measured: 1673 pending pairs keep the judge busy every idle pass), and
+        # there is nothing to protect against — the poll loop is single-threaded, so the
+        # two sweeps run sequentially and Ollama serializes them regardless. Opt-in per
+        # workspace + only_missing keep it cheap: a caught-up enrolled graph costs one
+        # query, and new domains/collections are backfilled automatically on a later pass.
+        comm_did = False
+        enrolled_dbs = (commentary_enrolled_dbs(db_paths, settings.db_path)
+                        if settings.commentary_sweep_enabled else [])
+        if enrolled_dbs and not did_work:
+            try:
+                cr = await run_commentary_sweep(
+                    enrolled_dbs, relay, settings.extraction_model,
+                    batch_size=settings.commentary_sweep_batch)
+                if cr["made"] or cr["failed"]:
+                    comm_did = cr["made"] > 0
+                    ws = Path(cr["workspace"]).parent.name if cr["workspace"] else "?"
+                    print(f"commentary sweep ws={ws}: made {cr['made']}, "
+                          f"skipped {cr['skipped']}, failed {cr['failed']}", flush=True)
+            except Exception as e:
+                print(f"commentary sweep error: {e}", flush=True)
+
+        await asyncio.sleep(1 if (norm_did or comm_did) else settings.worker_poll_interval)
 
 def main():
     asyncio.run(poll_loop())
