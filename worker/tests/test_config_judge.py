@@ -38,9 +38,32 @@ def test_judge_settings_default_to_advise_not_apply(monkeypatch):
             monkeypatch.delenv(k, raising=False)
     s = config_mod.get_settings()
     assert s.normalization_judge_mode == "advise"
-    assert s.normalization_judge_prefer_local is True
+    # prefer_local defaults OFF: the judge uses the configured small/extraction tier like
+    # every other task, so a remote-model deployment loads no local LLM and does no Ollama
+    # probe here. Running it on a local model is opt-in (NORMALIZATION_JUDGE_PREFER_LOCAL=1).
+    assert s.normalization_judge_prefer_local is False
     assert s.normalization_judge_model == ""          # empty -> extraction_model
     assert s.normalization_judge_max_attempts == 3
+
+
+def test_judge_default_resolves_to_small_tier_without_probing(monkeypatch):
+    """With prefer_local off (the default), the judge resolves to the small/extraction
+    tier on the primary relay and NEVER probes Ollama."""
+    from src.jobs.normalization_judge import resolve_judge_relay
+    for k in list(os.environ):
+        if k.startswith("NORMALIZATION_JUDGE"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("EXTRACTION_MODEL", "small-model-x")
+    s = config_mod.get_settings()
+    sentinel = object()
+
+    def _probe_must_not_run(*a, **k):
+        raise AssertionError("Ollama must not be probed when prefer_local is off")
+
+    relay, model, source = resolve_judge_relay(s, sentinel, probe=_probe_must_not_run)
+    assert relay is sentinel                       # primary relay, not a new ollama one
+    assert model == "small-model-x"                # the configured small tier
+    assert source == s.anthropic_backend
 
 
 def test_the_judge_temperature_is_not_zero(monkeypatch):
