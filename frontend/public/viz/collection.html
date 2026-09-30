@@ -395,6 +395,7 @@ function frame() {
 
   tick++;
   camera.update();
+  advancePlayhead();
 
   drawBackground(ctx, W, H, tick);
   // Tree not built yet (structure fetch still in flight) — just show the backdrop.
@@ -478,6 +479,7 @@ function frame() {
     if (bright || showAlways || n.id === hoveredId) drawLabel(n, bright || n.id === hoveredId);
   }
 
+  drawTrace();
   ctx.restore();
   requestAnimationFrame(frame);
 }
@@ -609,6 +611,168 @@ function notifyActivity() {
 ['mousedown', 'mousemove', 'mouseup', 'wheel', 'dblclick', 'keydown', 'touchstart'].forEach(
   ev => window.addEventListener(ev, notifyActivity, { passive: true })
 );
+
+// ══ Session-trace replay over the collection map (mindwalk-style) ═══════════════
+// The structure above is the MAP (repo in its final space). A trace lights it up over
+// time: touched files take their touch color and keep it, a comet + arcs follow the
+// moving focus, and the recursive-summary segments ride a scrubbable timeline. When a
+// collection has no trace the payload is empty and nothing here shows — just the map.
+const TOUCH_COL = { edit: [240,173,90], read: [165,200,241], search: [143,180,95],
+                    verify: [143,180,95], exec: [111,125,176], other: [91,103,143] };
+const T_RANK = { search: 1, read: 2, verify: 1, exec: 1, other: 0, subagent: 0, edit: 3 };
+const T_FADE = 26, T_EPS = 7, T_SPEEDS = [0.5, 1, 2, 4];
+let tEvents = [], tSegments = [], tMeta = null;
+let playhead = 0, playing = true, tSpeedI = 1;
+let tHead = null, tHops = [], litAt = new Map(), touchOf = new Map(), lastApplied = -1, activeSeg = 0;
+let _lastFrameT = performance.now(), _endHold = 0, _tp = null;
+
+async function loadTrace() {
+  if (!collectionId) return;
+  try {
+    const r = await fetch(`${API_URL}/collections/${encodeURIComponent(collectionId)}/trace`, { headers: fetchHeaders });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d || !d.events || !d.events.length) return;   // no trace → static map, no UI
+    tMeta = d.trace; tEvents = d.events; tSegments = d.segments || [];
+    buildTransport();
+  } catch (e) { console.warn('trace load failed', e); }
+}
+
+function segAt(i) { let b = 0; for (const s of tSegments) if (s.start_seq <= i) b = s.idx; return b; }
+
+// Incremental playback: apply events crossed since the last frame; a backward scrub
+// resets and replays (cheap — a few hundred events). Touched files persist in `litAt`
+// so the cumulative footprint stays lit, recent ones brighter (see drawTrace).
+function tApply(idx) {
+  if (idx < lastApplied) { litAt.clear(); touchOf.clear(); tHops = []; tHead = null; lastApplied = -1; }
+  for (let i = lastApplied + 1; i <= idx && i < tEvents.length; i++) {
+    const e = tEvents[i], p = e.file_path;
+    if (!p || !nodeById.has(p)) continue;   // non-file step, or a path not on this map
+    litAt.set(p, i);
+    const cur = touchOf.get(p);
+    if (cur == null || (T_RANK[e.action] || 0) > (T_RANK[cur] || 0)) {
+      if (e.action === 'read' || e.action === 'edit' || e.action === 'search') touchOf.set(p, e.action);
+    }
+    if (tHead) tHops.push({ a: tHead, b: p, at: i });
+    tHead = p; if (tHops.length > 16) tHops.shift();
+  }
+  lastApplied = idx; activeSeg = segAt(idx);
+}
+
+function advancePlayhead() {
+  const now = performance.now(), dt = Math.min((now - _lastFrameT) / 1000, 0.1); _lastFrameT = now;
+  if (!tEvents.length) return;
+  if (playing) {
+    playhead += dt * T_EPS * T_SPEEDS[tSpeedI];
+    if (playhead >= tEvents.length - 1) {
+      playhead = tEvents.length - 1;                  // gentle loop: hold, then restart
+      if (!_endHold) _endHold = now; else if (now - _endHold > 1500) { playhead = 0; _endHold = 0; }
+    } else _endHold = 0;
+  }
+  tApply(Math.floor(playhead));
+  updateTransport();
+}
+
+function drawTrace() {   // world-space; called inside the camera transform, over the tree
+  if (!tEvents.length) return;
+  const ph = playhead;
+  for (const [pid, at] of litAt) {
+    const n = nodeById.get(pid); if (!n) continue;
+    const cool = Math.max(0, 1 - (ph - at) / T_FADE);
+    const [r, g, b] = TOUCH_COL[touchOf.get(pid) || 'read'] || [165, 200, 241];
+    const rad = n.vr * 1.6 + 9, a = 0.22 + 0.78 * cool;
+    const gr = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, rad);
+    gr.addColorStop(0, `rgba(${r},${g},${b},${a})`); gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(n.x, n.y, rad, 0, TAU); ctx.fill();
+    ctx.fillStyle = `rgba(${r},${g},${b},${0.45 + 0.55 * cool})`;
+    ctx.beginPath(); ctx.arc(n.x, n.y, Math.max(1.4, n.vr * 0.4), 0, TAU); ctx.fill();
+  }
+  for (const hp of tHops) {
+    const age = ph - hp.at; if (age > T_FADE) continue;
+    const A = nodeById.get(hp.a), B = nodeById.get(hp.b); if (!A || !B) continue;
+    const rec = Math.max(0, 1 - age / T_FADE);
+    const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2 - hypot(B.x - A.x, B.y - A.y) * 0.18;
+    ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.quadraticCurveTo(mx, my, B.x, B.y);
+    ctx.strokeStyle = `rgba(255,157,92,${0.05 + 0.6 * rec * rec})`;
+    ctx.lineWidth = 1.2 + rec * 1.6; ctx.stroke();
+  }
+  if (tHead != null) {
+    const n = nodeById.get(tHead);
+    if (n) {
+      const pl = 1 + 0.15 * sin(tick * 0.12), rad = (n.vr + 7) * pl;
+      const gr = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, rad);
+      gr.addColorStop(0, 'rgba(255,214,158,0.9)'); gr.addColorStop(0.4, 'rgba(255,157,92,0.5)'); gr.addColorStop(1, 'rgba(255,157,92,0)');
+      ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(n.x, n.y, rad, 0, TAU); ctx.fill();
+      ctx.fillStyle = '#fff4e2'; ctx.beginPath(); ctx.arc(n.x, n.y, 2.4, 0, TAU); ctx.fill();
+    }
+  }
+}
+
+function buildTransport() {
+  if (_tp) return;
+  const css = document.createElement('style');
+  css.textContent = `
+   #t-now{position:fixed;left:14px;top:82px;z-index:10;font:10px 'Courier New',monospace;color:rgba(240,190,90,0.9);max-width:52ch;pointer-events:none;text-shadow:0 0 10px rgba(240,190,90,0.25)}
+   #t-now .rq{color:rgba(174,184,221,0.7)}
+   #t-line{position:fixed;left:50%;transform:translateX(-50%);bottom:52px;z-index:10;display:flex;gap:1px;width:min(70vw,760px);height:15px}
+   #t-line .seg{flex:1;background:rgba(120,150,190,0.16);border-radius:2px;cursor:pointer;transition:background .15s}
+   #t-line .seg:hover{background:rgba(240,200,110,0.5)}
+   #t-line .seg.on{background:rgba(240,200,110,0.85)}
+   #t-line .seg.disc{background:rgba(120,150,190,0.06)}
+   #t-dock{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:10;display:flex;align-items:center;gap:10px;background:rgba(6,13,34,0.9);border:0.5px solid rgba(224,160,48,0.25);border-radius:10px;padding:6px 12px;font:11px 'Courier New',monospace;color:#c0c8e0}
+   #t-dock button{background:#141a30;color:#c0c8e0;border:0.5px solid rgba(224,160,48,0.25);border-radius:6px;padding:3px 9px;cursor:pointer;font:inherit}
+   #t-scrub{width:min(44vw,500px);accent-color:#e0a030}
+   #t-tc{color:rgba(224,160,48,0.6);min-width:72px;text-align:center}`;
+  document.head.appendChild(css);
+  const wrap = document.createElement('div');
+  wrap.innerHTML =
+    `<div id="t-now"></div><div id="t-line"></div>` +
+    `<div id="t-dock"><button id="t-play">⏸</button>` +
+    `<input id="t-scrub" type="range" min="0" max="1000" value="0">` +
+    `<span id="t-tc"></span><button id="t-speed">1×</button></div>`;
+  document.body.appendChild(wrap);
+  _tp = { play: wrap.querySelector('#t-play'), scrub: wrap.querySelector('#t-scrub'),
+          tc: wrap.querySelector('#t-tc'), speed: wrap.querySelector('#t-speed'),
+          now: wrap.querySelector('#t-now'), line: wrap.querySelector('#t-line') };
+  _tp.play.onclick = () => { playing = !playing; _tp.play.textContent = playing ? '⏸' : '▶'; };
+  _tp.speed.onclick = () => { tSpeedI = (tSpeedI + 1) % T_SPEEDS.length; _tp.speed.textContent = T_SPEEDS[tSpeedI] + '×'; };
+  _tp.scrub.oninput = () => { playing = false; _tp.play.textContent = '▶'; playhead = (+_tp.scrub.value / 1000) * (tEvents.length - 1); tApply(Math.floor(playhead)); };
+  for (const s of tSegments) {
+    const d = document.createElement('div');
+    d.className = 'seg' + (s.files && s.files.length ? '' : ' disc');
+    d.style.flex = String(Math.max(s.end_seq - s.start_seq, 1));
+    d.title = `§${s.idx} ${s.title}`;
+    d.onclick = () => { playing = false; _tp.play.textContent = '▶'; playhead = s.start_seq; tApply(Math.floor(playhead)); showSeg(s.idx); };
+    _tp.line.appendChild(d);
+  }
+}
+
+function updateTransport() {
+  if (!_tp) return;
+  const last = Math.max(tEvents.length - 1, 1);
+  _tp.scrub.value = String(Math.round(playhead / last * 1000));
+  _tp.tc.textContent = `${Math.floor(playhead)} / ${last}`;
+  const segs = _tp.line.children;
+  for (let i = 0; i < segs.length; i++) segs[i].classList.toggle('on', i === activeSeg);
+  const s = tSegments[activeSeg];
+  if (s) _tp.now.innerHTML = `§${activeSeg} ${esc(s.title)}` +
+    (s.request ? `<br><span class="rq">"${esc(s.request.slice(0, 88))}"</span>` : '');
+}
+
+// Clicking a timeline segment opens its recursive-summary in the tooltip — the orrery
+// payload mindwalk can't show (its click gives only a visit history).
+function showSeg(idx) {
+  const s = tSegments[idx]; if (!s) return;
+  const tt = document.getElementById('tooltip');
+  tt.style.display = 'block'; tt.style.left = '14px'; tt.style.top = '92px';
+  tt.innerHTML = `<div class="tt-title">§${idx} ${esc(s.title)}</div>` +
+    `<div>${esc(s.summary || '')}</div>` +
+    (s.files && s.files.length
+      ? `<div class="tt-dim">${s.files.length} files touched · click a lit node for its entities</div>`
+      : `<div class="tt-dim">discussion turn — no files</div>`);
+}
+
+loadTrace();
 </script>
 </body>
 </html>

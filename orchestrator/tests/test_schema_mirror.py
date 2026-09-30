@@ -56,7 +56,12 @@ _MIRRORED_TABLES = ["graph_snapshot", "domain_edges", "collections",
                     # ccvault ingestion ledgers: the worker's ingest_ccvault job WRITES
                     # the dedup watermarks and the orchestrator's /ingest/ccvault route
                     # reads them (get-or-create + no-op re-ingest) — cross-service surface.
-                    "ccvault_sessions_seen", "ccvault_processed"]
+                    "ccvault_sessions_seen", "ccvault_processed",
+                    # Session-trace replay (feat/session-trace-replay): orchestrator-only
+                    # surface today, but mirrored into both files so the shared DB has one
+                    # shape regardless of which process opens a workspace first — same
+                    # first-opener hazard as every other table here.
+                    "traces", "trace_events", "trace_segments"]
 
 # Indexes on that surface. Table DDL alone is not enough: an index dropped from one
 # file costs nothing structurally and everything in latency, so it is exactly the kind

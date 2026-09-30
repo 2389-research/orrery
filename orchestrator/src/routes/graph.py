@@ -5,9 +5,17 @@
 """
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from ..dependencies import get_auth_store, AuthStore
 
 router = APIRouter()
+
+
+class TraceIngestRequest(BaseModel):
+    jsonl_path: str          # staged session log (like /ingest/repo's staged path)
+    cwd: str | None = None   # repo root, to make touched paths collection-relative
+    source: str = "claude_code"
+    title: str | None = None
 
 
 def _chunked(seq, size=900):
@@ -273,6 +281,39 @@ def _collection_structure(store, collection_id: str, max_files: int) -> dict:
         "total_files": total_files,
         "rendered_files": len(render_set),
     }
+
+
+@router.get("/collections/{collection_id}/trace")
+def get_collection_trace(collection_id: str, trace_id: str | None = None,
+                         auth: AuthStore = Depends(get_auth_store)):
+    """Ordered file-touch trace + recursive-summary segments to replay over the
+    collection's structure MAP (see /structure). Latest trace unless `trace_id` is
+    given; an empty payload (never 404) when the collection has no trace yet, so the
+    viz just renders the static map."""
+    from ..pipeline.session_trace import read_trace
+    store = auth.store
+    try:
+        return (read_trace(store.conn, collection_id, trace_id)
+                or {"trace": None, "events": [], "segments": []})
+    finally:
+        store.close()
+
+
+@router.post("/collections/{collection_id}/trace")
+def ingest_collection_trace(collection_id: str, req: TraceIngestRequest,
+                            auth: AuthStore = Depends(get_auth_store)):
+    """Parse a staged session log into an ordered trace + segments and persist it
+    against this repo collection. Returns the new trace id."""
+    from ..pipeline.session_trace import parse_session_trace, persist_trace
+    store = auth.store
+    try:
+        parsed = parse_session_trace(req.jsonl_path, req.cwd)
+        tid = persist_trace(store.conn, collection_id, parsed,
+                            source=req.source, title=req.title)
+        return {"trace_id": tid, "n_events": len(parsed["events"]),
+                "n_segments": len(parsed["segments"]), "n_files": len(parsed["files"])}
+    finally:
+        store.close()
 
 
 @router.get("/collections/{collection_id}/summary")
