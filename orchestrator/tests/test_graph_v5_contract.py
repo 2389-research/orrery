@@ -43,8 +43,11 @@ def _seed(store, *, entities=6, docs=4, with_repo=True, unplaceable=1):
     """
     c = store.conn
     for i in range(docs):
-        c.execute("INSERT INTO documents (id, title, content_type) VALUES (?, ?, ?)",
-                  (f"d{i}", f"doc {i}", "image" if i == 0 else "text"))
+        # Explicit, fixed created_at: the payload now carries first_seen/last_seen
+        # (entity recency), so the golden must be deterministic rather than defaulting
+        # each doc to CURRENT_TIMESTAMP.
+        c.execute("INSERT INTO documents (id, title, content_type, created_at) VALUES (?, ?, ?, ?)",
+                  (f"d{i}", f"doc {i}", "image" if i == 0 else "text", f"2026-01-{i+1:02d} 00:00:00"))
     c.execute("INSERT INTO domains (path, document_count) VALUES ('alpha', 2)")
     c.execute("INSERT INTO domains (path, document_count) VALUES ('alpha/beta/deep', 2)")
     for i in range(docs):

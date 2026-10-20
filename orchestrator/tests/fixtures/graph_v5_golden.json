@@ -93,9 +93,11 @@
  "node_index": {
   "e0": {
    "degree": 1,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e0",
    "kind": null,
    "label": "entity 0",
+   "last_seen": "2026-01-01 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -114,9 +116,11 @@
   },
   "e1": {
    "degree": 2,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e1",
    "kind": null,
    "label": "entity 1",
+   "last_seen": "2026-01-02 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -140,9 +144,11 @@
   },
   "e10": {
    "degree": 3,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e10",
    "kind": null,
    "label": "entity 10",
+   "last_seen": "2026-01-03 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -166,9 +172,11 @@
   },
   "e11": {
    "degree": 4,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e11",
    "kind": null,
    "label": "entity 11",
+   "last_seen": "2026-01-04 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -192,9 +200,11 @@
   },
   "e2": {
    "degree": 3,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e2",
    "kind": null,
    "label": "entity 2",
+   "last_seen": "2026-01-03 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -218,9 +228,11 @@
   },
   "e3": {
    "degree": 4,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e3",
    "kind": null,
    "label": "entity 3",
+   "last_seen": "2026-01-04 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -244,9 +256,11 @@
   },
   "e4": {
    "degree": 1,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e4",
    "kind": null,
    "label": "entity 4",
+   "last_seen": "2026-01-01 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -265,9 +279,11 @@
   },
   "e5": {
    "degree": 2,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e5",
    "kind": null,
    "label": "entity 5",
+   "last_seen": "2026-01-02 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -291,9 +307,11 @@
   },
   "e6": {
    "degree": 3,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e6",
    "kind": null,
    "label": "entity 6",
+   "last_seen": "2026-01-03 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -317,9 +335,11 @@
   },
   "e7": {
    "degree": 4,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e7",
    "kind": null,
    "label": "entity 7",
+   "last_seen": "2026-01-04 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -343,9 +363,11 @@
   },
   "e8": {
    "degree": 1,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e8",
    "kind": null,
    "label": "entity 8",
+   "last_seen": "2026-01-01 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -364,9 +386,11 @@
   },
   "e9": {
    "degree": 2,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e9",
    "kind": null,
    "label": "entity 9",
+   "last_seen": "2026-01-02 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -407,25 +431,19 @@
    "type": "collection"
   },
   {
-   "id": "d0",
+   "id": "orphan0",
    "kind": null,
-   "label": "doc 0",
-   "memberships": [
-    {
-     "container_type": "domain",
-     "id": "alpha",
-     "weight": 1.0
-    }
-   ],
-   "primary_domain": "alpha",
+   "label": "orphan",
+   "memberships": [],
+   "primary_domain": null,
    "silo_id": null,
-   "subtype": "image",
+   "subtype": "text",
    "type": "document"
   },
   {
-   "id": "d1",
+   "id": "d3",
    "kind": null,
-   "label": "doc 1",
+   "label": "doc 3",
    "memberships": [
     {
      "container_type": "domain",
@@ -455,9 +473,9 @@
    "type": "document"
   },
   {
-   "id": "d3",
+   "id": "d1",
    "kind": null,
-   "label": "doc 3",
+   "label": "doc 1",
    "memberships": [
     {
      "container_type": "domain",
@@ -471,20 +489,28 @@
    "type": "document"
   },
   {
-   "id": "orphan0",
+   "id": "d0",
    "kind": null,
-   "label": "orphan",
-   "memberships": [],
-   "primary_domain": null,
+   "label": "doc 0",
+   "memberships": [
+    {
+     "container_type": "domain",
+     "id": "alpha",
+     "weight": 1.0
+    }
+   ],
+   "primary_domain": "alpha",
    "silo_id": null,
-   "subtype": "text",
+   "subtype": "image",
    "type": "document"
   },
   {
    "degree": 4,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e11",
    "kind": null,
    "label": "entity 11",
+   "last_seen": "2026-01-04 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -508,9 +534,11 @@
   },
   {
    "degree": 4,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e3",
    "kind": null,
    "label": "entity 3",
+   "last_seen": "2026-01-04 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -534,9 +562,11 @@
   },
   {
    "degree": 4,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e7",
    "kind": null,
    "label": "entity 7",
+   "last_seen": "2026-01-04 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -560,9 +590,11 @@
   },
   {
    "degree": 3,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e10",
    "kind": null,
    "label": "entity 10",
+   "last_seen": "2026-01-03 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -586,9 +618,11 @@
   },
   {
    "degree": 3,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e2",
    "kind": null,
    "label": "entity 2",
+   "last_seen": "2026-01-03 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -612,9 +646,11 @@
   },
   {
    "degree": 3,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e6",
    "kind": null,
    "label": "entity 6",
+   "last_seen": "2026-01-03 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -638,9 +674,11 @@
   },
   {
    "degree": 2,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e1",
    "kind": null,
    "label": "entity 1",
+   "last_seen": "2026-01-02 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -664,9 +702,11 @@
   },
   {
    "degree": 2,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e5",
    "kind": null,
    "label": "entity 5",
+   "last_seen": "2026-01-02 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -690,9 +730,11 @@
   },
   {
    "degree": 2,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e9",
    "kind": null,
    "label": "entity 9",
+   "last_seen": "2026-01-02 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -716,9 +758,11 @@
   },
   {
    "degree": 1,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e0",
    "kind": null,
    "label": "entity 0",
+   "last_seen": "2026-01-01 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -737,9 +781,11 @@
   },
   {
    "degree": 1,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e4",
    "kind": null,
    "label": "entity 4",
+   "last_seen": "2026-01-01 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
@@ -758,9 +804,11 @@
   },
   {
    "degree": 1,
+   "first_seen": "2026-01-01 00:00:00",
    "id": "e8",
    "kind": null,
    "label": "entity 8",
+   "last_seen": "2026-01-01 00:00:00",
    "memberships": [
     {
      "container_type": "domain",
