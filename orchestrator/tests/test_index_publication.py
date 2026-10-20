@@ -5,7 +5,10 @@ alongside that index. Held as two separate globals, a rebuild could swap one whi
 search sat between reading them, and the search would return entities that were never
 the match: not a ranking error, a WRONG ANSWER, with no error raised anywhere.
 
-The fix is that the pair is published as a single tuple, and readers bind it once.
+The fix is that the pair is published as a single tuple, and readers bind it once. Since
+#113 the tuple lives at `_entity_views[key]` (one entry per workspace); a dict value
+rebind is atomic under the GIL just as a name rebind was, so the protocol is unchanged —
+writers assign the tuple last, readers bind it once.
 These tests pin both halves of that, because either alone is insufficient — an atomic
 publish that readers ignore, or careful readers with a torn publish, both fail.
 
@@ -41,7 +44,8 @@ def test_the_index_and_its_ids_are_published_as_one_value(test_store):
     _seed(test_store, ["alpha", "beta", "gamma"])
     retrieval.build_indexes(test_store.conn)
 
-    index, ids = retrieval._entity_view
+    key = retrieval._ws_key(test_store.conn)
+    index, ids = retrieval._entity_views[key]
     assert index is not None
     assert index.ntotal == len(ids) == 3, (
         "the index and id list must describe the same build; a mismatch here is exactly "
@@ -58,7 +62,8 @@ def test_a_search_never_observes_a_half_swapped_index(test_store):
     """
     _seed(test_store, ["alpha", "beta", "gamma"])
     retrieval.build_indexes(test_store.conn)
-    small = retrieval._entity_view
+    key = retrieval._ws_key(test_store.conn)
+    small = retrieval._entity_views[key]
 
     class _FakeIndex:
         def __init__(self, n): self.ntotal = n
@@ -69,12 +74,12 @@ def test_a_search_never_observes_a_half_swapped_index(test_store):
 
     def _writer():
         while not stop.is_set():
-            retrieval._entity_view = big
-            retrieval._entity_view = small
+            retrieval._entity_views[key] = big
+            retrieval._entity_views[key] = small
 
     def _reader():
         while not stop.is_set():
-            index, ids = retrieval._entity_view      # ONE bind — the whole protocol
+            index, ids = retrieval._entity_views[key]   # ONE bind — the whole protocol
             if index is not None and index.ntotal != len(ids):
                 torn.append((index.ntotal, len(ids)))
 
@@ -87,7 +92,7 @@ def test_a_search_never_observes_a_half_swapped_index(test_store):
     for t in threads:
         t.join(timeout=5)
 
-    retrieval._entity_view = small   # module global; restore for later tests
+    retrieval._entity_views[key] = small   # module state; restore for later tests
     assert not torn, f"observed {len(torn)} torn reads, e.g. {torn[:3]}"
 
 
@@ -98,5 +103,5 @@ def test_a_failed_build_does_not_leave_a_partial_pair(test_store):
     does: a leftover index next to an emptied id list is the same wrong-answer bug.
     """
     retrieval.build_indexes(test_store.conn)   # nothing seeded
-    index, ids = retrieval._entity_view
+    index, ids = retrieval._entity_views[retrieval._ws_key(test_store.conn)]
     assert index is None and ids == []

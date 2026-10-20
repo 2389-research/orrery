@@ -197,7 +197,7 @@ def test_the_index_is_marked_stale_only_after_the_write_is_durable(test_db, monk
 
     seen = {}
 
-    def _probe():
+    def _probe(conn):   # signature mirrors _mark_search_index_stale(conn) (#113)
         other = get_connection(test_db)
         try:
             seen["invalid_at"] = other.execute(
@@ -229,16 +229,18 @@ def _resolve_and_report_index_flag(test_db, action, **kwargs):
     from src.db import get_connection
     from src.pipeline.graph_repair import propose_correction, resolve_correction
     from src.pipeline.search import pipeline as search_pipeline
+    from src.pipeline.search import retrieval
 
     conn = get_connection(test_db)
+    key = retrieval._ws_key(conn)
     try:
         _seed_entity_with_edge(conn)
         iid = propose_correction(conn, action=action, entity="panopticon", **kwargs)["issue_id"]
-        search_pipeline._indexes_ready = True
+        search_pipeline._indexes_ready.add(key)   # simulate a built index for this workspace
         resolve_correction(conn, iid, "approve", reviewer="human")
-        return search_pipeline._indexes_ready
+        return key in search_pipeline._indexes_ready   # False == marked stale
     finally:
-        search_pipeline._indexes_ready = False   # module global; don't leak to later tests
+        search_pipeline._indexes_ready.discard(key)   # module state; don't leak to later tests
         conn.close()
 
 
