@@ -2,18 +2,21 @@
 # ABOUTME: Supports query expansion via Relay, optional image search.
 
 import numpy as np
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from orrery_relay import Relay
 from ..config import get_settings
 from ..dependencies import get_auth_store, AuthStore, query_id
 from ..broadcast import broadcast_search
 from ..repositories.graph_reads import entity_silos
+from ..pipeline.time_scope import resolve_scope, TimeScopeError
 
 router = APIRouter()
 
 
 @router.get("/search")
-async def search_query(q: str, top_k: int = 20, expand: bool = False, include_images: bool = False, auth: AuthStore = Depends(get_auth_store), qid: str = Depends(query_id)):
+async def search_query(q: str, top_k: int = 20, expand: bool = False, include_images: bool = False,
+                       since: str | None = None, until: str | None = None, as_of: str | None = None,
+                       auth: AuthStore = Depends(get_auth_store), qid: str = Depends(query_id)):
     """Search the knowledge graph.
 
     Full 5-stage pipeline: expansion → retrieval → entity-boost → fusion → response.
@@ -23,7 +26,16 @@ async def search_query(q: str, top_k: int = 20, expand: bool = False, include_im
     call (sub-query generation), so it adds latency and a hard per-search dependency on
     the configured backend — a search should not 500 because the LLM backend is momentarily
     unreachable. Callers who want the recall boost opt in with expand=true.
+
+    Optional TimeScope (#116): `since`/`until`/`as_of` (ISO, bare date, or relative like
+    `-7d`) restrict hits to documents in that window; the resolved `scope` is echoed back.
     """
+    scoped = any(p is not None for p in (since, until, as_of))
+    try:
+        scope = resolve_scope(since=since, until=until, as_of=as_of)
+    except TimeScopeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     settings = get_settings()
     store = auth.store
     relay = Relay.from_settings(settings)
@@ -31,6 +43,7 @@ async def search_query(q: str, top_k: int = 20, expand: bool = False, include_im
     from ..pipeline.search import search_knowledge_graph
     result = await search_knowledge_graph(
         store.conn, q, expand=expand, relay=relay, top_k=top_k,
+        since=scope["since"], until=scope["until"],
     )
 
     # Silo + kind, resolved LIVE via the silo_kind view join (task 11a) — batched
@@ -61,6 +74,8 @@ async def search_query(q: str, top_k: int = 20, expand: bool = False, include_im
         "total_chunks": result.total_chunks,
         "query_id": qid,
     }
+    if scoped:
+        response["scope"] = scope
 
     # Parallel image search (opt-in)
     if include_images:

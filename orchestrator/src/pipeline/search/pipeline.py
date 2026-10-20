@@ -24,6 +24,8 @@ from .entity_boost import boost_chunks_via_entities
 from .fusion import rrf_fuse
 
 _config = SearchConfig()
+_DEFAULTS = SearchConfig()           # pristine knob values, to reset the shared _config
+_SCOPE_OVERFETCH = 5                 # retrieve top_k * this when a time scope will post-filter
 # Per-workspace readiness (#113): the set of `_ws_key`s whose index is built and current.
 # A single bool latched True on the first workspace's build, so no other workspace ever
 # rebuilt and every search hit the first one's vectors.
@@ -171,9 +173,24 @@ async def search_knowledge_graph(
     expand: bool = True,
     relay: "Relay | None" = None,
     top_k: int = 20,
+    since: str | None = None,
+    until: str | None = None,
 ) -> SearchResponse:
-    """Full search pipeline. Returns ranked entities + chunks."""
-    _config.max_results = top_k
+    """Full search pipeline. Returns ranked entities + chunks.
+
+    `since`/`until` (already resolved to SQLite UTC strings) restrict results to a time
+    window (#116): the FAISS index is flat and all-time, so we over-fetch and then drop
+    hits whose document is out of window. An entity is kept only if it has an in-window
+    source; a chunk only if its document is in-window. With no window, behavior and fetch
+    sizes are exactly as before.
+    """
+    scoped = bool(since or until)
+    fetch_k = top_k * _SCOPE_OVERFETCH if scoped else top_k
+    # The shared _config is mutated per-request (pre-existing); reset the fetch knobs each
+    # call so a scoped request's widened fetch never leaks into a later unscoped one.
+    _config.max_results = fetch_k
+    _config.entity_top_k = fetch_k if scoped else _DEFAULTS.entity_top_k
+    _config.chunk_top_k = fetch_k if scoped else _DEFAULTS.chunk_top_k
 
     # Off the event loop, NOT `with _index_lock:` inline.
     #
@@ -214,6 +231,80 @@ async def search_knowledge_graph(
     # Stage 3: RRF fusion
     response = rrf_fuse(all_results, query, _config)
 
+    # Stage 4 (optional): time-window post-filter. Done here, after fusion, so out-of-
+    # window hits never consumed a top_k slot a valid one should have had (the reason for
+    # the over-fetch above). Truncate to the caller's real top_k at the end.
+    if scoped:
+        response = _filter_response_to_window(conn, response, since, until, top_k)
+
+    return response
+
+
+def _docs_in_window(conn: sqlite3.Connection, doc_ids: list[str],
+                    since: str | None, until: str | None) -> dict:
+    """Return {document_id: created_at} for those of `doc_ids` inside the window.
+
+    `until` doubles as an as-of cutoff: a doc soft-deleted AFTER it still counts as of
+    then (invalid_at > until), matching the documents list."""
+    if not doc_ids:
+        return {}
+    ph = ",".join("?" * len(doc_ids))
+    clauses = [f"id IN ({ph})"]
+    params: list = list(doc_ids)
+    if until:
+        clauses.append("(invalid_at > ? OR invalid_at IS NULL)"); params.append(until)
+    else:
+        clauses.append("invalid_at IS NULL")
+    if since:
+        clauses.append("created_at >= ?"); params.append(since)
+    if until:
+        clauses.append("created_at < ?"); params.append(until)
+    rows = conn.execute(
+        f"SELECT id, created_at FROM documents WHERE {' AND '.join(clauses)}", params).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def _entities_with_in_window_source(conn: sqlite3.Connection, entity_ids: list[str],
+                                    since: str | None, until: str | None) -> set:
+    """The subset of `entity_ids` that have at least one source document in the window."""
+    if not entity_ids:
+        return set()
+    ph = ",".join("?" * len(entity_ids))
+    clauses = [f"es.entity_id IN ({ph})"]
+    params: list = list(entity_ids)
+    if until:
+        clauses.append("(d.invalid_at > ? OR d.invalid_at IS NULL)"); params.append(until)
+    else:
+        clauses.append("d.invalid_at IS NULL")
+    if since:
+        clauses.append("d.created_at >= ?"); params.append(since)
+    if until:
+        clauses.append("d.created_at < ?"); params.append(until)
+    rows = conn.execute(
+        "SELECT DISTINCT es.entity_id FROM entity_sources es "
+        "JOIN documents d ON es.document_id = d.id "
+        f"WHERE {' AND '.join(clauses)}", params).fetchall()
+    return {r[0] for r in rows}
+
+
+def _filter_response_to_window(conn: sqlite3.Connection, response: SearchResponse,
+                               since: str | None, until: str | None, top_k: int) -> SearchResponse:
+    in_win_docs = _docs_in_window(
+        conn, [c["document_id"] for c in response.chunks if c.get("document_id")], since, until)
+    kept_chunks = []
+    for c in response.chunks:
+        if c["document_id"] in in_win_docs:
+            c["created_at"] = in_win_docs[c["document_id"]]   # expose for timeline sorting
+            kept_chunks.append(c)
+
+    in_win_ents = _entities_with_in_window_source(
+        conn, [e["id"] for e in response.entities], since, until)
+    kept_entities = [e for e in response.entities if e["id"] in in_win_ents]
+
+    response.total_entities = len(kept_entities)
+    response.total_chunks = len(kept_chunks)
+    response.entities = kept_entities[:top_k]
+    response.chunks = kept_chunks[:top_k]
     return response
 
 
