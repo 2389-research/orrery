@@ -68,6 +68,36 @@ async def test_ingest_stores_document(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ingest_marks_search_index_stale(tmp_path):
+    """New docs must become searchable without a manual rebuild (#113 follow-up).
+
+    Ingest embeds the new rows but that only updates the DB; the in-memory FAISS index
+    for this workspace must be invalidated so the next search rebuilds. Before the fix the
+    per-workspace ready flag stayed set and the new docs were invisible until a correction
+    or POST /search/rebuild."""
+    store = make_test_store(tmp_path)
+    settings = make_test_settings(tmp_path)
+    from src.pipeline.search import pipeline as sp
+    from src.pipeline.search import retrieval
+    key = retrieval._ws_key(store.conn)
+    sp._indexes_ready.add(key)   # simulate an index already built for this workspace
+
+    with patch("src.routes.ingest.get_settings", return_value=settings), \
+         patch("src.routes.ingest.classify_document", new_callable=AsyncMock, return_value=MOCK_CLASSIFICATION), \
+         patch("src.routes.ingest.extract_document", new_callable=AsyncMock, return_value=MOCK_ENTITIES), \
+         patch("src.pipeline.search.retrieval.embed_new_entities", return_value=0), \
+         patch("src.pipeline.search.retrieval.embed_new_chunks", return_value=0), \
+         patch("src.routes.ingest.Relay"):
+        from src.routes.ingest import _ingest_document
+        await _ingest_document(store, "Doc", "hello world content", None)
+
+    assert key not in sp._indexes_ready, "ingest must invalidate this workspace's search index"
+    sp._indexes_ready.discard(key)
+    set_test_store(None)
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_ingest_creates_chunks(tmp_path):
     store = make_test_store(tmp_path)
     settings = make_test_settings(tmp_path)

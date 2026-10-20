@@ -29,6 +29,11 @@ from .config import SearchConfig
 # (`_ws_key`) — derivable from the `conn` every caller already passes, so no workspace_id
 # has to be threaded through the corrections/judge path for an invalidation to find the
 # right index.
+#
+# These caches are never evicted: the process now retains one index pair per workspace
+# ever searched, for its lifetime. That is fine for the current single-host deployment
+# (few workspaces); if workspace count ever grows large, add idle eviction here (an LRU
+# keyed by `_ws_key`) rather than reverting to a single global.
 _model = None
 _entity_views: dict[str, tuple] = {}   # ws_key -> (faiss index | None, ids)
 _chunk_views: dict[str, tuple] = {}

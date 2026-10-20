@@ -193,8 +193,13 @@ async def _ingest_document(store, title: str, content: str, source_path: str | N
     if entity_count > 0:
         try:
             from ..pipeline.search.retrieval import embed_new_entities, embed_new_chunks
+            from ..pipeline.search import mark_indexes_stale
             embed_new_entities(store.conn)
             embed_new_chunks(store.conn)
+            # Embedding the new rows updates the DB but not the in-memory FAISS index; mark
+            # this workspace's index stale so the next search rebuilds and the new docs are
+            # findable without a manual /search/rebuild (#113 made invalidation per-workspace).
+            mark_indexes_stale(store.conn)
         except Exception as e:
             print(f"Search index update after ingest: {e}")
 
@@ -299,8 +304,12 @@ async def _ingest_image(store, title: str, file_bytes: bytes, image_path: str) -
     # Rebuild search index — text (sentence-transformers) for compatibility
     try:
         from ..pipeline.search.retrieval import embed_new_entities, embed_new_chunks
+        from ..pipeline.search import mark_indexes_stale
         embed_new_entities(store.conn)
         embed_new_chunks(store.conn)
+        # See the text path: invalidate this workspace's in-memory index so the new rows
+        # become searchable on the next query without a manual rebuild.
+        mark_indexes_stale(store.conn)
     except Exception as e:
         print(f"Search index update after image ingest: {e}")
 
