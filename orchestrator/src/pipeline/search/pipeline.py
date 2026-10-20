@@ -6,6 +6,7 @@ from __future__ import annotations
 from ...repositories.graph_reads import degrees_of, entities_by_ids
 import sqlite3
 import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import anyio
@@ -23,8 +24,7 @@ from .retrieval import (
 from .entity_boost import boost_chunks_via_entities
 from .fusion import rrf_fuse
 
-_config = SearchConfig()
-_DEFAULTS = SearchConfig()           # pristine knob values, to reset the shared _config
+_DEFAULTS = SearchConfig()           # pristine knob values; each call derives its own cfg
 _SCOPE_OVERFETCH = 5                 # retrieve top_k * this when a time scope will post-filter
 # Per-workspace readiness (#113): the set of `_ws_key`s whose index is built and current.
 # A single bool latched True on the first workspace's build, so no other workspace ever
@@ -138,21 +138,24 @@ def _enrich_results(conn: sqlite3.Connection, results: SubQueryResults):
             c.document_title = row[2] or ""
 
 
-def _retrieve_for_subquery(conn: sqlite3.Connection, query: str, key: str) -> SubQueryResults:
+def _retrieve_for_subquery(conn: sqlite3.Connection, query: str, key: str,
+                           cfg: SearchConfig) -> SubQueryResults:
     """Stage 1: Run all retrieval channels for a single sub-query.
 
     `key` selects the workspace's own FAISS index (#113); the exact channel uses `conn`
-    directly and is already workspace-scoped."""
+    directly and is already workspace-scoped. `cfg` is the per-call config (fetch sizes),
+    passed in rather than read from a shared global so concurrent requests can't clobber
+    each other's widened over-fetch."""
     query_embedding = embed_text(query)
 
     # Channel A: Semantic entity search
-    semantic_entities = search_entities_semantic(query_embedding, key, top_k=_config.entity_top_k)
+    semantic_entities = search_entities_semantic(query_embedding, key, top_k=cfg.entity_top_k)
 
     # Channel B: Semantic chunk search
-    semantic_chunks = search_chunks_semantic(query_embedding, key, top_k=_config.chunk_top_k)
+    semantic_chunks = search_chunks_semantic(query_embedding, key, top_k=cfg.chunk_top_k)
 
     # Channel C: Exact match
-    exact_entities = search_entities_exact(conn, query, min_term_length=_config.exact_min_term_length)
+    exact_entities = search_entities_exact(conn, query, min_term_length=cfg.exact_min_term_length)
 
     results = SubQueryResults(
         query=query,
@@ -183,14 +186,24 @@ async def search_knowledge_graph(
     hits whose document is out of window. An entity is kept only if it has an in-window
     source; a chunk only if its document is in-window. With no window, behavior and fetch
     sizes are exactly as before.
+
+    LIMITATION (best-effort, not a guarantee): the window is applied to a SINGLE over-fetch
+    of top_k * _SCOPE_OVERFETCH; there is no re-widening pass. For a narrow window over a
+    large corpus, if more than that many all-time hits outrank the in-window ones, the
+    in-window results can be under-returned even though they exist. A true guarantee needs
+    an index-side (allowlist) filter — tracked as #116 follow-up. Widen _SCOPE_OVERFETCH if
+    this bites in practice.
     """
     scoped = bool(since or until)
     fetch_k = top_k * _SCOPE_OVERFETCH if scoped else top_k
-    # The shared _config is mutated per-request (pre-existing); reset the fetch knobs each
-    # call so a scoped request's widened fetch never leaks into a later unscoped one.
-    _config.max_results = fetch_k
-    _config.entity_top_k = fetch_k if scoped else _DEFAULTS.entity_top_k
-    _config.chunk_top_k = fetch_k if scoped else _DEFAULTS.chunk_top_k
+    # A PER-CALL config, not a mutated shared global. `search_knowledge_graph` is async and
+    # several /search requests interleave on the event loop across its await points
+    # (index build, query expansion); a shared _config let one request's widened over-fetch
+    # or reset clobber another's mid-flight, so a scoped search could retrieve with the
+    # default fetch size and silently under-return. `replace` gives each call its own knobs.
+    cfg = replace(_DEFAULTS, max_results=fetch_k,
+                  entity_top_k=fetch_k if scoped else _DEFAULTS.entity_top_k,
+                  chunk_top_k=fetch_k if scoped else _DEFAULTS.chunk_top_k)
 
     # Off the event loop, NOT `with _index_lock:` inline.
     #
@@ -213,7 +226,7 @@ async def search_knowledge_graph(
         sub_queries = await expand_query(
             relay=relay,
             query=query,
-            max_sub_queries=_config.expansion_max_sub_queries,
+            max_sub_queries=cfg.expansion_max_sub_queries,
         )
     else:
         sub_queries = [query]
@@ -224,12 +237,12 @@ async def search_knowledge_graph(
     # Stage 1 + 2: Retrieve + entity-boost for each sub-query
     all_results = []
     for sq in sub_queries:
-        result = _retrieve_for_subquery(conn, sq, key)
-        result = boost_chunks_via_entities(conn, result, _config, total_docs)
+        result = _retrieve_for_subquery(conn, sq, key, cfg)
+        result = boost_chunks_via_entities(conn, result, cfg, total_docs)
         all_results.append(result)
 
     # Stage 3: RRF fusion
-    response = rrf_fuse(all_results, query, _config)
+    response = rrf_fuse(all_results, query, cfg)
 
     # Stage 4 (optional): time-window post-filter. Done here, after fusion, so out-of-
     # window hits never consumed a top_k slot a valid one should have had (the reason for
@@ -240,28 +253,50 @@ async def search_knowledge_graph(
     return response
 
 
+# Keep each IN(...) list under SQLITE_MAX_VARIABLE_NUMBER (999 on older builds); the id
+# lists here are bounded by top_k * _SCOPE_OVERFETCH, which a large ?top_k would push past
+# 999 and turn into an OperationalError. Batch and union.
+_SQLITE_MAX_VARS = 900
+
+
+def _window_predicate(since: str | None, until: str | None, col: str) -> tuple[list, list]:
+    """Shared (clauses, params) for the invalid-at/since/until window.
+
+    `col` prefixes the column refs ('' for the documents table itself, 'd.' when joined).
+    `until` doubles as an as-of cutoff: a doc soft-deleted AFTER it still counts as of then
+    (invalid_at > until)."""
+    clauses, params = [], []
+    if until:
+        clauses.append(f"({col}invalid_at > ? OR {col}invalid_at IS NULL)"); params.append(until)
+    else:
+        clauses.append(f"{col}invalid_at IS NULL")
+    if since:
+        clauses.append(f"{col}created_at >= ?"); params.append(since)
+    if until:
+        clauses.append(f"{col}created_at < ?"); params.append(until)
+    return clauses, params
+
+
+def _batches(ids: list, room_for: int):
+    size = max(1, _SQLITE_MAX_VARS - room_for)
+    for i in range(0, len(ids), size):
+        yield ids[i:i + size]
+
+
 def _docs_in_window(conn: sqlite3.Connection, doc_ids: list[str],
                     since: str | None, until: str | None) -> dict:
-    """Return {document_id: created_at} for those of `doc_ids` inside the window.
-
-    `until` doubles as an as-of cutoff: a doc soft-deleted AFTER it still counts as of
-    then (invalid_at > until), matching the documents list."""
+    """Return {document_id: created_at} for those of `doc_ids` inside the window."""
     if not doc_ids:
         return {}
-    ph = ",".join("?" * len(doc_ids))
-    clauses = [f"id IN ({ph})"]
-    params: list = list(doc_ids)
-    if until:
-        clauses.append("(invalid_at > ? OR invalid_at IS NULL)"); params.append(until)
-    else:
-        clauses.append("invalid_at IS NULL")
-    if since:
-        clauses.append("created_at >= ?"); params.append(since)
-    if until:
-        clauses.append("created_at < ?"); params.append(until)
-    rows = conn.execute(
-        f"SELECT id, created_at FROM documents WHERE {' AND '.join(clauses)}", params).fetchall()
-    return {r[0]: r[1] for r in rows}
+    wc, wp = _window_predicate(since, until, "")
+    out: dict = {}
+    for batch in _batches(doc_ids, len(wp)):
+        ph = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT id, created_at FROM documents WHERE id IN ({ph}) AND {' AND '.join(wc)}",
+            list(batch) + wp).fetchall()
+        out.update({r[0]: r[1] for r in rows})
+    return out
 
 
 def _entities_with_in_window_source(conn: sqlite3.Connection, entity_ids: list[str],
@@ -269,22 +304,17 @@ def _entities_with_in_window_source(conn: sqlite3.Connection, entity_ids: list[s
     """The subset of `entity_ids` that have at least one source document in the window."""
     if not entity_ids:
         return set()
-    ph = ",".join("?" * len(entity_ids))
-    clauses = [f"es.entity_id IN ({ph})"]
-    params: list = list(entity_ids)
-    if until:
-        clauses.append("(d.invalid_at > ? OR d.invalid_at IS NULL)"); params.append(until)
-    else:
-        clauses.append("d.invalid_at IS NULL")
-    if since:
-        clauses.append("d.created_at >= ?"); params.append(since)
-    if until:
-        clauses.append("d.created_at < ?"); params.append(until)
-    rows = conn.execute(
-        "SELECT DISTINCT es.entity_id FROM entity_sources es "
-        "JOIN documents d ON es.document_id = d.id "
-        f"WHERE {' AND '.join(clauses)}", params).fetchall()
-    return {r[0] for r in rows}
+    wc, wp = _window_predicate(since, until, "d.")
+    out: set = set()
+    for batch in _batches(entity_ids, len(wp)):
+        ph = ",".join("?" * len(batch))
+        rows = conn.execute(
+            "SELECT DISTINCT es.entity_id FROM entity_sources es "
+            "JOIN documents d ON es.document_id = d.id "
+            f"WHERE es.entity_id IN ({ph}) AND {' AND '.join(wc)}",
+            list(batch) + wp).fetchall()
+        out.update(r[0] for r in rows)
+    return out
 
 
 def _filter_response_to_window(conn: sqlite3.Connection, response: SearchResponse,

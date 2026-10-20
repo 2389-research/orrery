@@ -72,3 +72,13 @@ def test_chunks_are_window_filtered(test_store, test_client):
     body = test_client.get("/search", params={"q": "zzz", "expand": "false", "since": "2026-10-15"}).json()
     doc_ids = {c["document_id"] for c in body["chunks"]}
     assert doc_ids <= {"d_new"}, "only in-window chunks survive"
+
+
+def test_window_helper_batches_past_sqlite_variable_limit(test_store):
+    """A large top_k makes the in-window id list exceed SQLITE_MAX_VARIABLE_NUMBER (999);
+    the helper must batch the IN(...) list rather than raise OperationalError."""
+    from src.pipeline.search.pipeline import _docs_in_window
+    _seed(test_store)   # d_old (2026-10-01), d_new (2026-10-19)
+    ids = [f"missing-{i}" for i in range(2000)] + ["d_old", "d_new"]
+    got = _docs_in_window(test_store.conn, ids, since=None, until="2026-10-15")
+    assert set(got) == {"d_old"}, "batched query still filters correctly"

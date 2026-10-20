@@ -23,9 +23,11 @@ def list_documents(limit: int = 50, offset: int = 0,
                    as_of: str | None = None, order: str = "desc",
                    auth: AuthStore = Depends(get_auth_store)):
     """List documents, newest-first. Optional TimeScope window (#116): `since`/`until`/
-    `as_of` (ISO, bare date, or relative like `-7d`) filter on `created_at`, and
-    `order=asc|desc` sorts. With no time param the response is the bare list exactly as
-    before; with one, it is `{"documents": [...], "scope": {...}}` echoing the window."""
+    `as_of` filter on `created_at`, and `order=asc|desc` sorts. Time values are ISO-8601
+    (`2026-10-19` or `2026-10-19T00:00:00Z`) or a relative duration `-<n><m|h|d>` (minutes/
+    hours/days, e.g. `-7d`, `-24h`, `-30m`). With no time param the response is a bare list
+    (same shape as before, now with `source_path` on each item); with one, it is
+    `{"documents": [...], "scope": {...}}` echoing the resolved window."""
     scoped = any(p is not None for p in (since, until, as_of))
     try:
         scope = resolve_scope(since=since, until=until, as_of=as_of)

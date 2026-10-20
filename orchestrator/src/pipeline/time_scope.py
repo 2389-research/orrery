@@ -7,7 +7,10 @@ A value may be:
 - ISO-8601: `2026-10-19T13:30:00Z` or `2026-10-19T13:30:00` (the `Z`/offset is honored,
   then normalized to UTC);
 - a bare date: `2026-10-19` (→ midnight UTC that day);
-- a relative duration against server "now": `-24h`, `-7d`, `-30m` (for agents).
+- a relative duration against server "now": `-<n><unit>` where unit is `m` (minutes),
+  `h` (hours) or `d` (days) — e.g. `-30m`, `-24h`, `-7d` (for agents). Note `m` is minutes,
+  not months; only this exact lowercase, leading-`-` form is accepted (`-1w`/`+7d`/`-1D`
+  raise TimeScopeError → HTTP 400).
 
 The output is the SQLite storage format `YYYY-MM-DD HH:MM:SS` in UTC, so it compares
 directly against `documents.created_at` (which SQLite stores in exactly that shape).
