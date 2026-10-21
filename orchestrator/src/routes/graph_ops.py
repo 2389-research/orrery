@@ -586,8 +586,12 @@ async def explore_domain(
     domain_path: str,
     auth: AuthStore = Depends(get_auth_store),
     qid: str = Depends(query_id),
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, domain: str | None = None, collection: str | None = None,
 ):
     """Overview of a domain: top entities, entity type distribution, document list, related domains."""
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
     conn = store._conn if hasattr(store, '_conn') else store.entities._conn
 
@@ -596,11 +600,17 @@ async def explore_domain(
         store.close()
         raise HTTPException(status_code=404, detail=f"Domain not found: {domain_path}")
 
-    # Documents in this domain
-    doc_rows = conn.execute("""
+    if sliced:
+        _prepare_slice(store, slc)
+
+    # Documents in this domain. When sliced, `_slice_docs` is the sole doc-validity filter.
+    doc_join = "JOIN _slice_docs sd ON sd.doc_id = d.id" if sliced else ""
+    doc_valid = "" if sliced else "AND d.invalid_at IS NULL"
+    doc_rows = conn.execute(f"""
         SELECT d.id, d.title, d.content_type FROM documents d
         JOIN document_domains dd ON d.id = dd.document_id
-        WHERE dd.domain_path = ? AND d.invalid_at IS NULL ORDER BY d.created_at DESC
+        {doc_join}
+        WHERE dd.domain_path = ? {doc_valid} ORDER BY d.created_at DESC
     """, (domain_path,)).fetchall()
     documents = [{"id": r["id"], "title": r["title"], "content_type": r["content_type"] or "text"} for r in doc_rows]
 
@@ -610,7 +620,7 @@ async def explore_domain(
     # it is most useful for. The shared read does the same work, scoped and bounded.
     top_entities = []
     type_counts: dict[str, int] = defaultdict(int)
-    for e in entities_in_domain(conn, domain_path, limit=30):
+    for e in entities_in_domain(conn, domain_path, limit=30, in_slice=sliced):
         top_entities.append({
             "id": e["id"], "name": e["canonical_name"],
             "type": e["type"], "doc_count": e["degree"],
@@ -618,12 +628,16 @@ async def explore_domain(
         type_counts[e["type"]] += 1
 
     # Related domains (share entities via trade routes)
-    related_rows = conn.execute("""
+    s1 = "JOIN _slice_docs sd1 ON sd1.doc_id = es1.document_id" if sliced else ""
+    s2 = "JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id" if sliced else ""
+    related_rows = conn.execute(f"""
         SELECT dd2.domain_path, COUNT(DISTINCT es1.entity_id) as shared_entities
         FROM document_domains dd1
         JOIN entity_sources es1 ON dd1.document_id = es1.document_id
+        {s1}
         JOIN entities e ON e.id = es1.entity_id AND e.invalid_at IS NULL
         JOIN entity_sources es2 ON es1.entity_id = es2.entity_id AND es1.document_id != es2.document_id
+        {s2}
         JOIN document_domains dd2 ON es2.document_id = dd2.document_id
         WHERE dd1.domain_path = ? AND dd2.domain_path != ?
         GROUP BY dd2.domain_path ORDER BY shared_entities DESC LIMIT 10
@@ -640,6 +654,8 @@ async def explore_domain(
         "entity_type_distribution": dict(type_counts),
         "related_domains": related_domains,
     }
+    if sliced:
+        result["scope"] = _scope(slc)
 
     # Broadcast to viz — light up top entities in this domain
     entity_names = [e["name"] for e in top_entities[:15]]
@@ -655,6 +671,8 @@ def domain_neighbours_route(
     limit: int = 10,
     auth: AuthStore = Depends(get_auth_store),
     qid: str = Depends(query_id),
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, domain: str | None = None, collection: str | None = None,
 ):
     """Domains sharing entities with `domain_path`, strongest first.
 
@@ -669,10 +687,18 @@ def domain_neighbours_route(
     trailing literal segment still binds: the greedy match backtracks to leave
     `/neighbours` for the suffix.
     """
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
     try:
-        return {"domain": domain_path,
-                "neighbours": domain_neighbours(store.conn, domain_path, limit=limit),
-                "query_id": qid}
+        if sliced:
+            _prepare_slice(store, slc)
+        result = {"domain": domain_path,
+                  "neighbours": domain_neighbours(store.conn, domain_path, limit=limit,
+                                                  in_slice=sliced),
+                  "query_id": qid}
+        if sliced:
+            result["scope"] = _scope(slc)
+        return result
     finally:
         store.close()
