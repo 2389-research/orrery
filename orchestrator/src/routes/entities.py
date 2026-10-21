@@ -3,7 +3,8 @@ import dataclasses
 from fastapi import APIRouter, HTTPException, Depends
 from ..dependencies import get_auth_store, AuthStore, query_id
 from ..repositories.factory import get_store
-from ..pipeline.slice import parse_slice, ensure_slice_doc_temp_table
+from ..pipeline.slice import parse_slice, ensure_slice_doc_temp_table, ensure_slice_temp_table
+from ..pipeline.slice_edges import in_slice_cooccurrences
 from ..pipeline.time_scope import TimeScopeError
 
 
@@ -51,22 +52,49 @@ def list_entities(
 
 
 @router.get("/entities/{entity_id}/cooccurrences")
-def get_cooccurrences(entity_id: str, limit: int = 10, auth: AuthStore = Depends(get_auth_store)):
+def get_cooccurrences(entity_id: str, limit: int = 10, auth: AuthStore = Depends(get_auth_store),
+                      since: str | None = None, until: str | None = None, as_of: str | None = None,
+                      window: str | None = None, domain: str | None = None,
+                      collection: str | None = None):
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
     store = auth.store
-    coentities = store.relationships.get_cooccurrences(entity_id, limit=limit)
+    if slc is None:
+        coentities = store.relationships.get_cooccurrences(entity_id, limit=limit)
+        store.close()
+        return [{"id": c.id, "canonical_name": c.canonical_name, "type": c.type,
+                 "weight": c.weight} for c in coentities]
+    # In-slice edges are recomputed live from in-slice chunks (stored edges can't be filtered).
+    ensure_slice_temp_table(store.conn, slc)
+    nbrs = in_slice_cooccurrences(store.conn, entity_id, limit)
+    items = []
+    if nbrs:
+        ph = ",".join("?" * len(nbrs))
+        meta = {r["id"]: r for r in store.conn.execute(
+            f"SELECT id, canonical_name, type FROM entities WHERE id IN ({ph}) AND invalid_at IS NULL",
+            [n for n, _ in nbrs])}
+        items = [{"id": n, "canonical_name": meta[n]["canonical_name"], "type": meta[n]["type"],
+                  "weight": w} for n, w in nbrs if n in meta]
     store.close()
-    return [{"id": c.id, "canonical_name": c.canonical_name, "type": c.type,
-             "weight": c.weight} for c in coentities]
+    return {"cooccurrences": items, "scope": _scope(slc)}
 
 
 @router.get("/entities/{entity_id}/star-graph")
-def get_star_graph(entity_id: str, co_limit: int = 150, auth: AuthStore = Depends(get_auth_store)):
+def get_star_graph(entity_id: str, co_limit: int = 150, auth: AuthStore = Depends(get_auth_store),
+                   since: str | None = None, until: str | None = None, as_of: str | None = None,
+                   window: str | None = None, domain: str | None = None,
+                   collection: str | None = None):
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
     store = auth.store
-    result = store.relationships.get_star_graph(entity_id, co_limit=co_limit)
-    if not result:
-        store.close()
-        raise HTTPException(status_code=404, detail="Entity not found")
+    if slc is not None:
+        ensure_slice_temp_table(store.conn, slc)
+        ensure_slice_doc_temp_table(store.conn, slc)
+    result = store.relationships.get_star_graph(entity_id, co_limit=co_limit, in_slice=slc is not None)
     store.close()
+    if not result:
+        raise HTTPException(status_code=404,
+                            detail="Entity not found in slice" if slc is not None else "Entity not found")
+    if slc is not None:
+        result["scope"] = _scope(slc)
     return result
 
 

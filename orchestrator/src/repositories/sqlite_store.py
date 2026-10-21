@@ -618,7 +618,7 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         """)
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
-    def get_star_graph(self, entity_id, co_limit=150):
+    def get_star_graph(self, entity_id, co_limit=150, in_slice=False):
         # co_limit is a caller/URL param; clamp it so the shared_docs query's
         # (co_limit + 400-doc chunk) placeholder count stays under SQLite's
         # SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) — the same ceiling the
@@ -636,14 +636,26 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         # a hub entity can have thousands of docs, and an unbounded `IN (…)` would blow
         # past SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) and 500 the whole
         # endpoint. _galaxy_pos already chunked for this reason; the doc-id paths now do too.
-        doc_rows = self._conn.execute("""
+        # in_slice: `_slice_docs` is the SOLE document validity filter (no `d.invalid_at`
+        # stacked on it). doc_ids is therefore in-slice, which scopes the per-doc n_entities and
+        # shared-doc reads below; `_slice_chunks` drives the co-entity edges.
+        if in_slice:
+            doc_join = "JOIN _slice_docs sd ON sd.doc_id = d.id"
+            doc_valid = ""
+        else:
+            doc_join = ""
+            doc_valid = "AND d.invalid_at IS NULL"
+        doc_rows = self._conn.execute(f"""
             SELECT DISTINCT d.id, d.title, d.content_type
             FROM entity_sources es
             JOIN documents d ON es.document_id = d.id
-            WHERE es.entity_id = ? AND d.invalid_at IS NULL
+            {doc_join}
+            WHERE es.entity_id = ? {doc_valid}
             ORDER BY d.title
         """, (entity_id,)).fetchall()
         doc_ids = [r["id"] for r in doc_rows]
+        if in_slice and not doc_ids:
+            return None   # no in-slice presence
 
         def _chunks(seq, n=400):
             for i in range(0, len(seq), n):
@@ -683,16 +695,29 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         } for r in doc_rows]
 
         # Co-entities
-        co_rows = self._conn.execute("""
-            SELECT e.id, e.canonical_name, e.type, SUM(r.weight) as total_weight
-            FROM relationships r
-            JOIN entities e ON (
-                CASE WHEN r.from_entity = ? THEN r.to_entity ELSE r.from_entity END
-            ) = e.id
-            WHERE (r.from_entity = ? OR r.to_entity = ?) AND r.type = 'co_occurs'
-              AND r.invalid_at IS NULL AND e.invalid_at IS NULL
-            GROUP BY e.id ORDER BY total_weight DESC LIMIT ?
-        """, (entity_id, entity_id, entity_id, co_limit)).fetchall()
+        if in_slice:
+            from ..pipeline.slice_edges import in_slice_cooccurrences
+            nbrs = in_slice_cooccurrences(self._conn, entity_id, co_limit)
+            meta = {}
+            for chunk in _chunks([n for n, _ in nbrs]):
+                ph = ",".join("?" * len(chunk))
+                for r in self._conn.execute(
+                        f"SELECT id, canonical_name, type FROM entities "
+                        f"WHERE id IN ({ph}) AND invalid_at IS NULL", list(chunk)):
+                    meta[r["id"]] = r
+            co_rows = [{"id": n, "canonical_name": meta[n]["canonical_name"], "type": meta[n]["type"],
+                        "total_weight": w} for n, w in nbrs if n in meta]
+        else:
+            co_rows = self._conn.execute("""
+                SELECT e.id, e.canonical_name, e.type, SUM(r.weight) as total_weight
+                FROM relationships r
+                JOIN entities e ON (
+                    CASE WHEN r.from_entity = ? THEN r.to_entity ELSE r.from_entity END
+                ) = e.id
+                WHERE (r.from_entity = ? OR r.to_entity = ?) AND r.type = 'co_occurs'
+                  AND r.invalid_at IS NULL AND e.invalid_at IS NULL
+                GROUP BY e.id ORDER BY total_weight DESC LIMIT ?
+            """, (entity_id, entity_id, entity_id, co_limit)).fetchall()
 
         co_entity_ids = list(dict.fromkeys(r["id"] for r in co_rows))
 

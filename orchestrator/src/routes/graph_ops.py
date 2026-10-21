@@ -6,6 +6,10 @@ from collections import defaultdict, deque
 from fastapi import APIRouter, HTTPException, Depends, Query
 from ..dependencies import get_auth_store, AuthStore, query_id
 from ..broadcast import broadcast_search
+from ..pipeline.slice import ensure_slice_temp_table, ensure_slice_doc_temp_table
+from ..pipeline.slice_edges import in_slice_adjacency
+from ..repositories.interfaces import CoEntity
+from .entities import _active_slice, _scope
 from ..repositories.graph_reads import (_chunks, domain_neighbours, entities_in_domain,
                                          entity_by_name, entity_silos)
 
@@ -210,28 +214,34 @@ async def get_shared_context(
     b: str | None = Query(None, description="Second entity id or name; prefer this."),
     auth: AuthStore = Depends(get_auth_store),
     qid: str = Depends(query_id),
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, domain: str | None = None, collection: str | None = None,
 ):
     """Find shared context between two entities: shared documents, shared neighbors, shared domains."""
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
     conn = store._conn if hasattr(store, '_conn') else store.entities._conn
     ea = _resolve_arg(store, a, entity_a)
     eb = _resolve_arg(store, b, entity_b)
+    if sliced:
+        ensure_slice_temp_table(store.conn, slc)
+        ensure_slice_doc_temp_table(store.conn, slc)
+    # Sliced: `_slice_docs` is the sole document-validity filter (no stacked invalid_at).
+    doc_sql = ("SELECT DISTINCT d.id, d.title FROM entity_sources es JOIN documents d "
+               "ON es.document_id = d.id "
+               + ("JOIN _slice_docs sd ON sd.doc_id = d.id WHERE es.entity_id = ?" if sliced
+                  else "WHERE es.entity_id = ? AND d.invalid_at IS NULL"))
 
     # Shared documents
     docs_a = set()
     docs_b = set()
     doc_titles = {}
-    rows_a = conn.execute(
-        "SELECT DISTINCT d.id, d.title FROM entity_sources es JOIN documents d ON es.document_id = d.id WHERE es.entity_id = ? AND d.invalid_at IS NULL",
-        (ea.id,),
-    ).fetchall()
+    rows_a = conn.execute(doc_sql, (ea.id,)).fetchall()
     for r in rows_a:
         docs_a.add(r["id"])
         doc_titles[r["id"]] = r["title"]
-    rows_b = conn.execute(
-        "SELECT DISTINCT d.id, d.title FROM entity_sources es JOIN documents d ON es.document_id = d.id WHERE es.entity_id = ? AND d.invalid_at IS NULL",
-        (eb.id,),
-    ).fetchall()
+    rows_b = conn.execute(doc_sql, (eb.id,)).fetchall()
     for r in rows_b:
         docs_b.add(r["id"])
         doc_titles[r["id"]] = r["title"]
@@ -240,8 +250,27 @@ async def get_shared_context(
     shared_documents = [{"id": did, "title": doc_titles[did]} for did in shared_doc_ids]
 
     # Shared neighbors (entities that co-occur with BOTH)
-    neighbors_a = {n.id: n for n in store.relationships.get_cooccurrences(ea.id, limit=50)}
-    neighbors_b = {n.id: n for n in store.relationships.get_cooccurrences(eb.id, limit=50)}
+    if sliced:
+        # Intersection of the two in-slice neighbour sets, from live in-slice edges.
+        adj = in_slice_adjacency(store.conn, [ea.id, eb.id])
+        nb_a, nb_b = dict(adj.get(ea.id, [])), dict(adj.get(eb.id, []))
+        ids = list(set(nb_a) | set(nb_b))
+        meta = {}
+        for i in range(0, len(ids), 400):
+            part = ids[i:i + 400]
+            ph = ",".join("?" * len(part))
+            for r in conn.execute(f"SELECT id, canonical_name, type FROM entities "
+                                  f"WHERE id IN ({ph}) AND invalid_at IS NULL", part):
+                meta[r["id"]] = r
+
+        def _mk(nbrs):
+            return {nid: CoEntity(id=nid, canonical_name=meta[nid]["canonical_name"],
+                                  type=meta[nid]["type"], weight=w)
+                    for nid, w in nbrs.items() if nid in meta}
+        neighbors_a, neighbors_b = _mk(nb_a), _mk(nb_b)
+    else:
+        neighbors_a = {n.id: n for n in store.relationships.get_cooccurrences(ea.id, limit=50)}
+        neighbors_b = {n.id: n for n in store.relationships.get_cooccurrences(eb.id, limit=50)}
     shared_neighbor_ids = set(neighbors_a.keys()) & set(neighbors_b.keys())
     shared_neighbors = []
     for nid in shared_neighbor_ids:
@@ -286,6 +315,8 @@ async def get_shared_context(
             "domains_in_common": len(shared_domains),
         },
     }
+    if sliced:
+        result["scope"] = _scope(slc)
 
     # Broadcast to viz — light up both entities + their shared neighbors
     entity_names = [ea.canonical_name, eb.canonical_name] + [n["name"] for n in shared_neighbors[:10]]
