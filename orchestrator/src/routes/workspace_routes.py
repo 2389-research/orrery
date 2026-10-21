@@ -57,6 +57,11 @@ class CreateWorkspaceRequest(BaseModel):
 class RenameWorkspaceRequest(BaseModel):
     name: str
 
+class CreateViewRequest(BaseModel):
+    name: str
+    parent: str
+    slice: dict
+
 
 # --- Endpoints ---
 
@@ -80,6 +85,37 @@ async def create_workspace(
     _save_registry(registry)
     response.headers["Location"] = f"/workspaces/{ws_id}"
     return {"workspaceId": ws_id, "name": req.name}
+
+
+@router.post("/views")
+async def create_view(
+    req: CreateViewRequest,
+    user: AuthUser = Depends(require_role("editor")),
+):
+    """Create a read-only virtual noosphere: a slice (facet view) of a parent workspace (#119)."""
+    from ..pipeline.slice import parse_slice
+    from ..pipeline.time_scope import TimeScopeError
+    registry = _load_registry()
+    parent = next((w for w in registry
+                   if w["id"] == req.parent and w.get("status") != "archived"), None)
+    if parent is None:
+        raise HTTPException(404, "Parent workspace not found")
+    if parent.get("kind") == "virtual":
+        raise HTTPException(400, "A view cannot be sliced from another view")
+    try:
+        parsed = parse_slice(req.slice)
+    except TimeScopeError as e:
+        raise HTTPException(400, str(e))
+    if parsed is None:
+        raise HTTPException(400, "slice has no facets")
+    view_id = uuid.uuid4().hex
+    registry.append({
+        "id": view_id, "name": req.name, "kind": "virtual", "parent": req.parent,
+        "slice": req.slice, "status": "active",
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+    })
+    _save_registry(registry)
+    return {"id": view_id, "name": req.name}
 
 
 @router.get("/workspaces")

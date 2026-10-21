@@ -11,7 +11,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Respons
 from orrery_relay import Relay
 
 from ..config import get_settings
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..models import (IngestResult, DirectoryIngestRequest, RepoIngestRequest,
                       TrackerRunsIngestRequest, TextIngestRequest, CcvaultIngestRequest,
                       PdfIngestRequest)
@@ -342,7 +342,7 @@ async def _ingest_image(store, title: str, file_bytes: bytes, image_path: str) -
 async def ingest_file(
     response: Response,
     file: UploadFile = File(...),
-    auth: AuthStore = Depends(get_auth_store),
+    auth: AuthStore = Depends(require_writable),
 ):
     file_bytes = await file.read()
     title = file.filename or "untitled"
@@ -386,7 +386,7 @@ async def ingest_file(
 
 
 @router.post("/ingest/text", response_model=IngestResult, status_code=status.HTTP_201_CREATED)
-async def ingest_text(request: TextIngestRequest, auth: AuthStore = Depends(get_auth_store)):
+async def ingest_text(request: TextIngestRequest, auth: AuthStore = Depends(require_writable)):
     """Ingest a document from raw text (JSON) — the programmatic / MCP entry point.
 
     Runs the same pipeline as a file upload (classify -> extract -> co-occurrence) minus
@@ -402,7 +402,7 @@ async def ingest_text(request: TextIngestRequest, auth: AuthStore = Depends(get_
 
 
 @router.post("/ingest/directory")
-async def ingest_directory(request: DirectoryIngestRequest, auth: AuthStore = Depends(get_auth_store)):
+async def ingest_directory(request: DirectoryIngestRequest, auth: AuthStore = Depends(require_writable)):
     dir_path = Path(request.path)
     if not dir_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {request.path}")
@@ -433,7 +433,7 @@ async def ingest_directory(request: DirectoryIngestRequest, auth: AuthStore = De
 
 
 @router.post("/ingest/repo", status_code=status.HTTP_202_ACCEPTED)
-async def ingest_repo(request: RepoIngestRequest, auth: AuthStore = Depends(get_auth_store)):
+async def ingest_repo(request: RepoIngestRequest, auth: AuthStore = Depends(require_writable)):
     """Summarize a git checkout into a collection of code_intent documents.
 
     Returns 202 and does no model work inline: summarizing a repo is many LLM calls,
@@ -505,7 +505,7 @@ async def ingest_repo(request: RepoIngestRequest, auth: AuthStore = Depends(get_
 
 
 @router.post("/ingest/pdf", status_code=status.HTTP_202_ACCEPTED)
-async def ingest_pdf(request: PdfIngestRequest, auth: AuthStore = Depends(get_auth_store)):
+async def ingest_pdf(request: PdfIngestRequest, auth: AuthStore = Depends(require_writable)):
     """Ingest a server-side PDF as an ordered chain of page-documents.
 
     Two-phase, like /ingest/repo: this does NO model work and NO rasterization. It
@@ -574,7 +574,7 @@ async def ingest_pdf(request: PdfIngestRequest, auth: AuthStore = Depends(get_au
 
 @router.post("/ingest/tracker-runs", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_tracker_runs(request: TrackerRunsIngestRequest,
-                              auth: AuthStore = Depends(get_auth_store)):
+                              auth: AuthStore = Depends(require_writable)):
     """Ingest tracker code-gen runs: one COLLECTION per run, trajectory as edges.
 
     A run IS a collection as far as everything downstream is concerned — extraction,
@@ -655,7 +655,7 @@ async def ingest_tracker_runs(request: TrackerRunsIngestRequest,
 
 
 @router.post("/ingest/ccvault", status_code=status.HTTP_202_ACCEPTED)
-async def ingest_ccvault(request: CcvaultIngestRequest, auth: AuthStore = Depends(get_auth_store)):
+async def ingest_ccvault(request: CcvaultIngestRequest, auth: AuthStore = Depends(require_writable)):
     """Ingest a staged ccvault session archive into the ACTIVE (target) noosphere.
 
     Two-phase, like /ingest/repo: this creates (or reuses) the single per-workspace ccvault

@@ -1,6 +1,6 @@
 import uuid
 from fastapi import APIRouter, HTTPException, Depends, Query
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..repositories.factory import get_store
 
 router = APIRouter()
@@ -8,7 +8,7 @@ router = APIRouter()
 @router.post("/simmer/general")
 def trigger_general_simmer(
     resume: bool = Query(False, description="Skip golden set phase if one exists from a previous run"),
-    auth: AuthStore = Depends(get_auth_store),
+    auth: AuthStore = Depends(require_writable),
 ):
     store = auth.store
     existing = store.jobs.get_existing("simmer_general", "general", ["queued", "running"])
@@ -24,7 +24,7 @@ def trigger_general_simmer(
 @router.post("/simmer/{domain_path:path}/image")
 def trigger_domain_image_simmer(
     domain_path: str,
-    auth: AuthStore = Depends(get_auth_store),
+    auth: AuthStore = Depends(require_writable),
 ):
     """Per-domain image spec simmering.
 
@@ -50,7 +50,7 @@ def trigger_domain_image_simmer(
 def trigger_domain_simmer(
     domain_path: str,
     resume: bool = Query(False, description="Skip golden set phase if one exists from a previous run"),
-    auth: AuthStore = Depends(get_auth_store),
+    auth: AuthStore = Depends(require_writable),
 ):
     store = auth.store
     domain = store.domains.get(domain_path)
