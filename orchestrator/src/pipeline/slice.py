@@ -46,8 +46,9 @@ def parse_slice(params: dict) -> "Slice | None":
     return s if any([s.since, s.until, s.domains, s.collections, s.silo, s.kind]) else None
 
 
-def _slice_chunk_query(slc: "Slice") -> tuple[str, list]:
-    """SELECT ch.id FROM chunks JOIN documents ... WHERE <facets AND-combined>.
+def _slice_facets(slc: "Slice") -> tuple[list[str], list[str], list]:
+    """(joins, clauses, params) over `documents d` — the ONE place the facet predicate is
+    built, shared by the chunk-level and document-level resolvers.
     `until` doubles as an as-of cutoff (invalid_at > until OR IS NULL), matching #118."""
     clauses, params, joins = [], [], []
     if slc.until:
@@ -77,7 +78,21 @@ def _slice_chunk_query(slc: "Slice") -> tuple[str, list]:
         joins.append("JOIN silo_kind sk ON sk.silo_id = d.silo_id")
         clauses.append("sk.kind = ?")
         params.append(slc.kind)
+    return joins, clauses, params
+
+
+def _slice_chunk_query(slc: "Slice") -> tuple[str, list]:
+    """SELECT ch.id FROM chunks JOIN documents ... WHERE <facets AND-combined>."""
+    joins, clauses, params = _slice_facets(slc)
     sql = ("SELECT DISTINCT ch.id FROM chunks ch JOIN documents d ON ch.document_id = d.id "
+           + " ".join(joins) + " WHERE " + " AND ".join(clauses))
+    return sql, params
+
+
+def _slice_doc_query(slc: "Slice") -> tuple[str, list]:
+    """SELECT d.id FROM documents ... WHERE <facets AND-combined>."""
+    joins, clauses, params = _slice_facets(slc)
+    sql = ("SELECT DISTINCT d.id FROM documents d "
            + " ".join(joins) + " WHERE " + " AND ".join(clauses))
     return sql, params
 
@@ -97,3 +112,21 @@ def ensure_slice_temp_table(conn, slc: "Slice") -> str:
     conn.execute(f"INSERT OR IGNORE INTO _slice_chunks (chunk_id) {sql}", params)
     conn.commit()  # don't leave an open txn pinning a stale WAL read snapshot (TEMP table survives)
     return "_slice_chunks"
+
+
+def resolve_slice_docs(conn, slc: "Slice") -> set:
+    """The set of in-slice document ids (documents matching every facet)."""
+    sql, params = _slice_doc_query(slc)
+    return {r[0] for r in conn.execute(sql, params).fetchall()}
+
+
+def ensure_slice_doc_temp_table(conn, slc: "Slice") -> str:
+    """Materialise the in-slice document ids into TEMP TABLE `_slice_docs(doc_id)` and
+    return its name. PR 1's measures (mention_count, domain sizes, routes) are
+    document-level, so the aggregator joins this rather than the chunk table."""
+    conn.execute("DROP TABLE IF EXISTS _slice_docs")
+    conn.execute("CREATE TEMP TABLE _slice_docs (doc_id TEXT PRIMARY KEY)")
+    sql, params = _slice_doc_query(slc)
+    conn.execute(f"INSERT OR IGNORE INTO _slice_docs (doc_id) {sql}", params)
+    conn.commit()  # same reason as the chunk table: no open txn pinning a stale WAL snapshot
+    return "_slice_docs"

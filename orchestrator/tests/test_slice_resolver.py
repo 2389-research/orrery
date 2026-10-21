@@ -159,3 +159,24 @@ def test_all_facets_combined(store):
     # b (in window, s1, alpha, col1) and f (as-of live); a too old, c wrong silo/kind,
     # e at boundary, g deleted before until
     assert resolve_slice_chunks(store.conn, slc) == {"ch_b", "ch_f"}
+
+
+def test_resolve_docs_time_facet(store):
+    from src.pipeline.slice import resolve_slice_docs
+    _seed(store)
+    assert resolve_slice_docs(store.conn, Slice(since="2026-10-15 00:00:00")) == {"d_new"}
+
+
+def test_resolve_docs_domain_facet(store):
+    from src.pipeline.slice import resolve_slice_docs
+    _seed(store)
+    assert resolve_slice_docs(store.conn, Slice(domains=("alpha",))) == {"d_old"}
+
+
+def test_doc_temp_table_populated(store):
+    from src.pipeline.slice import ensure_slice_doc_temp_table
+    _seed(store)
+    name = ensure_slice_doc_temp_table(store.conn, Slice(since="2026-10-15 00:00:00"))
+    assert name == "_slice_docs"
+    rows = {r[0] for r in store.conn.execute("SELECT doc_id FROM _slice_docs").fetchall()}
+    assert rows == {"d_new"}

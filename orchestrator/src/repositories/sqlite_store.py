@@ -552,10 +552,14 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         return [CoEntity(id=r["id"], canonical_name=r["canonical_name"], type=r["type"],
                           weight=r["total_weight"]) for r in rows]
 
-    def get_trade_routes(self):
+    def get_trade_routes(self, in_slice: bool = False):
         # es1 and es2 share the same entity_id, so one join to entities filters
         # both sides: an invalidated (soft-deleted) entity contributes no routes.
-        rows = self._conn.execute("""
+        # in_slice=True restricts BOTH sides to the TEMP TABLE `_slice_docs` (the caller
+        # must have materialised it via ensure_slice_doc_temp_table); False is unchanged.
+        slice_join = ("JOIN _slice_docs sd1 ON sd1.doc_id = es1.document_id "
+                      "JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id") if in_slice else ""
+        rows = self._conn.execute(f"""
             SELECT dd1.domain_path, dd2.domain_path, COUNT(*) as weight
             FROM entity_sources es1
             JOIN entity_sources es2 ON es1.entity_id = es2.entity_id AND es1.document_id != es2.document_id
@@ -564,6 +568,7 @@ class SQLiteRelationshipRepository(RelationshipRepository):
             JOIN documents d2 ON d2.id = es2.document_id AND d2.invalid_at IS NULL
             JOIN document_domains dd1 ON es1.document_id = dd1.document_id
             JOIN document_domains dd2 ON es2.document_id = dd2.document_id
+            {slice_join}
             WHERE dd1.domain_path < dd2.domain_path
             GROUP BY dd1.domain_path, dd2.domain_path
         """).fetchall()
@@ -1160,7 +1165,7 @@ class SQLiteCollectionRepository:
             ref["url"] = f"https://{remote}/blob/{commit}/{quote(rel, safe='/')}"
         return ref
 
-    def get_collection_routes(self):
+    def get_collection_routes(self, in_slice: bool = False):
         """collection <-> collection edges DERIVED from shared entities.
 
         One join to `entities` filters both sides, since dc1 and dc2 reach the same
@@ -1172,7 +1177,10 @@ class SQLiteCollectionRepository:
         and per-group summary documents mention everything under them, so letting them
         contribute makes every collection look related to every other.
         """
-        rows = self._conn.execute("""
+        # in_slice=True: restrict both sides to TEMP TABLE `_slice_docs` (see get_trade_routes).
+        slice_join = ("JOIN _slice_docs sd1 ON sd1.doc_id = es1.document_id "
+                      "JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id") if in_slice else ""
+        rows = self._conn.execute(f"""
             SELECT dc1.collection_id, dc2.collection_id, COUNT(*) as weight
             FROM entity_sources es1
             JOIN entity_sources es2 ON es1.entity_id = es2.entity_id
@@ -1182,6 +1190,7 @@ class SQLiteCollectionRepository:
                                          AND dc1.emits_cooccurrence = 1
             JOIN document_collections dc2 ON es2.document_id = dc2.document_id
                                          AND dc2.emits_cooccurrence = 1
+            {slice_join}
             WHERE dc1.collection_id < dc2.collection_id
             GROUP BY dc1.collection_id, dc2.collection_id
         """).fetchall()
