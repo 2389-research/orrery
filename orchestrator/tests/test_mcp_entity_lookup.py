@@ -2,6 +2,7 @@
 
 import pytest
 
+pytest.importorskip("mcp")  # FastMCP optional dep; skip these when absent
 import src.mcp_server as mcp_server
 
 
