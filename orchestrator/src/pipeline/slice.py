@@ -1,7 +1,7 @@
 # ABOUTME: A graph slice (facet filter) and its resolver to an in-slice chunk set (#119).
 from __future__ import annotations
 from dataclasses import dataclass
-from .time_scope import resolve_scope  # TimeScopeError propagates to callers
+from .time_scope import resolve_scope, TimeScopeError
 
 # window preset -> relative `since` understood by time_scope (-Nd)
 _WINDOW_PRESETS = {"today": "-1d", "2d": "-2d", "1w": "-7d", "2w": "-14d", "1m": "-30d", "all": None}
@@ -22,7 +22,13 @@ def parse_slice(params: dict) -> "Slice | None":
     `window` is shorthand that maps to `since`. Raises TimeScopeError on bad time input."""
     window = params.get("window")
     since, until, as_of = params.get("since"), params.get("until"), params.get("as_of")
-    if window and window in _WINDOW_PRESETS and _WINDOW_PRESETS[window]:
+    if window is not None:
+        if window not in _WINDOW_PRESETS:
+            raise TimeScopeError(
+                f"unknown window {window!r}; expected one of {sorted(_WINDOW_PRESETS)}")
+        if since or until or as_of:
+            raise TimeScopeError(
+                "window cannot be combined with since/until/as_of (ambiguous)")
         since = _WINDOW_PRESETS[window]
     scope = resolve_scope(since=since, until=until, as_of=as_of)
 
@@ -68,7 +74,7 @@ def _slice_chunk_query(slc: "Slice") -> tuple[str, list]:
         clauses.append(f"dc.collection_id IN ({ph})")
         params.extend(slc.collections)
     if slc.kind:
-        joins.append("LEFT JOIN silo_kind sk ON sk.silo_id = d.silo_id")
+        joins.append("JOIN silo_kind sk ON sk.silo_id = d.silo_id")
         clauses.append("sk.kind = ?")
         params.append(slc.kind)
     sql = ("SELECT DISTINCT ch.id FROM chunks ch JOIN documents d ON ch.document_id = d.id "
@@ -89,4 +95,5 @@ def ensure_slice_temp_table(conn, slc: "Slice") -> str:
     conn.execute("CREATE TEMP TABLE _slice_chunks (chunk_id TEXT PRIMARY KEY)")
     sql, params = _slice_chunk_query(slc)
     conn.execute(f"INSERT OR IGNORE INTO _slice_chunks (chunk_id) {sql}", params)
+    conn.commit()  # don't leave an open txn pinning a stale WAL read snapshot (TEMP table survives)
     return "_slice_chunks"
