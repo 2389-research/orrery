@@ -128,8 +128,8 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
         FROM entity_sources es
         JOIN document_domains dd ON es.document_id = dd.document_id
         JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
-        JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL
-        {"JOIN _slice_docs sd ON sd.doc_id = es.document_id" if sliced else ""}
+        {"JOIN _slice_docs sd ON sd.doc_id = es.document_id" if sliced
+         else "JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL"}
         GROUP BY es.entity_id, dd.domain_path
     """).fetchall()
     raw: dict[str, dict[str, int]] = defaultdict(dict)
@@ -155,13 +155,7 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
         # what node size (`degree`) and the render-cap ranking use. first_seen/last_seen
         # stay ALL-TIME: the documents join is deliberately NOT restricted to the slice.
         entity_rows = conn.execute("""
-            SELECT e.id, e.canonical_name, e.type, COUNT(*) AS source_count,
-                   (SELECT MIN(d2.created_at) FROM entity_sources es2
-                      JOIN documents d2 ON d2.id = es2.document_id AND d2.invalid_at IS NULL
-                     WHERE es2.entity_id = e.id) AS first_seen,
-                   (SELECT MAX(d2.created_at) FROM entity_sources es2
-                      JOIN documents d2 ON d2.id = es2.document_id AND d2.invalid_at IS NULL
-                     WHERE es2.entity_id = e.id) AS last_seen
+            SELECT e.id, e.canonical_name, e.type, COUNT(*) AS source_count
             FROM entities e
             JOIN entity_sources es ON es.entity_id = e.id
             JOIN _slice_docs sd ON sd.doc_id = es.document_id
@@ -180,6 +174,14 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
             GROUP BY e.id
             ORDER BY source_count DESC, e.id ASC
         """).fetchall()
+
+    if sliced:
+        # ONE grouped pass (not correlated per-entity subqueries); all-time, same gate as
+        # the unsliced path. Merged in the node loop below.
+        seen_range = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT es.entity_id, MIN(d.created_at), MAX(d.created_at) FROM entity_sources es "
+            "JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL "
+            "GROUP BY es.entity_id")}
 
     # entity_id -> dominant {silo_id, kind}, live-resolved via the silo_kind view
     # (task 11a). One whole-graph pass here, not per-entity — the same shape as the
@@ -203,10 +205,12 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
         node = {"id": e["id"], "type": "entity", "subtype": e["type"],
                 "label": e["canonical_name"], "degree": e["source_count"],
                 "silo_id": sinfo.get("silo_id"), "kind": sinfo.get("kind"),
-                "first_seen": e["first_seen"], "last_seen": e["last_seen"],
+                "first_seen": None if sliced else e["first_seen"],
+                "last_seen": None if sliced else e["last_seen"],
                 "memberships": memberships}
         if sliced:
             node["mention_count"] = e["source_count"]
+            node["first_seen"], node["last_seen"] = seen_range.get(e["id"], (None, None))
         node_index[e["id"]] = node
         if len(render_entities) < max_render_nodes:
             render_entities.append(node)
@@ -259,10 +263,7 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
 
     if sliced:
         total_documents = conn.execute("SELECT COUNT(*) FROM _slice_docs").fetchone()[0]
-        in_slice_ids = {r[0] for r in conn.execute("SELECT doc_id FROM _slice_docs")}
-        # Over-fetch the recent window, then keep the in-slice ones (cap stays 50).
-        recent_docs = [d for d in store.documents.get_recent(limit=max(50, len(in_slice_ids)))
-                       if d.id in in_slice_ids][:50]
+        recent_docs = store.documents.get_recent(limit=50, in_slice=True)
     else:
         total_documents = conn.execute("SELECT COUNT(*) FROM documents WHERE invalid_at IS NULL").fetchone()[0]
         recent_docs = store.documents.get_recent(limit=50)

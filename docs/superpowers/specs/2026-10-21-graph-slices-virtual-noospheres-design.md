@@ -123,6 +123,13 @@ latency budget (no real corpus yet) — instead a **synthetic-scale benchmark** 
 plausible transcript corpus, time resolve + aggregate for day/week/month slices) so we know the
 ceiling and whether Phase 2 (day-partition rollups) is ever warranted.
 
+## Documented behaviors (intentional, not bugs)
+
+- **Domain facet picks documents, so per-domain sizes overlap.** `Slice(domains=["A"])` selects documents tagged `A`; a doc tagged both `A` and `B` still contributes to `B`'s in-slice size and to an `A↔B` route. The facet chooses the document set; it does not strip a doc's other domains. Never sum per-domain sizes into a total — slice totals are distinct over the in-slice documents.
+- **`meta.counts` reflect the slice.** Under a slice, `counts`/`counts_by_type` are computed from the emitted sliced nodes, and the `excluded: no_domain_membership` count means "no *in-slice* domain membership" (an entity whose only in-slice source has no domain weight). Internally consistent with what's emitted.
+- **As-of validity is single-sourced.** When `until`/`as_of` is set, doc validity is decided once by the resolver (`invalid_at > until OR IS NULL`) and encoded in `_slice_docs`; every sliced measure (counts, domain weights, routes) trusts that membership and does not re-filter `invalid_at`, so an as-of view never disagrees with itself.
+- **Asserted `collection_edges` (`uses`/`chain_next`)** are kept only when both endpoint collections have an in-slice document. They are structural, not activity-derived, so their weights are untouched; a link to a collection outside the slice is hidden.
+
 ## Testing (acceptance)
 
 - No slice ⇒ exactly today's responses everywhere, `/graph` still from cache. Regression tests.
