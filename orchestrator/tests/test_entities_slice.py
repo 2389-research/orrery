@@ -104,3 +104,19 @@ def test_domain_filter_is_in_slice(client, test_store):
     ids = {e["id"] for e in r["entities"]}
     assert "E_leak" not in ids
     assert "E_both" in ids
+
+
+def test_domain_only_is_unsliced_legacy_bare_list(client, test_store):
+    """A `?domain=X`-only request stays the legacy BARE LIST with all-time source_count —
+    `domain` is a filter, not a slice trigger (CodeRabbit PR2 back-compat fix)."""
+    c = test_store.conn
+    c.execute("INSERT INTO domains (id,path) VALUES ('X','X')")
+    for d in ("d_old", "d_new2"):
+        c.execute("INSERT INTO document_domains (document_id,domain_path,is_primary) VALUES (?,'X',1)", (d,))
+    c.commit()
+    body = client.get("/entities?domain=X").json()
+    assert isinstance(body, list), "domain-only must be a bare list, not a sliced {entities,scope}"
+    by_id = {e["id"]: e["source_count"] for e in body}
+    assert "E_recent" not in by_id          # its only doc (d_new1) is not in domain X
+    assert by_id.get("E_both") == 3         # all-time source_count, NOT in-slice
+    assert by_id.get("E_old") == 1

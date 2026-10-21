@@ -24,6 +24,9 @@ def _active_slice(auth, since, until, as_of, window, domain, collection):
         return parse_slice({"since": since, "until": until, "as_of": as_of, "window": window,
                             "domain": domain, "collection": collection})
     except (TimeScopeError, ValueError) as e:
+        # get_auth_store created this store as a dependency with no FastAPI teardown, so
+        # close it before bailing or the SQLite connection leaks on every bad request.
+        auth.store.close()
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -43,9 +46,12 @@ def list_entities(
     window: str | None = None, collection: str | None = None,
     auth: AuthStore = Depends(get_auth_store),
 ):
-    # `domain` is the pre-existing entity domain filter AND a slice facet, so an ad-hoc
-    # `domain` both filters and slices (consistent with slice semantics).
-    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    # `domain` is the pre-existing entity domain FILTER with bare-list semantics — it does
+    # NOT by itself trigger slicing (so `/entities?domain=X` stays an unsliced legacy
+    # response). Slicing is driven only by the time/collection facets or a virtual
+    # noosphere; `domain` is then an additional filter, restricted to the slice via
+    # `domain_filter` + `in_slice`. (Pass domain=None into the slice resolver.)
+    slc = _active_slice(auth, since, until, as_of, window, None, collection)
     store = auth.store
     if slc is not None:
         ensure_slice_doc_temp_table(store.conn, slc)
