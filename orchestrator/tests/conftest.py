@@ -11,6 +11,23 @@ from src.repositories.sqlite_store import SQLiteDataStore
 from src.repositories.factory import set_test_store
 
 
+@pytest.fixture(autouse=True)
+def _isolate_workspace_registry(tmp_path, monkeypatch):
+    """Sandbox the workspace/view registry to a per-test tmp file.
+
+    Several route tests (POST /workspaces, /views, rename/archive) otherwise read and
+    WRITE the real `~/.local/share/orrery/workspaces/registry.json`, leaking hundreds of
+    `rest-hygiene-test`/`Renamed`/`wk` entries into a developer's native data dir across
+    runs. Point the registry at tmp for every test; tests that need their own path may
+    still monkeypatch it again (their fixture runs after this autouse one, so it wins)."""
+    try:
+        from src.routes import workspace_routes
+    except Exception:
+        return
+    monkeypatch.setattr(workspace_routes, "_registry_path",
+                        lambda create=True: str(tmp_path / "registry.json"))
+
+
 @pytest.fixture
 def test_db(tmp_path):
     db_path = str(tmp_path / "test.db")
