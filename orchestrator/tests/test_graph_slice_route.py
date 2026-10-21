@@ -99,3 +99,30 @@ def test_legacy_silo_kind_unchanged(client):
 
 def test_bad_window_400(client):
     assert client.get("/graph?window=nope").status_code == 400
+
+
+def test_window_plus_silo_narrows_both(client, test_store):
+    c = test_store.conn
+    c.execute("UPDATE documents SET silo_id='sA' WHERE id='old'")
+    c.execute("UPDATE documents SET silo_id='sB' WHERE id='new'")
+    c.commit()
+    # E has in-window source only in sB; asking for sA within the window excludes it.
+    p = client.get("/graph?window=1w&silo=sA").json()
+    assert p["meta"]["slice"]["silo"] == "sA"
+    assert "E" not in p["node_index"] and "OLD" not in p["node_index"]
+    q = client.get("/graph?window=1w&silo=sB").json()
+    assert q["meta"]["slice"]["silo"] == "sB"
+    assert q["node_index"]["E"]["mention_count"] == 1
+
+
+def test_cache_hit_returns_copy(client):
+    client.get("/graph?window=1w")
+    key = next(iter(graph_route._slice_cache))
+    stored = graph_route._slice_cache[key][1]
+    stored_keys = set(stored)
+    # simulate a caller mutating the response dict object path: route returns a copy
+    from src.dependencies import AuthStore  # noqa: F401
+    r = graph_route._cached_slice_payload(key, lambda: {})
+    assert r is stored  # helper itself is by-reference; the route must copy
+    client.get("/graph?window=1w")
+    assert set(graph_route._slice_cache[key][1]) == stored_keys

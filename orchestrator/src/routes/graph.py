@@ -133,11 +133,15 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
     store = auth.store
     try:
         slc = auth.slice
-        if slc is None:
+        if slc is None and any(v is not None for v in
+                               (since, until, as_of, window, domain, collection)):
+            # Slice-defining params present: silo/kind become facets of the slice
+            # (no silent drop, no legacy post-filter). Otherwise stay on the legacy path.
             try:
                 slc = parse_slice({"since": since, "until": until, "as_of": as_of,
                                    "window": window, "domain": domain,
-                                   "collection": collection})
+                                   "collection": collection,
+                                   "silo": silo, "kind": kind})
             except TimeScopeError as e:
                 raise HTTPException(status_code=400, detail=str(e))
         if slc is not None:
@@ -149,7 +153,7 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
                                  for k, v in dataclasses.asdict(slc).items()}
                 p["meta"] = meta
                 return p
-            return _cached_slice_payload((auth.user.workspace_id, slc), build)
+            return dict(_cached_slice_payload((auth.user.workspace_id, slc), build))
         payload = get_or_build(store)
     finally:
         store.close()
