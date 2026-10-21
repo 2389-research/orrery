@@ -15,6 +15,9 @@ Empty = unsliced. A scoped response echoes a trailing "Slice: ..." line.
 Tools — Session:
 - list_noospheres() — see available workspaces
 - select_noosphere(name_or_id) — set active workspace for subsequent calls
+- create_view(name, parent, window, since, until, as_of, domain, collection) — create a READ-ONLY
+    saved slice ("view") of a noosphere; it appears in list_noospheres as `[view of <parent>: ...]`;
+    then select_noosphere(<id>) to use it
 
 Tools — Search & Read:
 - search_knowledge_graph(query, top_k, include_images, expand, +slice) — semantic search over entities and chunks (optionally cross-modal image hits; expand=True adds LLM query enrichment)
@@ -22,6 +25,7 @@ Tools — Search & Read:
 - get_entity(name, +slice) — look up entity details, sources, co-occurrences
 - get_document(title) — read a document with entity highlights (notes content_type for image docs)
 - list_domains() — see the domain taxonomy
+- list_documents(since, until, as_of, order, window, domain, collection, limit) — list documents (id, title, created_at, content_type), optionally sliced
 - list_entities(type, limit, +slice) — browse entities by type
 
 Tools — Graph Traversal:
@@ -163,7 +167,12 @@ async def list_noospheres() -> str:
     lines = ["Available noospheres:\n"]
     for ws in workspaces:
         active = " ← active" if _active_workspace == ws["id"] else ""
-        lines.append(f"  • {ws['name']} (id: {ws['id']}){active}")
+        view = ""
+        if ws.get("kind") == "virtual":
+            sl = ws.get("slice") or {}
+            summary = " ".join(f"{k}={v}" for k, v in sl.items() if v) if isinstance(sl, dict) else str(sl)
+            view = f" [view of {ws.get('parent') or '?'}: {summary or 'no slice'}]"
+        lines.append(f"  • {ws['name']}{view} (id: {ws['id']}){active}")
     if not _active_workspace:
         lines.append("\nNo noosphere selected — use select_noosphere() to pick one.")
     return "\n".join(lines)
@@ -361,6 +370,29 @@ async def get_document(title: str) -> str:
 
 
 @mcp.tool()
+async def list_documents(since: str = "", until: str = "", as_of: str = "", order: str = "", window: str = "", domain: str = "", collection: str = "", limit: int = 20) -> str:
+    """List documents in the active noosphere (id, title, created_at, content_type).
+    Optional slice params narrow the list: since/until/as_of take ISO dates or relative offsets
+    ("-7d"); window takes a preset ("1w", "30d"); domain is a domain-path prefix; collection scopes
+    to one collection. order sets the sort (server-defined, e.g. "created_at"); limit caps results."""
+    params = dict(slice_query(since=since, until=until, as_of=as_of, window=window,
+                              domain=domain, collection=collection))
+    if order:
+        params["order"] = order
+    params["limit"] = limit
+    resp = await call_api("/documents", params=params)
+    if isinstance(resp, dict) and "detail" in resp and "documents" not in resp:
+        return f"Error: {resp['detail']}"
+    docs, scope = normalize_list(resp, "documents")
+    docs = docs[:limit] if limit and limit > 0 else docs
+    lines = [f"Documents ({len(docs)}):"]
+    for d in docs:
+        lines.append(f"  • {d.get('title', '?')} ({d.get('content_type') or 'text'}) "
+                     f"created {d.get('created_at') or '?'}{_did(d)}")
+    return "\n".join(lines) + _slice_line(scope)
+
+
+@mcp.tool()
 async def list_domains() -> str:
     """List all domains in the knowledge graph taxonomy with document counts and spec status."""
     domains = await call_api("/domains")
@@ -522,7 +554,8 @@ async def explore_domain(domain_path: str, since: str = "", until: str = "", as_
     Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
     offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
     collection scopes to one collection. All empty = the unsliced graph."""
-    result = await call_api(f"/graph/domain-overview/{quote(domain_path, safe='/')}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
+    # The domain path is already in the URL, so the `domain` facet is deliberately NOT forwarded.
+    result = await call_api(f"/graph/domain-overview/{quote(domain_path, safe='/')}", params=_sq(since=since, until=until, as_of=as_of, window=window, collection=collection))
     if "detail" in result:
         return f"Error: {result['detail']}"
     domain = result["domain"]
@@ -663,6 +696,25 @@ async def create_noosphere(name: str, description: str = "") -> str:
         return f"Could not create noosphere: {result.get('detail', result)}"
     return (f"Created noosphere '{result['name']}' (id: {result['workspaceId']}). "
             f"Use select_noosphere('{result['workspaceId']}') to switch to it.")
+
+
+@mcp.tool()
+async def create_view(name: str, parent: str, window: str = "", since: str = "", until: str = "", as_of: str = "", domain: str = "", collection: str = "") -> str:
+    """Create a saved slice ("view") of a noosphere. `parent` is the id of the real noosphere to slice;
+    at least one slice facet is required (window/since/until/as_of/domain/collection). The view is
+    READ-ONLY (no ingestion into it). Afterwards call select_noosphere(<view id>) to use it."""
+    sl = slice_query(since=since, until=until, as_of=as_of, window=window,
+                     domain=domain, collection=collection)
+    result = await call_api("/views", method="POST",
+                            body={"name": name, "parent": parent, "slice": sl})
+    if not isinstance(result, dict) or "detail" in result:
+        detail = result.get("detail", result) if isinstance(result, dict) else result
+        return f"Error: {detail}"
+    vid = result.get("id") or result.get("workspaceId") or "?"
+    resolved = result.get("slice") or sl
+    summary = " ".join(f"{k}={v}" for k, v in resolved.items() if v) if isinstance(resolved, dict) else str(resolved)
+    return (f"Created view '{result.get('name', name)}' (id: {vid}) of {parent}: {summary}. "
+            f"Read-only. Use select_noosphere('{vid}') to switch to it.")
 
 
 @mcp.tool()
