@@ -372,16 +372,22 @@ class SQLiteEntityRepository(EntityRepository):
         self._conn.commit()
         return id
 
-    def get(self, entity_id, include_invalid=False):
+    def get(self, entity_id, include_invalid=False, in_slice=False):
         clause = "" if include_invalid else " AND invalid_at IS NULL"
         row = self._conn.execute(
             f"SELECT * FROM entities WHERE id = ?{clause}", (entity_id,)
         ).fetchone()
         if not row:
             return None
-        count = self._conn.execute(
-            "SELECT COUNT(*) as c FROM entity_sources WHERE entity_id = ?", (entity_id,)
-        ).fetchone()["c"]
+        if in_slice:  # requires TEMP TABLE _slice_docs (ensure_slice_doc_temp_table)
+            count = self._conn.execute(
+                "SELECT COUNT(*) as c FROM entity_sources es "
+                "JOIN _slice_docs sd ON sd.doc_id = es.document_id WHERE es.entity_id = ?",
+                (entity_id,)).fetchone()["c"]
+        else:
+            count = self._conn.execute(
+                "SELECT COUNT(*) as c FROM entity_sources WHERE entity_id = ?", (entity_id,)
+            ).fetchone()["c"]
         return Entity(id=row["id"], canonical_name=row["canonical_name"], type=row["type"],
                       source_count=count, embedding=row["embedding"], created_at=row["created_at"])
 
@@ -400,13 +406,23 @@ class SQLiteEntityRepository(EntityRepository):
             return None
         return Entity(id=row["id"], canonical_name=row["canonical_name"], type=row["type"])
 
-    def list(self, limit=50, offset=0, type_filter=None, domain_filter=None, job_id=None):
-        query = """SELECT e.id, e.canonical_name, e.type,
-                   (SELECT COUNT(*) FROM entity_sources es WHERE es.entity_id = e.id) as source_count
+    def list(self, limit=50, offset=0, type_filter=None, domain_filter=None, job_id=None,
+             in_slice=False):
+        if in_slice:  # requires TEMP TABLE _slice_docs; it is the only doc-validity filter
+            count_sql = ("(SELECT COUNT(*) FROM entity_sources es "
+                         "JOIN _slice_docs sd ON sd.doc_id = es.document_id WHERE es.entity_id = e.id)")
+        else:
+            count_sql = "(SELECT COUNT(*) FROM entity_sources es WHERE es.entity_id = e.id)"
+        query = f"""SELECT e.id, e.canonical_name, e.type,
+                   {count_sql} as source_count
                    FROM entities e"""
         params = []
         joins = []
         conditions = ["e.invalid_at IS NULL"]
+        if in_slice:
+            conditions.append("EXISTS (SELECT 1 FROM entity_sources es4 "
+                              "JOIN _slice_docs sd4 ON sd4.doc_id = es4.document_id "
+                              "WHERE es4.entity_id = e.id)")
 
         if domain_filter:
             joins.append("JOIN entity_sources es2 ON e.id = es2.entity_id "
@@ -497,10 +513,15 @@ class SQLiteEntitySourceRepository(EntitySourceRepository):
         )
         self._conn.commit()
 
-    def get_for_entity(self, entity_id):
-        rows = self._conn.execute(
-            "SELECT * FROM entity_sources WHERE entity_id = ?", (entity_id,)
-        ).fetchall()
+    def get_for_entity(self, entity_id, in_slice=False):
+        if in_slice:  # requires TEMP TABLE _slice_docs
+            rows = self._conn.execute(
+                "SELECT es.* FROM entity_sources es JOIN _slice_docs sd ON sd.doc_id = es.document_id "
+                "WHERE es.entity_id = ?", (entity_id,)).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM entity_sources WHERE entity_id = ?", (entity_id,)
+            ).fetchall()
         return [EntitySource(entity_id=r["entity_id"], document_id=r["document_id"],
                               chunk_id=r["chunk_id"], extraction_pass=r["extraction_pass"],
                               spec_version=r["spec_version"], job_id=r["job_id"]) for r in rows]
