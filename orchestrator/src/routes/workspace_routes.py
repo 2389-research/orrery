@@ -17,11 +17,12 @@ router = APIRouter()
 
 # --- SQLite workspace registry ---
 
-def _registry_path() -> str:
+def _registry_path(create: bool = True) -> str:
     from ..config import get_settings
     base_dir = os.path.dirname(get_settings().db_path)
     ws_dir = os.path.join(base_dir, "workspaces")
-    os.makedirs(ws_dir, exist_ok=True)
+    if create:
+        os.makedirs(ws_dir, exist_ok=True)
     return os.path.join(ws_dir, "registry.json")
 
 def _load_registry() -> list[dict]:
@@ -106,6 +107,8 @@ async def create_view(
         parsed = parse_slice(req.slice)
     except TimeScopeError as e:
         raise HTTPException(400, str(e))
+    except (TypeError, ValueError, AttributeError) as e:
+        raise HTTPException(400, f"malformed slice: {e}")
     if parsed is None:
         raise HTTPException(400, "slice has no facets")
     view_id = uuid.uuid4().hex

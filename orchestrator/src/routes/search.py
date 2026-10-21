@@ -5,7 +5,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, HTTPException
 from orrery_relay import Relay
 from ..config import get_settings
-from ..dependencies import get_auth_store, AuthStore, query_id
+from ..dependencies import get_auth_store, require_writable, AuthStore, query_id
 from ..broadcast import broadcast_search
 from ..repositories.graph_reads import entity_silos
 from ..pipeline.time_scope import resolve_scope, TimeScopeError
@@ -173,7 +173,7 @@ def _search_images(conn, query: str, top_k: int = 10) -> list[dict]:
 
 
 @router.post("/search/rebuild")
-def rebuild_search_index(auth: AuthStore = Depends(get_auth_store)):
+def rebuild_search_index(auth: AuthStore = Depends(require_writable)):
     """Rebuild FAISS search indexes — re-embeds entities and chunks missing embeddings."""
     store = auth.store
 
@@ -186,7 +186,7 @@ def rebuild_search_index(auth: AuthStore = Depends(get_auth_store)):
 
 
 @router.post("/search/backfill-image-embeddings")
-def backfill_image_embeddings(auth: AuthStore = Depends(get_auth_store)):
+def backfill_image_embeddings(auth: AuthStore = Depends(require_writable)):
     """Populate chunks.image_embedding for image documents that lack a SigLIP embedding.
     Idempotent — only touches rows where image_embedding IS NULL."""
     from pathlib import Path

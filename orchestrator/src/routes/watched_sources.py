@@ -6,7 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..pipeline.silo import flow_default_kind, resolve_kind
 
 router = APIRouter()
@@ -72,7 +72,7 @@ def _enqueue_scan(store, source_id: str) -> dict:
 
 
 @router.post("/watched-sources")
-def create_watched_source(body: WatchedSourceCreate, auth: AuthStore = Depends(get_auth_store)):
+def create_watched_source(body: WatchedSourceCreate, auth: AuthStore = Depends(require_writable)):
     store = auth.store
     source_id = str(uuid.uuid4())
     kind = resolve_kind(flow_default_kind(body.type), body.provenance_kind)
@@ -98,7 +98,7 @@ def list_watched_sources(auth: AuthStore = Depends(get_auth_store)):
 
 
 @router.post("/watched-sources/scan-due")
-def scan_due_sources(force: bool = False, auth: AuthStore = Depends(get_auth_store)):
+def scan_due_sources(force: bool = False, auth: AuthStore = Depends(require_writable)):
     """Enqueue a scan for every enabled source whose cadence is due (force=true → all
     enabled, ignoring cadence). This is the same selection the worker's timer sweep uses,
     exposed so a cron job (or a single endpoint call) can drive ingestion on ANY external
@@ -118,7 +118,7 @@ def scan_due_sources(force: bool = False, auth: AuthStore = Depends(get_auth_sto
 
 
 @router.post("/watched-sources/{source_id}/scan")
-def scan_watched_source(source_id: str, auth: AuthStore = Depends(get_auth_store)):
+def scan_watched_source(source_id: str, auth: AuthStore = Depends(require_writable)):
     """Enqueue a scan for one source now, regardless of cadence. Type-agnostic: the
     worker resolves the ingestion flow from the source's `type`."""
     store = auth.store
@@ -132,7 +132,7 @@ def scan_watched_source(source_id: str, auth: AuthStore = Depends(get_auth_store
 
 @router.patch("/watched-sources/{source_id}")
 def patch_watched_source(source_id: str, body: WatchedSourcePatch,
-                         auth: AuthStore = Depends(get_auth_store)):
+                         auth: AuthStore = Depends(require_writable)):
     store = auth.store
     if not store.conn.execute(
             "SELECT 1 FROM watched_sources WHERE id = ?", (source_id,)).fetchone():

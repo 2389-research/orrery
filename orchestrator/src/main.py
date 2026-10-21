@@ -31,6 +31,8 @@ def _active_workspace_ids() -> list[str]:
     for ws in registry:
         if ws.get("status") == "archived":
             continue
+        if ws.get("kind") == "virtual":
+            continue  # a slice has no DB of its own; it resolves to its parent's
         ws_id = ws.get("id")
         if not ws_id:
             logger.warning("Skipping registry entry without id: %r", ws)

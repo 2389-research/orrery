@@ -3,7 +3,7 @@ import uuid
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 
 router = APIRouter()
 
@@ -37,7 +37,7 @@ def _set_sweep_enrollment(workspace_id: Optional[str], enabled: bool) -> bool:
 
 
 @router.post("/commentary/backfill")
-def backfill_commentary(req: BackfillRequest, auth: AuthStore = Depends(get_auth_store)):
+def backfill_commentary(req: BackfillRequest, auth: AuthStore = Depends(require_writable)):
     """Enqueue a generate_commentary job for this noosphere, and (by default) enroll it
     in the ongoing idle commentary sweep.
 
