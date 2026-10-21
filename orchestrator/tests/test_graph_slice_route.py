@@ -126,3 +126,23 @@ def test_cache_hit_returns_copy(client):
     assert r is stored  # helper itself is by-reference; the route must copy
     client.get("/graph?window=1w")
     assert set(graph_route._slice_cache[key][1]) == stored_keys
+
+
+def test_relative_window_requests_share_cache_key(client, monkeypatch):
+    from src.pipeline.slice import Slice
+    # Simulate 1s-resolution re-resolution of a relative window within one minute.
+    ticks = iter(["2026-10-21 10:00:05", "2026-10-21 10:00:06", "2026-10-21 10:00:07"])
+    monkeypatch.setattr(graph_route, "parse_slice",
+                        lambda params: Slice(since=next(ticks)))
+    calls = []
+    real = graph_route.build_graph_v5
+    monkeypatch.setattr(graph_route, "build_graph_v5",
+                        lambda s, **kw: (calls.append(kw["slice"].since), real(s, **kw))[1])
+    p1 = client.get("/graph?window=1w").json()
+    client.get("/graph?window=1w")
+    assert len(calls) == 1
+    assert p1["meta"]["slice"]["since"] == "2026-10-21 10:00:05"  # true value, not bucketed
+    assert graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:00:59")) == \
+        graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:00:00"))
+    assert graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:01:00")) != \
+        graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:00:00"))

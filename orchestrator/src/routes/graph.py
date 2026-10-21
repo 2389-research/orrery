@@ -30,6 +30,20 @@ def clear_slice_cache() -> None:
         _slice_cache.clear()
 
 
+def _floor_minute(ts: str | None) -> str | None:
+    """Floor a 'YYYY-MM-DD HH:MM:SS' timestamp to its minute (60s bucket)."""
+    if ts is None or len(ts) < 19:
+        return ts
+    return ts[:17] + "00" + ts[19:]
+
+
+def _slice_cache_key(workspace_id, slc):
+    """Cache key: relative windows re-resolve `since` every second, so bucket since/until
+    to the TTL granularity (60s). Only the KEY is bucketed; the payload echoes the true slice."""
+    return (workspace_id, dataclasses.replace(
+        slc, since=_floor_minute(slc.since), until=_floor_minute(slc.until)))
+
+
 def _cached_slice_payload(key, build):
     now = time.monotonic()
     with _slice_cache_lock:
@@ -153,7 +167,7 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
                                  for k, v in dataclasses.asdict(slc).items()}
                 p["meta"] = meta
                 return p
-            return dict(_cached_slice_payload((auth.user.workspace_id, slc), build))
+            return dict(_cached_slice_payload(_slice_cache_key(auth.user.workspace_id, slc), build))
         payload = get_or_build(store)
     finally:
         store.close()
