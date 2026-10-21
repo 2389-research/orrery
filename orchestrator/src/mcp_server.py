@@ -102,7 +102,8 @@ def _did(obj: dict) -> str:
 _active_workspace: str | None = None
 
 
-async def call_api(path: str, method: str = "GET", body: dict | None = None) -> dict:
+async def call_api(path: str, method: str = "GET", body: dict | None = None,
+                   params: dict | None = None) -> dict:
     """Call the orchestrator API. Returns the JSON body on success, or a
     {"detail": ...} dict on transport / status / decode errors so MCP tools
     can surface a readable message instead of crashing.
@@ -116,9 +117,9 @@ async def call_api(path: str, method: str = "GET", body: dict | None = None) -> 
     try:
         async with httpx.AsyncClient() as client:
             if method == "GET":
-                resp = await client.get(f"{ORCHESTRATOR_URL}{path}", headers=headers, timeout=30)
+                resp = await client.get(f"{ORCHESTRATOR_URL}{path}", headers=headers, params=params, timeout=30)
             else:
-                resp = await client.post(f"{ORCHESTRATOR_URL}{path}", headers=headers, json=body, timeout=30)
+                resp = await client.post(f"{ORCHESTRATOR_URL}{path}", headers=headers, json=body, params=params, timeout=30)
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPStatusError as e:
