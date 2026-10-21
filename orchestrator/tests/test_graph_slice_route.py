@@ -142,7 +142,19 @@ def test_relative_window_requests_share_cache_key(client, monkeypatch):
     client.get("/graph?window=1w")
     assert len(calls) == 1
     assert p1["meta"]["slice"]["since"] == "2026-10-21 10:00:05"  # true value, not bucketed
-    assert graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:00:59")) == \
-        graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:00:00"))
-    assert graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:01:00")) != \
-        graph_route._slice_cache_key("w", Slice(since="2026-10-21 10:00:00"))
+
+
+def test_distinct_absolute_as_of_do_not_collide(client):
+    a = client.get("/graph?as_of=2026-10-01T12:00:05").json()
+    b = client.get("/graph?as_of=2026-10-01T12:00:55").json()
+    assert a["meta"]["slice"]["until"] != b["meta"]["slice"]["until"]
+
+
+def test_cache_key_is_raw_spec_plus_minute(monkeypatch):
+    k = graph_route._slice_cache_key
+    monkeypatch.setattr(graph_route.time, "time", lambda: 1_000_000_010.0)
+    a = k("w", {"window": "1w"})
+    assert a == k("w", {"window": "1w"})
+    assert a != k("w", {"window": "2w"}) and a != k("v", {"window": "1w"})
+    monkeypatch.setattr(graph_route.time, "time", lambda: 1_000_000_010.0 + 60)
+    assert a != k("w", {"window": "1w"})

@@ -169,3 +169,44 @@ def test_in_slice_without_temp_table_raises(test_store):
         test_store.relationships.get_trade_routes(in_slice=True)
     with pytest.raises(RuntimeError, match="ensure_slice_doc_temp_table"):
         test_store.collections.get_collection_routes(in_slice=True)
+    with pytest.raises(RuntimeError, match="ensure_slice_doc_temp_table"):
+        test_store.collections.get_collection_weights(in_slice=True)
+
+
+def test_entity_collection_memberships_are_sliced(test_store):
+    c = test_store.conn
+    c.execute("INSERT INTO domains (path, document_count) VALUES ('alpha', 2)")
+    _doc(c, "in1", "2026-10-19 00:00:00", "alpha")
+    _doc(c, "in2", "2026-10-19 00:00:00", "alpha")
+    _doc(c, "out1", "2026-10-01 00:00:00", "alpha")
+    _ent(c, "E")
+    for d in ("in1", "in2", "out1"):
+        _src(c, "E", d)
+    _coll(c, "CA", ["in1", "in2"]); _coll(c, "CB", ["out1"])
+    c.commit()
+    p = build_graph_v5(test_store, slice=Slice(since="2026-10-15 00:00:00"))
+    colls = {m["id"]: m["weight"] for m in p["node_index"]["E"]["memberships"]
+             if m["container_type"] == "collection"}
+    assert colls == {"CA": 1.0}  # CB's out-of-slice mass is gone, CA renormalised in-slice
+    # no dangling container ids anywhere
+    coll_ids = {n["id"] for n in p["nodes"] if n["type"] == "collection"}
+    dom_ids = {t["path"] for t in p["taxonomy"]}
+    for n in list(p["node_index"].values()) + list(p["nodes"]):
+        for m in n["memberships"]:
+            assert m["id"] in (coll_ids if m["container_type"] == "collection" else dom_ids)
+
+
+def test_entity_silo_is_in_slice(test_store):
+    c = test_store.conn
+    c.execute("INSERT INTO domains (path, document_count) VALUES ('alpha', 2)")
+    _doc(c, "n1", "2026-10-19 00:00:00", "alpha")
+    _doc(c, "o1", "2026-10-01 00:00:00", "alpha")
+    _doc(c, "o2", "2026-10-01 00:00:00", "alpha")
+    c.execute("UPDATE documents SET silo_id='sNew' WHERE id='n1'")
+    c.execute("UPDATE documents SET silo_id='sOld' WHERE id IN ('o1','o2')")
+    _ent(c, "E")
+    for d in ("n1", "o1", "o2"):
+        _src(c, "E", d)
+    c.commit()
+    p = build_graph_v5(test_store, slice=Slice(since="2026-10-15 00:00:00"))
+    assert p["node_index"]["E"]["silo_id"] == "sNew"

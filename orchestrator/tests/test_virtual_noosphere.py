@@ -138,6 +138,12 @@ def test_nested_view_rejected(client):
 def test_malformed_slice_types_400(client):
     assert _make_view(client, slice_={"window": ["x"]}).status_code == 400
     assert _make_view(client, slice_={"domains": 5, "window": 3}).status_code == 400
+    # each of these has ONE problem: a facet value of the wrong type
+    assert _make_view(client, slice_={"silo": ["x"]}).status_code == 400
+    assert _make_view(client, slice_={"kind": {"a": 1}}).status_code == 400
+    assert _make_view(client, slice_={"collection": {"a": 1}}).status_code == 400
+    assert _make_view(client, slice_={"domain": [1, 2]}).status_code == 400
+    assert _make_view(client, slice_={"silo": 5}).status_code == 400
 
 
 def test_virtual_resolve_calls_get_store_with_parent(client, monkeypatch):
@@ -172,9 +178,10 @@ READ_ONLY_ALLOWLIST = {
     ("POST", "/workspaces"),
     ("PATCH", "/workspaces/{workspace_id}"),
     ("DELETE", "/workspaces/{workspace_id}"),
-    ("POST", "/subgraph"),
+    ("POST", "/graph/subgraph"),
 }
-READ_ONLY_PREFIXES = ("/auth",)
+READ_ONLY_PREFIXES = ("/auth", "/invites")
+MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _calls(dep):
@@ -183,18 +190,41 @@ def _calls(dep):
         yield from _calls(d)
 
 
+def _leaf_routes(routes, prefix="", extra=frozenset()):
+    """Version-independent walk yielding (route, full_path, include_level_dep_callables).
+    Descends into anything with its own `.routes` (APIRouter/Mount) or, on newer FastAPI,
+    an `_IncludedRouter` (`original_router.routes` + `include_context` prefix/dependencies)."""
+    for r in routes:
+        orig = getattr(r, "original_router", None)
+        ctx = getattr(r, "include_context", None)
+        sub = getattr(r, "routes", None)
+        if orig is not None:
+            deps = {d.dependency for d in (getattr(ctx, "dependencies", None) or [])}
+            yield from _leaf_routes(orig.routes, prefix + (getattr(ctx, "prefix", "") or ""),
+                                    extra | deps)
+        elif sub:
+            yield from _leaf_routes(sub, prefix + (getattr(r, "path", "") or ""), extra)
+        elif getattr(r, "methods", None):
+            yield r, prefix + r.path, extra
+
+
 def test_every_mutating_route_is_guarded_or_allowlisted():
     from src.main import app
     from src.dependencies import require_writable
-    unguarded = []
-    for route in app.routes:
-        methods = getattr(route, "methods", None)
+    unguarded, checked = [], 0
+    for route, path, extra in _leaf_routes(app.routes):
         dependant = getattr(route, "dependant", None)
-        if not methods or dependant is None:
-            continue
-        for m in methods & {"POST", "PUT", "PATCH", "DELETE"}:
-            if (m, route.path) in READ_ONLY_ALLOWLIST or route.path.startswith(READ_ONLY_PREFIXES):
+        for m in route.methods & MUTATING:
+            checked += 1
+            if (m, path) in READ_ONLY_ALLOWLIST or path.startswith(READ_ONLY_PREFIXES):
                 continue
-            if require_writable not in set(_calls(dependant)):
-                unguarded.append((m, route.path))
+            guards = set(extra) | (set(_calls(dependant)) if dependant is not None else set())
+            if require_writable not in guards:
+                unguarded.append((m, path))
+    assert checked >= 20, f"walk only found {checked} mutating routes; enumeration is broken"
     assert not unguarded, f"mutating routes missing require_writable: {sorted(unguarded)}"
+
+
+def test_corrupt_registry_does_not_break_normal_routes(client, tmp_path):
+    (tmp_path / "registry.json").write_text("{not json")
+    assert client.get("/stats").status_code == 200

@@ -141,7 +141,8 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
         if total > 0:
             domain_weights[eid] = {dp: round(w / total, 3) for dp, w in dw.items()}
 
-    collection_weights = store.collections.get_collection_weights()
+    collection_weights = store.collections.get_collection_weights(
+        **({"in_slice": True} if sliced else {}))
 
     # One LEFT JOIN + GROUP BY, NOT a correlated per-row COUNT — the latter was
     # ~30s on a 16.7k-node graph. Relies on idx_entity_sources_entity.
@@ -186,7 +187,7 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
     # entity_id -> dominant {silo_id, kind}, live-resolved via the silo_kind view
     # (task 11a). One whole-graph pass here, not per-entity — the same shape as the
     # domain/collection weight queries above.
-    entity_silo_info = entity_silos(conn)
+    entity_silo_info = entity_silos(conn, in_slice=sliced)
 
     node_index: dict[str, dict] = {}
     render_entities: list[dict] = []
@@ -254,6 +255,14 @@ def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_REN
             "memberships": ([{"container_type": "domain", "id": dom, "weight": 1.0}]
                             if dom else []),
         })
+
+    if sliced:
+        # An entity's collection memberships may only reference collections that survive
+        # as collection nodes in this payload (no dangling container ids).
+        live_ids = {n["id"] for n in collection_nodes}
+        for node in node_index.values():
+            node["memberships"] = [m for m in node["memberships"]
+                                   if m["container_type"] != "collection" or m["id"] in live_ids]
 
     collection_boxes = [{"id": n["id"], "name": n["label"], "path": n["path"],
                  "document_count": n["degree"],

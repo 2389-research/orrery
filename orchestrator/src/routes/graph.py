@@ -5,6 +5,7 @@
 """
 
 import dataclasses
+import json
 import threading
 import time
 
@@ -17,7 +18,7 @@ from ..pipeline.time_scope import TimeScopeError
 router = APIRouter()
 
 # TTL cache for SLICED payloads only (never the unsliced get_or_build snapshot path).
-# Key: (workspace_id, Slice). For a virtual noosphere the workspace id is the VIEW id.
+# Key: (workspace_id, raw spec json, minute). For a virtual noosphere the workspace id is the VIEW id.
 # A view can be up to _SLICE_CACHE_TTL stale after a parent write (accepted for PR1).
 _SLICE_CACHE_MAXSIZE = 64
 _SLICE_CACHE_TTL = 60.0
@@ -30,18 +31,12 @@ def clear_slice_cache() -> None:
         _slice_cache.clear()
 
 
-def _floor_minute(ts: str | None) -> str | None:
-    """Floor a 'YYYY-MM-DD HH:MM:SS' timestamp to its minute (60s bucket)."""
-    if ts is None or len(ts) < 19:
-        return ts
-    return ts[:17] + "00" + ts[19:]
-
-
-def _slice_cache_key(workspace_id, slc):
-    """Cache key: relative windows re-resolve `since` every second, so bucket since/until
-    to the TTL granularity (60s). Only the KEY is bucketed; the payload echoes the true slice."""
-    return (workspace_id, dataclasses.replace(
-        slc, since=_floor_minute(slc.since), until=_floor_minute(slc.until)))
+def _slice_cache_key(workspace_id, raw_spec):
+    """Cache key: (workspace, canonical RAW slice spec, wall-clock minute). A relative window
+    ("1w") has the same raw spec every request, so it hits within the minute even though its
+    resolved `since` moves each second; two distinct absolute as_of values have different raw
+    specs, so they never collide. The payload still echoes the TRUE resolved slice."""
+    return (workspace_id, json.dumps(raw_spec, sort_keys=True), int(time.time() // 60))
 
 
 def _cached_slice_payload(key, build):
@@ -147,15 +142,17 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
     store = auth.store
     try:
         slc = auth.slice
+        raw_spec = auth.slice_spec
         if slc is None and any(v is not None for v in
                                (since, until, as_of, window, domain, collection)):
             # Slice-defining params present: silo/kind become facets of the slice
             # (no silent drop, no legacy post-filter). Otherwise stay on the legacy path.
+            params = {"since": since, "until": until, "as_of": as_of,
+                      "window": window, "domain": domain, "collection": collection,
+                      "silo": silo, "kind": kind}
+            raw_spec = {k: v for k, v in params.items() if v is not None}
             try:
-                slc = parse_slice({"since": since, "until": until, "as_of": as_of,
-                                   "window": window, "domain": domain,
-                                   "collection": collection,
-                                   "silo": silo, "kind": kind})
+                slc = parse_slice(params)
             except TimeScopeError as e:
                 raise HTTPException(status_code=400, detail=str(e))
         if slc is not None:
@@ -167,7 +164,7 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
                                  for k, v in dataclasses.asdict(slc).items()}
                 p["meta"] = meta
                 return p
-            return dict(_cached_slice_payload(_slice_cache_key(auth.user.workspace_id, slc), build))
+            return dict(_cached_slice_payload(_slice_cache_key(auth.user.workspace_id, raw_spec), build))
         payload = get_or_build(store)
     finally:
         store.close()

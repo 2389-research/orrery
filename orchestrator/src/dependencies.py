@@ -36,6 +36,7 @@ class AuthStore:
     # Set when the workspace is a virtual noosphere (a slice of `parent_id`): read-only.
     slice: Slice | None = None
     parent_id: str | None = None
+    slice_spec: dict | None = None  # the view's RAW registry slice dict (cache key)
 
 
 async def validate_workspace(
@@ -48,17 +49,18 @@ async def validate_workspace(
     return user
 
 
-def _view_entry(workspace_id: str) -> dict | None:
-    """The registry entry for workspace_id if it is a virtual noosphere (any status), else None.
-    Reads the registry only if it exists; never creates the registry or its directory."""
+def _view_registry() -> list[dict]:
+    """The registry entries, or [] if it is missing/corrupt — a bad registry must not 500
+    every route (this runs on EVERY get_auth_store), it just means "no virtual entries"."""
     import os
     from .routes import workspace_routes  # lazy: avoids an import cycle
-    if not os.path.exists(workspace_routes._registry_path(create=False)):
-        return None
-    for ws in workspace_routes._load_registry():
-        if ws.get("id") == workspace_id and ws.get("kind") == "virtual":
-            return ws
-    return None
+    try:
+        if not os.path.exists(workspace_routes._registry_path(create=False)):
+            return []
+        reg = workspace_routes._load_registry()
+        return [w for w in reg if isinstance(w, dict)] if isinstance(reg, list) else []
+    except Exception:
+        return []
 
 
 async def get_auth_store(user: AuthUser = Depends(validate_workspace)) -> AuthStore:
@@ -66,17 +68,17 @@ async def get_auth_store(user: AuthUser = Depends(validate_workspace)) -> AuthSt
 
     A virtual noosphere resolves to its PARENT's store with the slice attached. A view id
     never falls through to get_store(view_id) (that would auto-create an orphan, writable DB)."""
-    entry = _view_entry(user.workspace_id)
+    registry = _view_registry()
+    entry = next((w for w in registry if w.get("id") == user.workspace_id
+                  and w.get("kind") == "virtual"), None)
     if entry is None:
         store = get_store(workspace_id=user.workspace_id)
         return AuthStore(user=user, store=store)
 
-    from .routes import workspace_routes
     from .pipeline.slice import parse_slice
     if entry.get("status") == "archived":
         raise HTTPException(status_code=410, detail="view has been archived")
-    parent = next((w for w in workspace_routes._load_registry()
-                   if w.get("id") == entry.get("parent")), None)
+    parent = next((w for w in registry if w.get("id") == entry.get("parent")), None)
     if parent is None or parent.get("status") == "archived":
         raise HTTPException(status_code=409, detail="parent noosphere unavailable")
     try:
@@ -86,7 +88,8 @@ async def get_auth_store(user: AuthUser = Depends(validate_workspace)) -> AuthSt
     if slice_ is None:
         raise HTTPException(status_code=400, detail="view has an invalid slice spec")
     store = get_store(workspace_id=entry["parent"])
-    return AuthStore(user=user, store=store, slice=slice_, parent_id=entry["parent"])
+    return AuthStore(user=user, store=store, slice=slice_, parent_id=entry["parent"],
+                     slice_spec=entry["slice"])
 
 
 async def require_writable(auth: AuthStore = Depends(get_auth_store)) -> AuthStore:

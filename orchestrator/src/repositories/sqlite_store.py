@@ -1223,21 +1223,27 @@ class SQLiteCollectionRepository(CollectionRepository):
         """)
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
-    def get_collection_weights(self):
+    def get_collection_weights(self, in_slice: bool = False):
         """entity id -> {collection_id: normalized share of its mentions}.
+
+        in_slice=True counts only mentions in documents within TEMP TABLE `_slice_docs`
+        (shares renormalise over in-slice mass). PRECONDITION: `ensure_slice_doc_temp_table()`
+        must have been run on the SAME connection; otherwise RuntimeError.
 
         Same `emits_cooccurrence` opt-out as the routes above: a summary document
         mentions everything beneath it, so counting it would pull every entity's mass
         toward whichever collection has the wordiest rollup.
         """
-        rows = self._conn.execute("""
+        slice_join = "JOIN _slice_docs sd ON sd.doc_id = es.document_id" if in_slice else ""
+        rows = _exec_in_slice(self._conn, in_slice, f"""
             SELECT es.entity_id, dc.collection_id, COUNT(*) as weight
             FROM entity_sources es
             JOIN document_collections dc ON es.document_id = dc.document_id
                                         AND dc.emits_cooccurrence = 1
             JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
+            {slice_join}
             GROUP BY es.entity_id, dc.collection_id
-        """).fetchall()
+        """)
         # Named access, not positional: the columns are (entity_id, collection_id,
         # weight), so an index slip silently sums ids instead of counts.
         totals: dict[str, int] = {}

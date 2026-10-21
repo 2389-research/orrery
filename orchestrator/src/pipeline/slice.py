@@ -32,16 +32,24 @@ def parse_slice(params: dict) -> "Slice | None":
         since = _WINDOW_PRESETS[window]
     scope = resolve_scope(since=since, until=until, as_of=as_of)
 
-    def _tup(v):
+    def _tup(name, v):
         if v is None:
             return None
-        return tuple(v) if isinstance(v, (list, tuple)) else (v,)
+        items = tuple(v) if isinstance(v, (list, tuple)) else (v,)
+        if not all(isinstance(i, str) for i in items):
+            raise ValueError(f"{name} must be a string or a list of strings")
+        return items
+
+    def _scalar(name, v):
+        if v is not None and not isinstance(v, str):
+            raise ValueError(f"{name} must be a string")
+        return v
 
     s = Slice(
         since=scope["since"], until=scope["until"],
-        domains=_tup(params.get("domain") if params.get("domain") is not None else params.get("domains")),
-        collections=_tup(params.get("collection") if params.get("collection") is not None else params.get("collections")),
-        silo=params.get("silo"), kind=params.get("kind"),
+        domains=_tup("domain", params.get("domain") if params.get("domain") is not None else params.get("domains")),
+        collections=_tup("collection", params.get("collection") if params.get("collection") is not None else params.get("collections")),
+        silo=_scalar("silo", params.get("silo")), kind=_scalar("kind", params.get("kind")),
     )
     return s if any([s.since, s.until, s.domains, s.collections, s.silo, s.kind]) else None
 
