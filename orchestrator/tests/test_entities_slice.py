@@ -81,3 +81,26 @@ def test_virtual_noosphere(client):
     assert client.get("/entities/E_old", headers=h).status_code == 404
     d = client.get("/entities/E_both", headers=h).json()
     assert len(d["sources"]) == 2 and d["source_count"] == 2 and "scope" in d
+
+
+def test_domain_filter_is_in_slice(client, test_store):
+    c = test_store.conn
+    c.execute("INSERT INTO domains (id,path) VALUES ('X','X')")
+    c.execute("INSERT INTO domains (id,path) VALUES ('Y','Y')")
+    # d_old (out of 1w slice) in X; d_new1 in Y; d_new2 in X.
+    for d, dom in (("d_old", "X"), ("d_new1", "Y"), ("d_new2", "X")):
+        c.execute("INSERT INTO document_domains (document_id,domain_path,is_primary) VALUES (?,?,1)", (d, dom))
+    c.commit()
+    # E_old: only out-of-slice doc. E_recent: in-slice doc in Y only. E_both: in-slice doc d_new2 in X.
+    # Add E_leak: out-of-slice doc in X + in-slice doc NOT in X.
+    c.execute("INSERT INTO entities (id,canonical_name,type) VALUES ('E_leak','E_leak','Concept')")
+    c.execute("INSERT INTO entity_sources (entity_id,document_id,chunk_id) VALUES ('E_leak','d_old','c_d_old')")
+    c.execute("INSERT INTO entity_sources (entity_id,document_id,chunk_id) VALUES ('E_leak','d_new1','c_d_new1')")
+    c.commit()
+    # Virtual noosphere slice (window) wins; ?domain= is then only the legacy filter.
+    vid = client.post("/views", json={"name": "wk", "parent": "default",
+                                      "slice": {"window": "1w"}}).json()["id"]
+    r = client.get("/entities?domain=X", headers={"X-Workspace-Id": vid}).json()
+    ids = {e["id"] for e in r["entities"]}
+    assert "E_leak" not in ids
+    assert "E_both" in ids

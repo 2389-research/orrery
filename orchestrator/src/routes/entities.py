@@ -6,6 +6,14 @@ from ..repositories.factory import get_store
 from ..pipeline.slice import parse_slice, ensure_slice_doc_temp_table, ensure_slice_temp_table
 from ..pipeline.slice_edges import in_slice_cooccurrences
 from ..pipeline.time_scope import TimeScopeError
+from ..repositories.graph_reads import _chunks
+
+
+def _in_slice_present(conn, entity_id: str) -> bool:
+    """True when the entity has at least one source document inside `_slice_docs`."""
+    return conn.execute(
+        "SELECT 1 FROM entity_sources es JOIN _slice_docs sd ON sd.doc_id = es.document_id "
+        "WHERE es.entity_id = ? LIMIT 1", (entity_id,)).fetchone() is not None
 
 
 def _active_slice(auth, since, until, as_of, window, domain, collection):
@@ -65,13 +73,20 @@ def get_cooccurrences(entity_id: str, limit: int = 10, auth: AuthStore = Depends
                  "weight": c.weight} for c in coentities]
     # In-slice edges are recomputed live from in-slice chunks (stored edges can't be filtered).
     ensure_slice_temp_table(store.conn, slc)
+    ensure_slice_doc_temp_table(store.conn, slc)
+    if not _in_slice_present(store.conn, entity_id):
+        store.close()
+        raise HTTPException(status_code=404, detail="Entity not found in slice")
     nbrs = in_slice_cooccurrences(store.conn, entity_id, limit)
     items = []
     if nbrs:
-        ph = ",".join("?" * len(nbrs))
-        meta = {r["id"]: r for r in store.conn.execute(
-            f"SELECT id, canonical_name, type FROM entities WHERE id IN ({ph}) AND invalid_at IS NULL",
-            [n for n, _ in nbrs])}
+        meta = {}
+        for chunk in _chunks([n for n, _ in nbrs], 400):  # stay under SQLite's 999-variable cap
+            ph = ",".join("?" * len(chunk))
+            for r in store.conn.execute(
+                    f"SELECT id, canonical_name, type FROM entities "
+                    f"WHERE id IN ({ph}) AND invalid_at IS NULL", chunk):
+                meta[r["id"]] = r
         items = [{"id": n, "canonical_name": meta[n]["canonical_name"], "type": meta[n]["type"],
                   "weight": w} for n, w in nbrs if n in meta]
     store.close()

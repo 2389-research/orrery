@@ -82,11 +82,34 @@ def test_shared_context_unsliced(client):
 
 
 def test_shared_context_window(client):
-    r = client.get("/graph/shared-context?a=A&b=B&window=1w").json()
-    assert r["shared_documents"] == []
-    assert r["shared_neighbors"] == []
-    assert r["direct_weight"] == 0
+    # D and B are both old-only now; use A/C-free pair with presence: A vs A-neighbour C is covered below.
+    r = client.get("/graph/shared-context?a=A&b=C&window=1w").json()
     assert r["scope"]["since"]
+
+
+def test_cooccurrences_no_in_slice_presence_404(client):
+    assert client.get("/entities/B/cooccurrences?window=1w").status_code == 404
+    assert client.get("/entities/B/cooccurrences").status_code == 200
+
+
+def test_shared_context_either_no_in_slice_presence_404(client):
+    assert client.get("/graph/shared-context?a=A&b=B&window=1w").status_code == 404
+    assert client.get("/graph/shared-context?a=B&b=A&window=1w").status_code == 404
+    assert client.get("/graph/shared-context?a=A&b=B").status_code == 200
+
+
+def test_cooccurrences_many_neighbours_exceeds_sql_variable_cap(client, test_store):
+    c = test_store.conn
+    c.execute("INSERT INTO documents (id,title,created_at) VALUES ('d_big','d_big',?)", (_ts(1),))
+    c.execute("INSERT INTO chunks (id,document_id,chunk_index,text) VALUES ('c_big','d_big',0,'x')")
+    ids = ["HUB"] + [f"N{i}" for i in range(1100)]
+    for e in ids:
+        c.execute("INSERT INTO entities (id,canonical_name,type) VALUES (?,?,'Concept')", (e, e))
+        c.execute("INSERT INTO entity_sources (entity_id,document_id,chunk_id) VALUES (?,'d_big','c_big')", (e,))
+    c.commit()
+    r = client.get("/entities/HUB/cooccurrences?window=1w&limit=100000")
+    assert r.status_code == 200
+    assert len(r.json()["cooccurrences"]) == 1100
 
 
 def test_shared_context_window_shared_in_slice(client):
@@ -112,5 +135,6 @@ def test_virtual_noosphere(client):
     s = client.get("/entities/A/star-graph", headers=h).json()
     assert [c["id"] for c in s["co_entities"]] == ["C"]
     assert client.get("/entities/B/star-graph", headers=h).status_code == 404
-    sc = client.get("/graph/shared-context?a=A&b=B", headers=h).json()
-    assert sc["shared_documents"] == [] and "scope" in sc
+    assert client.get("/graph/shared-context?a=A&b=B", headers=h).status_code == 404
+    sc = client.get("/graph/shared-context?a=A&b=C", headers=h).json()
+    assert "scope" in sc

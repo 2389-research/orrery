@@ -426,7 +426,8 @@ class SQLiteEntityRepository(EntityRepository):
 
         if domain_filter:
             joins.append("JOIN entity_sources es2 ON e.id = es2.entity_id "
-                         "JOIN document_domains dd ON es2.document_id = dd.document_id AND dd.domain_path LIKE ? || '%'")
+                         + ("JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id " if in_slice else "")
+                         + "JOIN document_domains dd ON es2.document_id = dd.document_id AND dd.domain_path LIKE ? || '%'")
             params.append(domain_filter)
         if job_id:
             joins.append("JOIN entity_sources es3 ON e.id = es3.entity_id AND es3.job_id = ?")

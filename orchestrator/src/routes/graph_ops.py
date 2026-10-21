@@ -274,8 +274,10 @@ async def get_shared_context(
     ea = _resolve_arg(store, a, entity_a)
     eb = _resolve_arg(store, b, entity_b)
     if sliced:
-        ensure_slice_temp_table(store.conn, slc)
-        ensure_slice_doc_temp_table(store.conn, slc)
+        _prepare_slice(store, slc)
+        if not (_in_slice_present(store.conn, ea.id) and _in_slice_present(store.conn, eb.id)):
+            store.close()
+            raise HTTPException(status_code=404, detail="Entity not found in slice")
     # Sliced: `_slice_docs` is the sole document-validity filter (no stacked invalid_at).
     doc_sql = ("SELECT DISTINCT d.id, d.title FROM entity_sources es JOIN documents d "
                "ON es.document_id = d.id "
