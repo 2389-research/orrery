@@ -763,6 +763,7 @@ def init_db(db_path: str) -> None:
     # entity_sources has no primary key, so without this the graph build's
     # per-entity source_count and the trade-route self-joins scan the whole table
     # — tens of seconds on a mid-size graph.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_sources_chunk ON entity_sources(chunk_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_sources_entity ON entity_sources(entity_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_sources_document ON entity_sources(document_id)")
     # Any domain-scoped read (a domain's docs, its entities, its neighbours) filters

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import FileResponse, PlainTextResponse
-from ..dependencies import get_auth_store, AuthStore, query_id
+from ..dependencies import get_auth_store, require_writable, AuthStore, query_id
 from ..repositories.factory import get_store
 from ..pipeline.time_scope import resolve_scope, TimeScopeError
 from ..pipeline.file_extractor import (
@@ -77,7 +77,7 @@ def get_document(document_id: str, auth: AuthStore = Depends(get_auth_store), qi
 
 
 @router.delete("/documents/{document_id}")
-def delete_document(document_id: str, auth: AuthStore = Depends(get_auth_store)):
+def delete_document(document_id: str, auth: AuthStore = Depends(require_writable)):
     store = auth.store
     doc = store.documents.get(document_id)
     if not doc:

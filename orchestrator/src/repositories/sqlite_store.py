@@ -11,7 +11,7 @@ import sqlite3
 from .interfaces import (
     DataStore,
     DocumentRepository, ChunkRepository, DomainRepository,
-    EntityRepository, EntitySourceRepository, RelationshipRepository,
+    EntityRepository, EntitySourceRepository, RelationshipRepository, CollectionRepository,
     JobRepository, SpecRepository, NormalizationRepository,
     LayoutRepository, SimmerIterationRepository,
     Document, Chunk, Domain, Entity, EntitySource, Relationship,
@@ -30,6 +30,17 @@ def _safe_json(value):
         return json.loads(value)
     except (json.JSONDecodeError, ValueError):
         return {"_raw": value}
+
+
+def _exec_in_slice(conn, in_slice: bool, sql: str):
+    """Run a sliced route query, turning a missing `_slice_docs` into a clear error."""
+    try:
+        return conn.execute(sql).fetchall()
+    except sqlite3.OperationalError as e:
+        if in_slice and "_slice_docs" in str(e):
+            raise RuntimeError(
+                "get_*_routes(in_slice=True) requires ensure_slice_doc_temp_table() first") from e
+        raise
 
 
 class SQLiteDocumentRepository(DocumentRepository):
@@ -148,11 +159,16 @@ class SQLiteDocumentRepository(DocumentRepository):
         return [Document(id=r["id"], title=r["title"], content=r["content"],
                          status=r["status"], created_at=r["created_at"]) for r in rows]
 
-    def get_recent(self, limit=50):
+    def get_recent(self, limit=50, in_slice=False):
+        # in_slice: the most recent documents WITHIN TEMP TABLE `_slice_docs` (precondition:
+        # ensure_slice_doc_temp_table on this connection). `_slice_docs` is then the only
+        # validity filter (it carries the as-of rule), so d.invalid_at IS NULL is dropped.
+        where = ("d.id IN (SELECT doc_id FROM _slice_docs)" if in_slice
+                 else "d.invalid_at IS NULL")
         rows = self._conn.execute(
             "SELECT d.id, d.title, d.content_type, d.silo_id, GROUP_CONCAT(dd.domain_path) as domains "
             "FROM documents d LEFT JOIN document_domains dd ON d.id = dd.document_id "
-            "WHERE d.invalid_at IS NULL "
+            f"WHERE {where} "
             "GROUP BY d.id ORDER BY d.created_at DESC LIMIT ?", (limit,)
         ).fetchall()
         result = []
@@ -552,21 +568,33 @@ class SQLiteRelationshipRepository(RelationshipRepository):
         return [CoEntity(id=r["id"], canonical_name=r["canonical_name"], type=r["type"],
                           weight=r["total_weight"]) for r in rows]
 
-    def get_trade_routes(self):
+    def get_trade_routes(self, in_slice: bool = False):
         # es1 and es2 share the same entity_id, so one join to entities filters
         # both sides: an invalidated (soft-deleted) entity contributes no routes.
-        rows = self._conn.execute("""
+        """Domain<->domain routes from entities shared across documents.
+
+        in_slice=True restricts BOTH sides to TEMP TABLE `_slice_docs`. PRECONDITION:
+        the caller ran `ensure_slice_doc_temp_table()` on this same connection, else
+        RuntimeError. `_slice_docs` is then the ONLY document-validity filter (it already
+        encodes the as-of rule), so the independent `d.invalid_at IS NULL` gates are
+        replaced by the join, not stacked on it. False is unchanged."""
+        if in_slice:
+            doc_joins = ("JOIN _slice_docs sd1 ON sd1.doc_id = es1.document_id "
+                         "JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id")
+        else:
+            doc_joins = ("JOIN documents d1 ON d1.id = es1.document_id AND d1.invalid_at IS NULL "
+                         "JOIN documents d2 ON d2.id = es2.document_id AND d2.invalid_at IS NULL")
+        rows = _exec_in_slice(self._conn, in_slice, f"""
             SELECT dd1.domain_path, dd2.domain_path, COUNT(*) as weight
             FROM entity_sources es1
             JOIN entity_sources es2 ON es1.entity_id = es2.entity_id AND es1.document_id != es2.document_id
             JOIN entities e ON e.id = es1.entity_id AND e.invalid_at IS NULL
-            JOIN documents d1 ON d1.id = es1.document_id AND d1.invalid_at IS NULL
-            JOIN documents d2 ON d2.id = es2.document_id AND d2.invalid_at IS NULL
+            {doc_joins}
             JOIN document_domains dd1 ON es1.document_id = dd1.document_id
             JOIN document_domains dd2 ON es2.document_id = dd2.document_id
             WHERE dd1.domain_path < dd2.domain_path
             GROUP BY dd1.domain_path, dd2.domain_path
-        """).fetchall()
+        """)
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
     def get_star_graph(self, entity_id, co_limit=150):
@@ -1035,7 +1063,7 @@ class SQLiteSimmerIterationRepository(SimmerIterationRepository):
 
 # ── Composite DataStore ──────────────────────────────────
 
-class SQLiteCollectionRepository:
+class SQLiteCollectionRepository(CollectionRepository):
     """Reads and writes for the collection layer.
 
     A COLLECTION is a labelled, hierarchical grouping of documents — a git repo, an
@@ -1160,7 +1188,7 @@ class SQLiteCollectionRepository:
             ref["url"] = f"https://{remote}/blob/{commit}/{quote(rel, safe='/')}"
         return ref
 
-    def get_collection_routes(self):
+    def get_collection_routes(self, in_slice: bool = False):
         """collection <-> collection edges DERIVED from shared entities.
 
         One join to `entities` filters both sides, since dc1 and dc2 reach the same
@@ -1171,8 +1199,15 @@ class SQLiteCollectionRepository:
         reinstates the behaviour the column was added to remove: a collection's rollup
         and per-group summary documents mention everything under them, so letting them
         contribute makes every collection look related to every other.
+
+        in_slice=True restricts both sides to TEMP TABLE `_slice_docs`. PRECONDITION:
+        the caller ran `ensure_slice_doc_temp_table()` on this same connection, else
+        RuntimeError. (This query has no document-validity gate of its own, so the
+        slice's as-of rule applies unmodified.)
         """
-        rows = self._conn.execute("""
+        slice_join = ("JOIN _slice_docs sd1 ON sd1.doc_id = es1.document_id "
+                      "JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id") if in_slice else ""
+        rows = _exec_in_slice(self._conn, in_slice, f"""
             SELECT dc1.collection_id, dc2.collection_id, COUNT(*) as weight
             FROM entity_sources es1
             JOIN entity_sources es2 ON es1.entity_id = es2.entity_id
@@ -1182,26 +1217,33 @@ class SQLiteCollectionRepository:
                                          AND dc1.emits_cooccurrence = 1
             JOIN document_collections dc2 ON es2.document_id = dc2.document_id
                                          AND dc2.emits_cooccurrence = 1
+            {slice_join}
             WHERE dc1.collection_id < dc2.collection_id
             GROUP BY dc1.collection_id, dc2.collection_id
-        """).fetchall()
+        """)
         return [{"source": r[0], "target": r[1], "weight": r[2]} for r in rows]
 
-    def get_collection_weights(self):
+    def get_collection_weights(self, in_slice: bool = False):
         """entity id -> {collection_id: normalized share of its mentions}.
+
+        in_slice=True counts only mentions in documents within TEMP TABLE `_slice_docs`
+        (shares renormalise over in-slice mass). PRECONDITION: `ensure_slice_doc_temp_table()`
+        must have been run on the SAME connection; otherwise RuntimeError.
 
         Same `emits_cooccurrence` opt-out as the routes above: a summary document
         mentions everything beneath it, so counting it would pull every entity's mass
         toward whichever collection has the wordiest rollup.
         """
-        rows = self._conn.execute("""
+        slice_join = "JOIN _slice_docs sd ON sd.doc_id = es.document_id" if in_slice else ""
+        rows = _exec_in_slice(self._conn, in_slice, f"""
             SELECT es.entity_id, dc.collection_id, COUNT(*) as weight
             FROM entity_sources es
             JOIN document_collections dc ON es.document_id = dc.document_id
                                         AND dc.emits_cooccurrence = 1
             JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
+            {slice_join}
             GROUP BY es.entity_id, dc.collection_id
-        """).fetchall()
+        """)
         # Named access, not positional: the columns are (entity_id, collection_id,
         # weight), so an index slip silently sums ids instead of counts.
         totals: dict[str, int] = {}

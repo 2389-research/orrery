@@ -4,14 +4,14 @@
 from fastapi import APIRouter, Depends
 from orrery_relay import Relay
 from ..config import get_settings
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..pipeline.subdomain_discovery import run_subdomain_discovery
 
 router = APIRouter()
 
 
 @router.post("/discover-subdomains")
-async def trigger_subdomain_discovery(auth: AuthStore = Depends(get_auth_store)):
+async def trigger_subdomain_discovery(auth: AuthStore = Depends(require_writable)):
     """Run subdomain discovery on all extracted docs."""
     settings = get_settings()
     store = auth.store

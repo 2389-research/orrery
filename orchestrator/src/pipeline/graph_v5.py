@@ -66,15 +66,33 @@ SCHEMA_VERSION = "5.1.0"
 # database opened by an older process between deploy steps.
 _EDGE_TYPE = {"repo_uses": "uses"}
 
-def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -> dict:
-    """Build the v5 payload from the store."""
+def build_graph_v5(store, *, slice=None, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -> dict:
+    """Build the v5 payload from the store.
+
+    `slice` (a `pipeline.slice.Slice`, #119) makes this a read-only facet-filtered view:
+    entity sizes, domain sizes and domain/collection routes are counted WITHIN the
+    in-slice documents (document-level measures, matching the unsliced ones). `None`
+    short-circuits every slice branch, so the unsliced payload is byte-identical.
+    """
     conn = store.conn
+    sliced = slice is not None
+    if sliced:
+        from .slice import ensure_slice_doc_temp_table
+        ensure_slice_doc_temp_table(conn, slice)
 
     # ── taxonomy (domain-list order) ────────────────────────────────────
     domain_objs = store.domains.list(min_doc_count=1)
     domains = [{"id": d.id, "path": d.path, "parent_path": d.parent_path,
                 "doc_count": d.document_count, "spec_version": d.spec_version}
                for d in domain_objs]
+    if sliced:
+        # In-slice domain size = in-slice documents per domain; a domain with none is out.
+        in_slice_domain_counts = {
+            r[0]: r[1] for r in conn.execute(
+                "SELECT dd.domain_path, COUNT(DISTINCT dd.document_id) FROM document_domains dd "
+                "JOIN _slice_docs sd ON sd.doc_id = dd.document_id GROUP BY dd.domain_path")}
+        domains = [{**d, "doc_count": in_slice_domain_counts[d["path"]]}
+                   for d in domains if d["path"] in in_slice_domain_counts]
 
     taxonomy = [{"id": d["id"], "path": d["path"], "parent_path": d["parent_path"],
                  "document_count": d["doc_count"], "spec_version": d["spec_version"],
@@ -105,12 +123,13 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
     palette = domain_palette(conn)
 
     # ── entity nodes: per-entity domain + collection membership ─────────
-    weight_rows = conn.execute("""
+    weight_rows = conn.execute(f"""
         SELECT es.entity_id, dd.domain_path, COUNT(*) as weight
         FROM entity_sources es
         JOIN document_domains dd ON es.document_id = dd.document_id
         JOIN entities e ON e.id = es.entity_id AND e.invalid_at IS NULL
-        JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL
+        {"JOIN _slice_docs sd ON sd.doc_id = es.document_id" if sliced
+         else "JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL"}
         GROUP BY es.entity_id, dd.domain_path
     """).fetchall()
     raw: dict[str, dict[str, int]] = defaultdict(dict)
@@ -122,7 +141,8 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
         if total > 0:
             domain_weights[eid] = {dp: round(w / total, 3) for dp, w in dw.items()}
 
-    collection_weights = store.collections.get_collection_weights()
+    collection_weights = store.collections.get_collection_weights(
+        **({"in_slice": True} if sliced else {}))
 
     # One LEFT JOIN + GROUP BY, NOT a correlated per-row COUNT — the latter was
     # ~30s on a 16.7k-node graph. Relies on idx_entity_sources_entity.
@@ -130,21 +150,44 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
     # The documents LEFT JOIN is gated on d.invalid_at IS NULL in the ON clause (not WHERE)
     # so it never drops an entity or changes source_count — MIN/MAX simply ignore the NULLs
     # from invalid/absent docs, leaving an entity with no live source at first_seen=NULL.
-    entity_rows = conn.execute("""
-        SELECT e.id, e.canonical_name, e.type, COUNT(es.entity_id) AS source_count,
-               MIN(d.created_at) AS first_seen, MAX(d.created_at) AS last_seen
-        FROM entities e
-        LEFT JOIN entity_sources es ON es.entity_id = e.id
-        LEFT JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL
-        WHERE e.invalid_at IS NULL
-        GROUP BY e.id
-        ORDER BY source_count DESC, e.id ASC
-    """).fetchall()
+    if sliced:
+        # Slice path: INNER JOIN to the in-slice docs so only in-slice source rows count
+        # (an entity with none drops out). `mention_count` = in-slice source rows, and is
+        # what node size (`degree`) and the render-cap ranking use. first_seen/last_seen
+        # stay ALL-TIME: the documents join is deliberately NOT restricted to the slice.
+        entity_rows = conn.execute("""
+            SELECT e.id, e.canonical_name, e.type, COUNT(*) AS source_count
+            FROM entities e
+            JOIN entity_sources es ON es.entity_id = e.id
+            JOIN _slice_docs sd ON sd.doc_id = es.document_id
+            WHERE e.invalid_at IS NULL
+            GROUP BY e.id
+            ORDER BY source_count DESC, e.id ASC
+        """).fetchall()
+    else:
+        entity_rows = conn.execute("""
+            SELECT e.id, e.canonical_name, e.type, COUNT(es.entity_id) AS source_count,
+                   MIN(d.created_at) AS first_seen, MAX(d.created_at) AS last_seen
+            FROM entities e
+            LEFT JOIN entity_sources es ON es.entity_id = e.id
+            LEFT JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL
+            WHERE e.invalid_at IS NULL
+            GROUP BY e.id
+            ORDER BY source_count DESC, e.id ASC
+        """).fetchall()
+
+    if sliced:
+        # ONE grouped pass (not correlated per-entity subqueries); all-time, same gate as
+        # the unsliced path. Merged in the node loop below.
+        seen_range = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT es.entity_id, MIN(d.created_at), MAX(d.created_at) FROM entity_sources es "
+            "JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL "
+            "GROUP BY es.entity_id")}
 
     # entity_id -> dominant {silo_id, kind}, live-resolved via the silo_kind view
     # (task 11a). One whole-graph pass here, not per-entity — the same shape as the
     # domain/collection weight queries above.
-    entity_silo_info = entity_silos(conn)
+    entity_silo_info = entity_silos(conn, in_slice=sliced)
 
     node_index: dict[str, dict] = {}
     render_entities: list[dict] = []
@@ -163,16 +206,27 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
         node = {"id": e["id"], "type": "entity", "subtype": e["type"],
                 "label": e["canonical_name"], "degree": e["source_count"],
                 "silo_id": sinfo.get("silo_id"), "kind": sinfo.get("kind"),
-                "first_seen": e["first_seen"], "last_seen": e["last_seen"],
+                "first_seen": None if sliced else e["first_seen"],
+                "last_seen": None if sliced else e["last_seen"],
                 "memberships": memberships}
+        if sliced:
+            node["mention_count"] = e["source_count"]
+            node["first_seen"], node["last_seen"] = seen_range.get(e["id"], (None, None))
         node_index[e["id"]] = node
         if len(render_entities) < max_render_nodes:
             render_entities.append(node)
 
     # ── collections + documents ─────────────────────────────────────────
-    collection_rows = conn.execute(
-        "SELECT id, name, path, document_count FROM collections"
-    ).fetchall()
+    if sliced:
+        # document_count becomes the in-slice document count; collections with none are out.
+        collection_rows = conn.execute(
+            "SELECT c.id, c.name, c.path, COUNT(DISTINCT dc.document_id) AS document_count "
+            "FROM collections c JOIN document_collections dc ON dc.collection_id = c.id "
+            "JOIN _slice_docs sd ON sd.doc_id = dc.document_id GROUP BY c.id").fetchall()
+    else:
+        collection_rows = conn.execute(
+            "SELECT id, name, path, document_count FROM collections"
+        ).fetchall()
     # Dominant silo + live-resolved kind (task 11a), one batch pass rather than a
     # query per collection — same shape as entity_silo_info above, and the same
     # dominant-pick (`_pick_dominant`) tie-break everywhere: favor a NAMED silo over
@@ -183,9 +237,10 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
     collection_nodes = []
     for r in collection_rows:
         dom_row = conn.execute(
-            """SELECT dd.domain_path, COUNT(*) c
+            f"""SELECT dd.domain_path, COUNT(*) c
                FROM document_collections dc
                JOIN document_domains dd ON dc.document_id = dd.document_id
+               {"JOIN _slice_docs sd ON sd.doc_id = dc.document_id" if sliced else ""}
                WHERE dc.collection_id = ?
                GROUP BY dd.domain_path ORDER BY c DESC LIMIT 1""",
             (r["id"],),
@@ -201,14 +256,26 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
                             if dom else []),
         })
 
+    if sliced:
+        # An entity's collection memberships may only reference collections that survive
+        # as collection nodes in this payload (no dangling container ids).
+        live_ids = {n["id"] for n in collection_nodes}
+        for node in node_index.values():
+            node["memberships"] = [m for m in node["memberships"]
+                                   if m["container_type"] != "collection" or m["id"] in live_ids]
+
     collection_boxes = [{"id": n["id"], "name": n["label"], "path": n["path"],
                  "document_count": n["degree"],
                  "domain": next((m["id"] for m in n["memberships"]), None)}
                 for n in collection_nodes]
     collection_positions = _collection_positions(store, collection_boxes, domain_positions)
 
-    total_documents = conn.execute("SELECT COUNT(*) FROM documents WHERE invalid_at IS NULL").fetchone()[0]
-    recent_docs = store.documents.get_recent(limit=50)
+    if sliced:
+        total_documents = conn.execute("SELECT COUNT(*) FROM _slice_docs").fetchone()[0]
+        recent_docs = store.documents.get_recent(limit=50, in_slice=True)
+    else:
+        total_documents = conn.execute("SELECT COUNT(*) FROM documents WHERE invalid_at IS NULL").fetchone()[0]
+        recent_docs = store.documents.get_recent(limit=50)
     # kind is resolved live via the silo_kind view — `silo_id` itself is already a
     # documents column, so this is a plain batch lookup, not a per-doc aggregate.
     doc_kinds = silo_kinds_of(conn, [d.silo_id for d in recent_docs])
@@ -229,17 +296,22 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
     # shared entities, and therefore free to every collection kind), while `uses` and
     # `chain_next` are ASSERTED by whichever ingest path knows about them.
     edges = []
-    for r in store.relationships.get_trade_routes():
+    for r in store.relationships.get_trade_routes(**({'in_slice': True} if sliced else {})):
         edges.append({"source": r["source"], "target": r["target"],
                       "type": "cooccurrence", "scope": "domain", "weight": r["weight"]})
-    for r in store.collections.get_collection_routes():
+    for r in store.collections.get_collection_routes(**({'in_slice': True} if sliced else {})):
         edges.append({"source": r["source"], "target": r["target"],
                       "type": "cooccurrence", "scope": "collection", "weight": r["weight"]})
     # `type` was previously not selected at all and every row was emitted as "uses", so
     # a tracker run's `chain_next` trajectory shipped to the client labelled as a
     # manifest import dependency — the one thing that distinguishes a run from a repo,
     # erased at the payload boundary.
+    # Sliced: asserted edges (uses/chain_next) are not document-derived, so keep the ones
+    # whose BOTH endpoints are collections that still have an in-slice document.
+    live_collections = {n["id"] for n in collection_nodes}
     for r in conn.execute("SELECT source, target, type, weight FROM collection_edges"):
+        if sliced and (r["source"] not in live_collections or r["target"] not in live_collections):
+            continue
         edges.append({"source": r["source"], "target": r["target"],
                       "type": _EDGE_TYPE.get(r["type"], r["type"] or "uses"),
                       "scope": "collection", "weight": r["weight"]})

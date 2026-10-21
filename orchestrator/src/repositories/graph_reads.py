@@ -245,15 +245,18 @@ def _pick_dominant(rows, id_key: str) -> dict[str, dict]:
     return {rid: {"silo_id": v[1], "kind": v[2]} for rid, v in best.items()}
 
 
-def entity_silos(conn, ids=None) -> dict[str, dict]:
+def entity_silos(conn, ids=None, in_slice: bool = False) -> dict[str, dict]:
     """entity_id -> {"silo_id", "kind"} — the entity's dominant silo, live-resolved.
 
     `ids=None` covers the whole graph in one pass (what the snapshot builder needs);
     passing ids scopes it to a drill-in read (neighborhood/subgraph).
+    `in_slice=True` counts only documents in TEMP TABLE `_slice_docs` (caller created it).
     """
+    sj = "JOIN _slice_docs sd ON sd.doc_id = es.document_id " if in_slice else ""
     base = (f"SELECT es.entity_id, d.silo_id, sk.kind, COUNT(*) AS weight "
             f"FROM entity_sources es "
-            f"JOIN documents d ON d.id = es.document_id AND d.{ACTIVE} "
+            f"{sj}"
+            f"JOIN documents d ON d.id = es.document_id{'' if in_slice else f' AND d.{ACTIVE}'} "
             f"JOIN entities e ON e.id = es.entity_id AND e.{ACTIVE} "
             f"LEFT JOIN silo_kind sk ON sk.silo_id = d.silo_id ")
     if ids is None:

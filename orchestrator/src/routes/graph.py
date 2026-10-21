@@ -4,10 +4,58 @@
 `pipeline/graph_snapshot.py`); it no longer recomputes the payload per request.
 """
 
-from fastapi import APIRouter, Depends
+import dataclasses
+import json
+import threading
+import time
+
+from fastapi import APIRouter, Depends, HTTPException
 from ..dependencies import get_auth_store, AuthStore
+from ..pipeline.graph_v5 import build_graph_v5
+from ..pipeline.slice import parse_slice
+from ..pipeline.time_scope import TimeScopeError
 
 router = APIRouter()
+
+# TTL cache for SLICED payloads only (never the unsliced get_or_build snapshot path).
+# Key: (workspace_id, raw spec json, minute). For a virtual noosphere the workspace id is the VIEW id.
+# A view can be up to _SLICE_CACHE_TTL stale after a parent write (accepted for PR1).
+_SLICE_CACHE_MAXSIZE = 64
+_SLICE_CACHE_TTL = 60.0
+_slice_cache: dict = {}  # key -> (stored_at_monotonic, payload)
+_slice_cache_lock = threading.Lock()
+
+
+def clear_slice_cache() -> None:
+    with _slice_cache_lock:
+        _slice_cache.clear()
+
+
+def _slice_cache_key(workspace_id, raw_spec):
+    """Cache key: (workspace, canonical RAW slice spec, wall-clock minute). A relative window
+    ("1w") has the same raw spec every request, so it hits within the minute even though its
+    resolved `since` moves each second; two distinct absolute as_of values have different raw
+    specs, so they never collide. The payload still echoes the TRUE resolved slice."""
+    return (workspace_id, json.dumps(raw_spec, sort_keys=True), int(time.time() // 60))
+
+
+def _cached_slice_payload(key, build):
+    now = time.monotonic()
+    with _slice_cache_lock:
+        hit = _slice_cache.get(key)
+        if hit is not None and now - hit[0] < _SLICE_CACHE_TTL:
+            return hit[1]
+    payload = build()
+    with _slice_cache_lock:
+        _slice_cache[key] = (time.monotonic(), payload)
+        if len(_slice_cache) > _SLICE_CACHE_MAXSIZE:
+            # drop expired first, then oldest, until under the cap
+            t = time.monotonic()
+            for k in [k for k, (ts, _) in _slice_cache.items() if t - ts >= _SLICE_CACHE_TTL]:
+                _slice_cache.pop(k, None)
+            while len(_slice_cache) > _SLICE_CACHE_MAXSIZE:
+                _slice_cache.pop(min(_slice_cache, key=lambda k: _slice_cache[k][0]))
+    return payload
 
 
 def _chunked(seq, size=900):
@@ -71,6 +119,9 @@ def _filter_by_silo_kind(payload: dict, *, silo: str | None, kind: str | None) -
 
 @router.get("/graph")
 def get_graph_data(silo: str | None = None, kind: str | None = None,
+                    since: str | None = None, until: str | None = None,
+                    as_of: str | None = None, window: str | None = None,
+                    domain: str | None = None, collection: str | None = None,
                     auth: AuthStore = Depends(get_auth_store)):
     """Return the graph payload (contract v5) from the cached snapshot.
 
@@ -90,6 +141,30 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
     from ..pipeline.graph_snapshot import get_or_build
     store = auth.store
     try:
+        slc = auth.slice
+        raw_spec = auth.slice_spec
+        if slc is None and any(v is not None for v in
+                               (since, until, as_of, window, domain, collection)):
+            # Slice-defining params present: silo/kind become facets of the slice
+            # (no silent drop, no legacy post-filter). Otherwise stay on the legacy path.
+            params = {"since": since, "until": until, "as_of": as_of,
+                      "window": window, "domain": domain, "collection": collection,
+                      "silo": silo, "kind": kind}
+            raw_spec = {k: v for k, v in params.items() if v is not None}
+            try:
+                slc = parse_slice(params)
+            except TimeScopeError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        if slc is not None:
+            # Sliced: built on demand + TTL-cached. Legacy silo/kind post-filter is NOT applied.
+            def build():
+                p = dict(build_graph_v5(store, slice=slc))
+                meta = dict(p.get("meta") or {})
+                meta["slice"] = {k: (list(v) if isinstance(v, tuple) else v)
+                                 for k, v in dataclasses.asdict(slc).items()}
+                p["meta"] = meta
+                return p
+            return dict(_cached_slice_payload(_slice_cache_key(auth.user.workspace_id, raw_spec), build))
         payload = get_or_build(store)
     finally:
         store.close()

@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from ..db import mark_graph_dirty
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..pipeline.graph_repair import propose_correction, get_pending_issues, resolve_correction
 
 router = APIRouter()
@@ -19,7 +19,7 @@ class ProposalRequest(BaseModel):
 
 
 @router.post("/corrections/propose")
-def propose(req: ProposalRequest, auth: AuthStore = Depends(get_auth_store)):
+def propose(req: ProposalRequest, auth: AuthStore = Depends(require_writable)):
     store = auth.store
     try:
         return propose_correction(
@@ -44,7 +44,7 @@ def list_corrections(auth: AuthStore = Depends(get_auth_store)):
 
 
 @router.post("/corrections/review/{issue_id}")
-def review(issue_id: str, action: str, auth: AuthStore = Depends(get_auth_store)):
+def review(issue_id: str, action: str, auth: AuthStore = Depends(require_writable)):
     if action not in ("approve", "reject"):
         raise HTTPException(status_code=400, detail="action must be 'approve' or 'reject'")
     store = auth.store
@@ -62,7 +62,7 @@ def review(issue_id: str, action: str, auth: AuthStore = Depends(get_auth_store)
 
 
 @router.post("/corrections/judge")
-def trigger_judge(auth: AuthStore = Depends(get_auth_store)):
+def trigger_judge(auth: AuthStore = Depends(require_writable)):
     store = auth.store
     try:
         if store.jobs.get_existing("judge_corrections", "all", ["queued", "running"]):

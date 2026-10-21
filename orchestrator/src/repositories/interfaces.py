@@ -196,7 +196,7 @@ class DocumentRepository(ABC):
     def get_for_domain(self, domain_path: str, status_filter: list[str] | None = None) -> list[Document]: ...
 
     @abstractmethod
-    def get_recent(self, limit: int = 50) -> list[Document]: ...
+    def get_recent(self, limit: int = 50, in_slice: bool = False) -> list[Document]: ...
 
     @abstractmethod
     def get_sample(self, limit: int = 10, status_filter: list[str] | None = None) -> list[Document]: ...
@@ -329,10 +329,23 @@ class RelationshipRepository(ABC):
     def get_star_graph(self, entity_id: str, co_limit: int = 30) -> dict: ...
 
     @abstractmethod
-    def get_trade_routes(self) -> list[dict]: ...
+    def get_trade_routes(self, in_slice: bool = False) -> list[dict]:
+        """domain<->domain co-occurrence routes. PRECONDITION for in_slice=True:
+        `ensure_slice_doc_temp_table()` must have been run on the SAME connection
+        (TEMP TABLE `_slice_docs`); otherwise RuntimeError."""
+        ...
 
     @abstractmethod
     def update_entity_references(self, from_id: str, to_id: str) -> None: ...
+
+
+class CollectionRepository(ABC):
+    @abstractmethod
+    def get_collection_routes(self, in_slice: bool = False) -> list[dict]:
+        """collection<->collection co-occurrence routes. PRECONDITION for
+        in_slice=True: `ensure_slice_doc_temp_table()` must have been run on the SAME
+        connection (TEMP TABLE `_slice_docs`); otherwise RuntimeError."""
+        ...
 
 
 class JobRepository(ABC):

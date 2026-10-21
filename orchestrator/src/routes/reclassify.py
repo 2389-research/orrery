@@ -4,7 +4,7 @@
 from fastapi import APIRouter, Depends
 from orrery_relay import Relay
 from ..config import get_settings
-from ..dependencies import get_auth_store, AuthStore
+from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..pipeline.excerpt import build_classification_excerpt
 from ..pipeline.classifier import classify_document
 from ..pipeline.domain_normalizer import normalize_domain_label
@@ -13,7 +13,7 @@ router = APIRouter()
 
 
 @router.post("/reclassify")
-async def reclassify_all(auth: AuthStore = Depends(get_auth_store)):
+async def reclassify_all(auth: AuthStore = Depends(require_writable)):
     """Re-run classification on all documents. Adds new domains without removing existing ones."""
     settings = get_settings()
     store = auth.store
