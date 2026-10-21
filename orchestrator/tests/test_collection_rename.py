@@ -36,7 +36,8 @@ def repo_era_db(tmp_path):
     c.executescript("""
         CREATE TABLE documents (id TEXT PRIMARY KEY, title TEXT, content TEXT,
                                 content_hash TEXT, source_path TEXT,
-                                content_type TEXT DEFAULT 'text', status TEXT);
+                                content_type TEXT DEFAULT 'text', status TEXT,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE repos (
             id TEXT PRIMARY KEY, name TEXT, path TEXT UNIQUE, root_path TEXT,
             parent_path TEXT, document_count INTEGER DEFAULT 0,
@@ -226,7 +227,8 @@ def test_duplicate_edge_spellings_are_folded_not_crashed(tmp_path):
     c.executescript("""
         CREATE TABLE documents (id TEXT PRIMARY KEY, title TEXT, content TEXT,
                                 content_hash TEXT, source_path TEXT,
-                                content_type TEXT DEFAULT 'text', status TEXT);
+                                content_type TEXT DEFAULT 'text', status TEXT,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE repos (id TEXT PRIMARY KEY, name TEXT, path TEXT UNIQUE,
                             root_path TEXT, parent_path TEXT,
                             document_count INTEGER DEFAULT 0, remote_url TEXT,

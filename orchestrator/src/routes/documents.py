@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import FileResponse, PlainTextResponse
 from ..dependencies import get_auth_store, AuthStore, query_id
 from ..repositories.factory import get_store
+from ..pipeline.time_scope import resolve_scope, TimeScopeError
 from ..pipeline.file_extractor import (
     TEXT_EXTENSIONS, PDF_EXTENSIONS, DOCX_EXTENSIONS, NOTEBOOK_EXTENSIONS,
 )
@@ -17,19 +18,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/documents")
-def list_documents(limit: int = 50, offset: int = 0, auth: AuthStore = Depends(get_auth_store)):
+def list_documents(limit: int = 50, offset: int = 0,
+                   since: str | None = None, until: str | None = None,
+                   as_of: str | None = None, order: str = "desc",
+                   auth: AuthStore = Depends(get_auth_store)):
+    """List documents, newest-first. Optional TimeScope window (#116): `since`/`until`/
+    `as_of` filter on `created_at`, and `order=asc|desc` sorts. Time values are ISO-8601
+    (`2026-10-19` or `2026-10-19T00:00:00Z`) or a relative duration `-<n><m|h|d>` (minutes/
+    hours/days, e.g. `-7d`, `-24h`, `-30m`). With no time param the response is a bare list
+    (same shape as before, now with `source_path` on each item); with one, it is
+    `{"documents": [...], "scope": {...}}` echoing the resolved window."""
+    scoped = any(p is not None for p in (since, until, as_of))
+    try:
+        scope = resolve_scope(since=since, until=until, as_of=as_of)
+    except TimeScopeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     store = auth.store
-    docs = store.documents.list(limit=limit, offset=offset)
+    docs = store.documents.list(limit=limit, offset=offset,
+                                since=scope["since"], until=scope["until"], order=order)
     result = []
     for d in docs:
         entity_count = len(store.entities.get_for_document(d.id)) if d.id else 0
         result.append({
             "id": d.id, "title": d.title, "status": d.status, "created_at": d.created_at,
             "domains": d.domains, "entity_count": entity_count,
-            "content_type": d.content_type,
+            "content_type": d.content_type, "source_path": d.source_path,
         })
     store.close()
-    return result
+    return {"documents": result, "scope": scope} if scoped else result
 
 @router.get("/documents/{document_id}")
 def get_document(document_id: str, auth: AuthStore = Depends(get_auth_store), qid: str = Depends(query_id)):

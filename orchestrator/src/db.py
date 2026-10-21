@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS documents (
     silo_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
+CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at);
 
 CREATE TABLE IF NOT EXISTS chunks (
     id TEXT PRIMARY KEY,

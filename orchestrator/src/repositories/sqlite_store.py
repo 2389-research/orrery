@@ -86,13 +86,27 @@ class SQLiteDocumentRepository(DocumentRepository):
                                  "silo_id": r["silo_id"], "kind": r["kind"]}
         return out
 
-    def list(self, limit=50, offset=0):
+    def list(self, limit=50, offset=0, since=None, until=None, order="desc"):
+        # Time scope (#116): filter on created_at, with `until` also acting as an
+        # as-of snapshot — a doc soft-deleted AFTER the cutoff still counts as of then,
+        # so the invalid gate relaxes to `invalid_at > until` rather than the plain
+        # `invalid_at IS NULL`. With no `until`, behavior is exactly as before.
+        where = ["(d.invalid_at > ? OR d.invalid_at IS NULL)" if until else "d.invalid_at IS NULL"]
+        params: list = [until] if until else []
+        if since:
+            where.append("d.created_at >= ?")
+            params.append(since)
+        if until:
+            where.append("d.created_at < ?")
+            params.append(until)
+        direction = "ASC" if str(order).lower() == "asc" else "DESC"
+        params.extend([limit, offset])
         rows = self._conn.execute(
             "SELECT d.*, GROUP_CONCAT(dd.domain_path) as domains FROM documents d "
             "LEFT JOIN document_domains dd ON d.id = dd.document_id "
-            "WHERE d.invalid_at IS NULL "
-            "GROUP BY d.id ORDER BY d.created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            f"WHERE {' AND '.join(where)} "
+            f"GROUP BY d.id ORDER BY d.created_at {direction} LIMIT ? OFFSET ?",
+            params,
         ).fetchall()
         result = []
         for r in rows:

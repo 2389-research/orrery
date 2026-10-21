@@ -126,10 +126,16 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
 
     # One LEFT JOIN + GROUP BY, NOT a correlated per-row COUNT — the latter was
     # ~30s on a 16.7k-node graph. Relies on idx_entity_sources_entity.
+    # first_seen/last_seen (#116): min/max created_at over the entity's source documents.
+    # The documents LEFT JOIN is gated on d.invalid_at IS NULL in the ON clause (not WHERE)
+    # so it never drops an entity or changes source_count — MIN/MAX simply ignore the NULLs
+    # from invalid/absent docs, leaving an entity with no live source at first_seen=NULL.
     entity_rows = conn.execute("""
-        SELECT e.id, e.canonical_name, e.type, COUNT(es.entity_id) AS source_count
+        SELECT e.id, e.canonical_name, e.type, COUNT(es.entity_id) AS source_count,
+               MIN(d.created_at) AS first_seen, MAX(d.created_at) AS last_seen
         FROM entities e
         LEFT JOIN entity_sources es ON es.entity_id = e.id
+        LEFT JOIN documents d ON d.id = es.document_id AND d.invalid_at IS NULL
         WHERE e.invalid_at IS NULL
         GROUP BY e.id
         ORDER BY source_count DESC, e.id ASC
@@ -157,6 +163,7 @@ def build_graph_v5(store, *, max_render_nodes: int = DEFAULT_MAX_RENDER_NODES) -
         node = {"id": e["id"], "type": "entity", "subtype": e["type"],
                 "label": e["canonical_name"], "degree": e["source_count"],
                 "silo_id": sinfo.get("silo_id"), "kind": sinfo.get("kind"),
+                "first_seen": e["first_seen"], "last_seen": e["last_seen"],
                 "memberships": memberships}
         node_index[e["id"]] = node
         if len(render_entities) < max_render_nodes:

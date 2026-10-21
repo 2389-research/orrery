@@ -113,3 +113,22 @@ search.
   do not collapse them.
 - Edge weights stay all-time under a time scope (accuracy trade-off, see dropped scope).
 - No new endpoints, no aggregation, no multi-noosphere. Those are consumer concerns.
+
+## Review follow-ups (applied)
+
+- **Ingest invalidates the per-workspace index.** The ingest paths embed new rows but must
+  also `mark_indexes_stale(conn)` so new docs are searchable without a manual rebuild —
+  made latent by the now-correct per-workspace scoping (an unrelated correction used to
+  accidentally refresh the single global index). Done in `routes/ingest.py` (both paths).
+- **Search uses a per-call config, not a mutated shared global.** `search_knowledge_graph`
+  is async; interleaving requests could clobber a shared `_config`'s widened over-fetch,
+  so a scoped search could silently under-return. Each call now derives `cfg` via
+  `dataclasses.replace(_DEFAULTS, …)` threaded through retrieval/boost/fusion. This also
+  retires a pre-existing (benign) single-knob race.
+- **Over-fetch is best-effort, not a guarantee.** The window is applied to one over-fetch
+  of `top_k * 5`; for a narrow window over a large corpus the in-window hits can still be
+  under-returned. A true guarantee needs an index-side allowlist filter — a #116 follow-up.
+- **In(...) lists are batched** under SQLITE_MAX_VARIABLE_NUMBER (a large `?top_k` would
+  otherwise 500). The per-workspace index caches are unbounded (one FAISS pair per
+  workspace ever searched) — fine for the single-host deployment; add idle eviction if
+  workspace count grows.
