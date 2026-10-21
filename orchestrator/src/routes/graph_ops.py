@@ -60,10 +60,47 @@ def _resolve_entity(store, name_or_id: str):
     return store.entities.get(match["id"])
 
 
-def _get_adjacency(conn, entity_ids: list[str]) -> dict[str, list[dict]]:
-    """Get co-occurrence neighbors for a set of entity IDs. Returns {entity_id: [{id, name, type, weight}]}."""
+def _prepare_slice(store, slc):
+    """Create the slice temp tables on the store's connection (no-op when unsliced)."""
+    if slc is not None:
+        ensure_slice_temp_table(store.conn, slc)
+        ensure_slice_doc_temp_table(store.conn, slc)
+
+
+def _in_slice_present(conn, entity_id: str) -> bool:
+    """True when the entity has at least one source document inside `_slice_docs`."""
+    return conn.execute(
+        "SELECT 1 FROM entity_sources es JOIN _slice_docs sd ON sd.doc_id = es.document_id "
+        "WHERE es.entity_id = ? LIMIT 1", (entity_id,)).fetchone() is not None
+
+
+def _get_adjacency(conn, entity_ids: list[str], sliced: bool = False) -> dict[str, list[dict]]:
+    """Get co-occurrence neighbors for a set of entity IDs. Returns {entity_id: [{id, name, type, weight}]}.
+
+    `sliced=True` (temp tables prepared by `_prepare_slice`) reads live in-slice edges from
+    `in_slice_adjacency` instead of the stored `relationships`, in the same return shape."""
     if not entity_ids:
         return {}
+    if sliced:
+        raw = in_slice_adjacency(conn, list(entity_ids))
+        nbr_ids = list({n for lst in raw.values() for n, _ in lst})
+        meta = {}
+        for chunk in _chunks(nbr_ids, 400):
+            ph = ",".join("?" * len(chunk))
+            for r in conn.execute(
+                    f"SELECT id, canonical_name, type FROM entities WHERE id IN ({ph}) "
+                    "AND invalid_at IS NULL", list(chunk)):
+                meta[r["id"]] = (r["canonical_name"], r["type"])
+        wanted = set(entity_ids)
+        out: dict[str, list[dict]] = defaultdict(list)
+        for src, lst in raw.items():
+            if src not in wanted:
+                continue
+            for nid, w in lst:
+                if nid in meta:
+                    out[src].append({"id": nid, "name": meta[nid][0],
+                                     "type": meta[nid][1], "weight": w})
+        return out
     # Chunked: this builds one IN clause per id, twice, so an unbounded list blows past
     # SQLite's bound-parameter limit. Reachable from a wide subgraph request, where it
     # would raise rather than degrade.
@@ -110,6 +147,8 @@ async def get_neighborhood(
     max_nodes: int = Query(30, ge=1, le=100),
     auth: AuthStore = Depends(get_auth_store),
     qid: str = Depends(query_id),
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, domain: str | None = None, collection: str | None = None,
 ):
     """Multi-hop neighborhood around an entity. Returns nodes and edges within `depth` hops.
 
@@ -121,10 +160,17 @@ async def get_neighborhood(
 
     The path form stays for existing callers and ids, which have neither problem.
     """
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
     conn = store._conn if hasattr(store, '_conn') else store.entities._conn
     entity = _resolve_arg(store, name, entity_id_or_name)
     seed_id = entity.id
+    if sliced:
+        _prepare_slice(store, slc)
+        if not _in_slice_present(store.conn, seed_id):
+            store.close()
+            raise HTTPException(status_code=404, detail="Entity not found in slice")
 
     # BFS expansion
     visited: dict[str, dict] = {}  # id -> {name, type, depth, source_count}
@@ -141,7 +187,7 @@ async def get_neighborhood(
     for current_depth in range(1, depth + 1):
         if len(visited) >= max_nodes or not frontier:
             break
-        adj = _get_adjacency(conn, frontier)
+        adj = _get_adjacency(conn, frontier, sliced)
         next_frontier = []
         for src_id in frontier:
             for neighbor in sorted(adj.get(src_id, []), key=lambda x: -x["weight"]):
@@ -167,9 +213,10 @@ async def get_neighborhood(
     # Backfill source counts for discovered nodes
     if visited:
         ph = ",".join("?" * len(visited))
+        sd_join = "JOIN _slice_docs sd ON sd.doc_id = entity_sources.document_id" if sliced else ""
         counts = conn.execute(f"""
             SELECT entity_id, COUNT(DISTINCT document_id) as cnt
-            FROM entity_sources WHERE entity_id IN ({ph}) GROUP BY entity_id
+            FROM entity_sources {sd_join} WHERE entity_id IN ({ph}) GROUP BY entity_id
         """, list(visited.keys())).fetchall()
         for r in counts:
             if r["entity_id"] in visited:
@@ -178,7 +225,7 @@ async def get_neighborhood(
     # Silo + kind, resolved LIVE via the silo_kind view join (task 11a) — every node
     # here is an entity, so this is the same dominant-silo pick the snapshot builder
     # uses, just scoped to this neighborhood instead of the whole graph.
-    silo_info = entity_silos(conn, list(visited.keys()))
+    silo_info = entity_silos(conn, list(visited.keys()), in_slice=sliced)
     for nid, node in visited.items():
         sinfo = silo_info.get(nid, {})
         node["silo_id"] = sinfo.get("silo_id")
@@ -197,6 +244,8 @@ async def get_neighborhood(
         "node_count": len(visited),
         "edge_count": len(edges),
     }
+    if sliced:
+        result["scope"] = _scope(slc)
 
     # Broadcast to viz — light up the neighborhood
     entity_names = [n["name"] for n in result["nodes"]]
@@ -335,12 +384,21 @@ async def find_paths(
     max_depth: int = Query(4, ge=1, le=6),
     auth: AuthStore = Depends(get_auth_store),
     qid: str = Depends(query_id),
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, domain: str | None = None, collection: str | None = None,
 ):
     """Find shortest path(s) between two entities through co-occurrence edges."""
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
     conn = store._conn if hasattr(store, '_conn') else store.entities._conn
     ea = _resolve_arg(store, a, entity_a)
     eb = _resolve_arg(store, b, entity_b)
+    if sliced:
+        _prepare_slice(store, slc)
+        if not (_in_slice_present(store.conn, ea.id) and _in_slice_present(store.conn, eb.id)):
+            store.close()
+            raise HTTPException(status_code=404, detail="Entity not found in slice")
 
     if ea.id == eb.id:
         store.close()
@@ -359,20 +417,23 @@ async def find_paths(
         if len(path) > max_depth + 1:
             break
 
-        # GROUP BY the neighbour: a pair can span several rows, and without folding
-        # them the same neighbour is visited repeatedly — redundant traversal and
-        # duplicate paths for what is one edge.
-        neighbors = conn.execute("""
-            SELECT CASE WHEN r.from_entity = ? THEN r.to_entity ELSE r.from_entity END as neighbor_id,
-                   SUM(r.weight) as weight
-            FROM relationships r
-            WHERE (r.from_entity = ? OR r.to_entity = ?) AND r.type = 'co_occurs'
-              AND r.invalid_at IS NULL
-            GROUP BY neighbor_id
-        """, (current, current, current)).fetchall()
+        if sliced:
+            # Live in-slice edges: an edge that exists only outside the slice is not walkable.
+            neighbor_ids = [n["id"] for n in _get_adjacency(conn, [current], True).get(current, [])]
+        else:
+            # GROUP BY the neighbour: a pair can span several rows, and without folding
+            # them the same neighbour is visited repeatedly — redundant traversal and
+            # duplicate paths for what is one edge.
+            neighbor_ids = [row["neighbor_id"] for row in conn.execute("""
+                SELECT CASE WHEN r.from_entity = ? THEN r.to_entity ELSE r.from_entity END as neighbor_id,
+                       SUM(r.weight) as weight
+                FROM relationships r
+                WHERE (r.from_entity = ? OR r.to_entity = ?) AND r.type = 'co_occurs'
+                  AND r.invalid_at IS NULL
+                GROUP BY neighbor_id
+            """, (current, current, current)).fetchall()]
 
-        for row in neighbors:
-            nid = row["neighbor_id"]
+        for nid in neighbor_ids:
             if nid == eb.id:
                 full_path = path + [nid]
                 found_paths.append(full_path)
@@ -409,6 +470,8 @@ async def find_paths(
         "path_count": len(resolved_paths),
         "searched_depth": max_depth,
     }
+    if sliced:
+        result["scope"] = _scope(slc)
 
     # Broadcast to viz — light up all entities along the paths
     path_entities = set()
@@ -426,10 +489,16 @@ async def get_subgraph(
     body: dict,
     auth: AuthStore = Depends(get_auth_store),
     qid: str = Depends(query_id),
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, domain: str | None = None, collection: str | None = None,
 ):
     """Get the subgraph connecting a set of entities. Pass {"entity_names": [...], "max_hops": 1}."""
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
     conn = store._conn if hasattr(store, '_conn') else store.entities._conn
+    if sliced:
+        _prepare_slice(store, slc)
     entity_names = body.get("entity_names", [])
     max_hops = min(body.get("max_hops", 1), 2)
 
@@ -442,6 +511,8 @@ async def get_subgraph(
     for name in entity_names:
         try:
             e = _resolve_entity(store, name)
+            if sliced and not _in_slice_present(store.conn, e.id):
+                continue
             seeds[e.id] = {"id": e.id, "name": e.canonical_name, "type": e.type, "is_seed": True}
         except HTTPException:
             continue
@@ -457,7 +528,7 @@ async def get_subgraph(
     edges = []
 
     for _ in range(max_hops):
-        adj = _get_adjacency(conn, frontier)
+        adj = _get_adjacency(conn, frontier, sliced)
         next_frontier = []
         for src_id in frontier:
             for neighbor in adj.get(src_id, []):
@@ -479,7 +550,7 @@ async def get_subgraph(
 
     # Silo + kind, resolved LIVE via the silo_kind view join (task 11a), for every
     # node in the subgraph — seeds included.
-    silo_info = entity_silos(conn, list(all_nodes.keys()))
+    silo_info = entity_silos(conn, list(all_nodes.keys()), in_slice=sliced)
     for nid, node in all_nodes.items():
         sinfo = silo_info.get(nid, {})
         node["silo_id"] = sinfo.get("silo_id")
@@ -499,6 +570,8 @@ async def get_subgraph(
         "node_count": len(all_nodes),
         "edge_count": len(final_edges),
     }
+    if sliced:
+        result["scope"] = _scope(slc)
 
     # Broadcast to viz — light up all nodes in the subgraph
     entity_names_out = [n["name"] for n in result["nodes"][:30]]
