@@ -1,6 +1,8 @@
 # ABOUTME: Tests for the in-slice co-occurrence adjacency engine (graph slices #119, PR 2).
 import pytest
 
+from src.pipeline import slice_edges
+from src.db import recompute_cooccurrence
 from src.pipeline.slice import Slice, ensure_slice_temp_table
 from src.pipeline.slice_edges import in_slice_adjacency, in_slice_cooccurrences
 
@@ -105,3 +107,65 @@ def test_missing_slice_table_raises_clear_error(conn):
     conn.execute("DROP TABLE IF EXISTS _slice_chunks")
     with pytest.raises(RuntimeError, match="_slice_chunks"):
         in_slice_adjacency(conn, ["A"])
+
+
+def test_chunking_does_not_sum_across_batches(conn, monkeypatch):
+    _chunk(conn, "ch_in3", "d_in", ["A", "B"]); conn.commit()  # A-B now 2 chunks
+    monkeypatch.setattr(slice_edges, "_CHUNK", 1)
+    e = _edges(in_slice_adjacency(_build(conn), ["A", "B"]))
+    assert e[("A", "B")] == 2 and e[("B", "A")] == 2
+
+
+def test_parity_with_all_time_recompute(conn):
+    _chunk(conn, "ch_x", "d_in", ["A", "B", "C"])
+    conn.execute("INSERT INTO entities (id, canonical_name, type) VALUES ('D','D','t')")
+    _chunk(conn, "ch_y", "d_out", ["C", "D"])
+    conn.execute("INSERT INTO entities (id, canonical_name, type, invalid_at) VALUES ('E','E','t','2026-02-01')")
+    _chunk(conn, "ch_z", "d_in2", ["A", "E"])
+    conn.commit()
+    ids = ["A", "B", "C", "D", "E"]
+    recompute_cooccurrence(conn, ids)
+    conn.commit()
+    canon = {(min(r[0], r[1]), max(r[0], r[1])): int(r[2]) for r in conn.execute(
+        "SELECT from_entity, to_entity, weight FROM relationships "
+        "WHERE type='co_occurs' AND invalid_at IS NULL")}
+    assert canon
+    ensure_slice_temp_table(conn, Slice(since="2000-01-01 00:00:00"))
+    sliced = {(min(k, n), max(k, n)): w
+              for k, v in in_slice_adjacency(conn, ids).items() for n, w in v}
+    assert sliced == canon
+
+
+def test_as_of_slice_invalid_after_until_still_contributes(conn):
+    conn.execute("UPDATE documents SET invalid_at='2026-12-01 00:00:00' WHERE id='d_in'")
+    conn.commit()
+    ensure_slice_temp_table(conn, Slice(since="2026-06-01 00:00:00", until="2026-11-01 00:00:00"))
+    assert ("A", "B") in _edges(in_slice_adjacency(conn, ["A", "B"]))
+    # without as-of, the invalidated doc is out of the slice
+    ensure_slice_temp_table(conn, Slice(since="2026-06-01 00:00:00"))
+    assert ("A", "B") not in _edges(in_slice_adjacency(conn, ["A", "B"]))
+
+
+def test_same_order_human_invalidated_excluded(conn):
+    conn.execute("INSERT INTO relationships (id, from_entity, to_entity, type, weight, invalid_at) "
+                 "VALUES ('r1','A','B','co_occurs',1,'2026-10-02')")
+    conn.commit()
+    assert ("A", "B") not in _edges(in_slice_adjacency(_build(conn), ["A", "B"]))
+
+
+def test_valid_cooccurs_row_does_not_exclude(conn):
+    conn.execute("INSERT INTO relationships (id, from_entity, to_entity, type, weight) "
+                 "VALUES ('r1','A','B','co_occurs',9)")
+    conn.commit()
+    assert _edges(in_slice_adjacency(_build(conn), ["A", "B"]))[("A", "B")] == 1
+
+
+def test_invalid_entity_contributes_no_edge(conn):
+    conn.execute("UPDATE entities SET invalid_at='2026-10-02' WHERE id='A'")
+    conn.commit()
+    e = _edges(in_slice_adjacency(_build(conn), ["A", "B", "C"]))
+    assert ("A", "B") not in e and e[("B", "C")] == 1
+
+
+def test_empty_ids(conn):
+    assert in_slice_adjacency(_build(conn), []) == {}
