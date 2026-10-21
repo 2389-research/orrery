@@ -7,7 +7,9 @@ pytest.importorskip("mcp")
 
 import src.mcp_server as mcp_server  # noqa: E402
 
-SCOPE = {"window": "1w", "since": "2026-10-14"}
+# The REAL scope shape the server returns (routes.entities._scope == dataclasses.asdict(Slice)).
+SCOPE = {"since": "2026-10-14 00:00:00", "until": None, "domains": None,
+         "collections": None, "silo": None, "kind": None}
 
 
 def _recorder(monkeypatch, responder):
@@ -68,7 +70,8 @@ async def test_read_tools_forward_window(monkeypatch, tool, args, prefix):
     out = await getattr(mcp_server, tool)(*args, window="1w")
     hit = [c for c in calls if c["path"].startswith(prefix) and not c["path"].endswith("/cooccurrences")]
     assert hit and all(c["params"] == {"window": "1w"} for c in hit), calls
-    assert "Slice: " in out and "window=1w" in out
+    assert "Slice: " in out and "since=2026-10-14 00:00:00" in out
+    assert "until=" not in out and "silo=" not in out
 
 
 @pytest.mark.asyncio
@@ -103,7 +106,7 @@ async def test_list_entities_scoped_shape(monkeypatch):
     calls = _recorder(monkeypatch, lambda p: {"entities": ENT, "scope": SCOPE})
     out = await mcp_server.list_entities(window="1w")
     assert "Entities (1)" in out and "Widget" in out
-    assert "Slice: " in out and "window=1w" in out
+    assert "Slice: " in out and "since=2026-10-14" in out
     assert calls[0]["params"] == {"window": "1w"}
 
 
@@ -143,7 +146,7 @@ async def test_list_documents_scoped_shape(monkeypatch):
     calls = _recorder(monkeypatch, lambda p: {"documents": DOCS, "scope": SCOPE})
     out = await mcp_server.list_documents(window="1w")
     assert calls[0]["params"] == {"window": "1w", "limit": 20}
-    assert "Alpha" in out and "Slice: " in out and "window=1w" in out
+    assert "Alpha" in out and "Slice: " in out and "since=2026-10-14" in out
 
 
 @pytest.mark.asyncio
@@ -188,3 +191,18 @@ async def test_explore_domain_does_not_forward_domain_facet(monkeypatch):
     calls = _recorder(monkeypatch, _responder)
     await mcp_server.explore_domain("x", window="1w", domain="ignored")
     assert calls[0]["params"] == {"window": "1w"}
+
+
+def test_slice_line_generic_facets():
+    line = mcp_server._slice_line({**SCOPE, "since": None, "domains": ["a", "b"], "silo": "s1"})
+    assert line == "\nSlice: domains=a,b silo=s1"
+    assert mcp_server._slice_line({**SCOPE, "since": None}) == ""
+    assert mcp_server._slice_line(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_get_entity_slices_cooccurrences(monkeypatch):
+    calls = _recorder(monkeypatch, _responder)
+    await mcp_server.get_entity("A", domain="a/b")
+    co = [c for c in calls if c["path"].endswith("/cooccurrences")]
+    assert co and all(c["params"] == {"domain": "a/b"} for c in co), calls

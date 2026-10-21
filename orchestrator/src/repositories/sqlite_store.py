@@ -97,13 +97,16 @@ class SQLiteDocumentRepository(DocumentRepository):
                                  "silo_id": r["silo_id"], "kind": r["kind"]}
         return out
 
-    def list(self, limit=50, offset=0, since=None, until=None, order="desc"):
+    def list(self, limit=50, offset=0, since=None, until=None, order="desc", in_slice=False):
+        # `in_slice=True` restricts to documents in TEMP TABLE `_slice_docs` (caller created it).
         # Time scope (#116): filter on created_at, with `until` also acting as an
         # as-of snapshot — a doc soft-deleted AFTER the cutoff still counts as of then,
         # so the invalid gate relaxes to `invalid_at > until` rather than the plain
         # `invalid_at IS NULL`. With no `until`, behavior is exactly as before.
         where = ["(d.invalid_at > ? OR d.invalid_at IS NULL)" if until else "d.invalid_at IS NULL"]
         params: list = [until] if until else []
+        if in_slice:
+            where.append("d.id IN (SELECT doc_id FROM _slice_docs)")
         if since:
             where.append("d.created_at >= ?")
             params.append(since)

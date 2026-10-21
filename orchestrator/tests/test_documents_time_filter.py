@@ -34,7 +34,8 @@ def test_since_until_window(seeded, test_client):
     body = test_client.get("/documents", params={"since": "2026-10-05", "until": "2026-10-15"}).json()
     assert isinstance(body, dict), "a scoped response carries the echoed scope"
     assert {d["id"] for d in body["documents"]} == {"mid"}
-    assert body["scope"] == {"since": "2026-10-05 00:00:00", "until": "2026-10-15 00:00:00"}
+    assert body["scope"]["since"] == "2026-10-05 00:00:00"
+    assert body["scope"]["until"] == "2026-10-15 00:00:00"
 
 
 def test_order_asc(seeded, test_client):

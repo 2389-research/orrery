@@ -181,7 +181,8 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     def list(self, limit: int = 50, offset: int = 0, since: str | None = None,
-             until: str | None = None, order: str = "desc") -> list[Document]: ...
+             until: str | None = None, order: str = "desc",
+             in_slice: bool = False) -> list[Document]: ...
 
     @abstractmethod
     def get_by_hash(self, content_hash: str) -> Document | None: ...

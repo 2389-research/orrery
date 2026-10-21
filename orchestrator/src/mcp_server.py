@@ -74,11 +74,16 @@ def _sq(**facets) -> dict | None:
 
 
 def _slice_line(scope) -> str:
-    """Concise echo of the active slice ('' when the response carried no scope)."""
+    """Concise echo of the active slice ('' when the response carried no scope). Iterates
+    the scope generically (the server's keys are since/until/domains/collections/silo/kind),
+    so any facet shows up; empty/None facets are omitted."""
     if not isinstance(scope, dict):
         return ""
-    parts = [f"{k}={scope[k]}" for k in ("since", "until", "as_of", "window", "domain", "collection")
-             if scope.get(k)]
+    parts = []
+    for k, v in scope.items():
+        if v is None or v == "" or v == [] or v == ():
+            continue
+        parts.append(f"{k}={','.join(map(str, v)) if isinstance(v, (list, tuple)) else v}")
     return ("\nSlice: " + " ".join(parts)) if parts else ""
 
 
@@ -311,7 +316,7 @@ async def get_entity(name: str, since: str = "", until: str = "", as_of: str = "
     detail = await call_api(f"/entities/{entity_id}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if isinstance(detail, dict) and "canonical_name" not in detail:
         return f"Error fetching entity detail: {detail.get('detail', detail)}"
-    coocs = await call_api(f"/entities/{entity_id}/cooccurrences")
+    coocs = await call_api(f"/entities/{entity_id}/cooccurrences", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     cooc_warning: str | None = None
     if isinstance(coocs, dict) and "detail" in coocs:
         # Distinguish "fetch failed" from "no co-occurrences" so the agent isn't misled.
