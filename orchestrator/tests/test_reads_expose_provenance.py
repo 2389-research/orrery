@@ -187,16 +187,17 @@ def _seed_search_hit(store, silo="ws6", kind="agent_report"):
 
 @pytest.fixture(autouse=True)
 def _force_fresh_search_index():
-    """The FAISS index is process-global (`pipeline._indexes_ready`), so without this
-    a search test can silently reuse an index another test built against a DIFFERENT
-    (already-closed) database — same trap `test_search_invalid_at.py` guards against.
-    Forcing a rebuild before and restoring after keeps this file's search tests
-    independent of run order."""
+    """The FAISS index readiness is module-level (`pipeline._indexes_ready`, a per-
+    workspace set since #113), so without this a search test can silently reuse an index
+    another test built against a DIFFERENT (already-closed) database — same trap
+    `test_search_invalid_at.py` guards against. Clearing before and restoring after keeps
+    this file's search tests independent of run order."""
     from src.pipeline.search import pipeline as search_pipeline
-    before = search_pipeline._indexes_ready
-    search_pipeline._indexes_ready = False
+    before = set(search_pipeline._indexes_ready)
+    search_pipeline._indexes_ready.clear()
     yield
-    search_pipeline._indexes_ready = before
+    search_pipeline._indexes_ready.clear()
+    search_pipeline._indexes_ready.update(before)
 
 
 def test_search_entity_and_chunk_hits_carry_silo_and_kind(test_client, test_store):
@@ -225,7 +226,7 @@ def test_search_reflects_updated_kind_with_no_reingest(test_client, test_store):
     test_store.conn.commit()
 
     from src.pipeline.search import pipeline as search_pipeline
-    search_pipeline._indexes_ready = False   # force a fresh search, not a cached FAISS build
+    search_pipeline._indexes_ready.clear()   # force a fresh search, not a cached FAISS build
 
     after = test_client.get("/search", params={"q": "provenance widget", "expand": "false"}).json()
     after_entity = next(e for e in after["entities"] if e["id"] == "e1")

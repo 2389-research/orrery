@@ -18,12 +18,16 @@ from .models import SubQueryResults, ScoredEntity, ScoredChunk, SearchResponse
 from .retrieval import (
     build_indexes, embed_text, embed_new_entities, embed_new_chunks,
     search_entities_semantic, search_chunks_semantic, search_entities_exact,
+    _ws_key,
 )
 from .entity_boost import boost_chunks_via_entities
 from .fusion import rrf_fuse
 
 _config = SearchConfig()
-_indexes_ready = False
+# Per-workspace readiness (#113): the set of `_ws_key`s whose index is built and current.
+# A single bool latched True on the first workspace's build, so no other workspace ever
+# rebuilt and every search hit the first one's vectors.
+_indexes_ready: set[str] = set()
 
 # Guards the check-build-publish sequence as one unit, and the staleness flag with it.
 #
@@ -47,21 +51,22 @@ _indexes_ready = False
 _index_lock = threading.Lock()
 
 
-def mark_indexes_stale() -> None:
-    """Force a FAISS rebuild on the next search.
+def mark_indexes_stale(conn: sqlite3.Connection) -> None:
+    """Force a FAISS rebuild on the next search of THIS workspace (keyed by `conn`).
 
-    The index is built once per process. A correction that invalidates or merges an
+    The index is built once per workspace. A correction that invalidates or merges an
     entity changes what the index SHOULD contain but leaves the index itself alone, so
     the stale vector keeps occupying a top-k slot. `_enrich_results` drops it from the
     output — which is why a deleted entity no longer appears — but the slot it consumed
     is simply lost: an active entity ranked just below it never surfaces. Filtering the
     results is therefore necessary but not sufficient.
 
-    Cheap: the rebuild reads stored embeddings rather than re-embedding.
+    Scoped per workspace (#113): a correction in one workspace must not force a rebuild
+    of every other workspace's index. Cheap: the rebuild reads stored embeddings rather
+    than re-embedding.
     """
-    global _indexes_ready
     with _index_lock:
-        _indexes_ready = False
+        _indexes_ready.discard(_ws_key(conn))
 
 
 def _ensure_indexes_built(conn: sqlite3.Connection) -> None:
@@ -69,16 +74,16 @@ def _ensure_indexes_built(conn: sqlite3.Connection) -> None:
 
     Splitting them is what lets a concurrent staleness mark be overwritten by the very
     build it was meant to force. Blocking is deliberate: `mark_indexes_stale` waits for
-    an in-flight build to publish `True` and then flips it `False`, so the mark survives.
-    Do NOT "optimise" that back into a lock-free assignment.
+    an in-flight build to publish readiness and then clears it, so the mark survives.
+    Do NOT "optimise" that back into a lock-free assignment. Keyed per workspace (#113).
 
     Call from a worker thread, never the event loop — see `search_knowledge_graph`.
     """
-    global _indexes_ready
     with _index_lock:
-        if not _indexes_ready:
+        key = _ws_key(conn)
+        if key not in _indexes_ready:
             build_indexes(conn)
-            _indexes_ready = True
+            _indexes_ready.add(key)
 
 
 def rebuild_indexes_now(conn: sqlite3.Connection):
@@ -87,13 +92,12 @@ def rebuild_indexes_now(conn: sqlite3.Connection):
     The manual rebuild endpoint called `build_indexes` directly, which is the same
     unguarded write to `retrieval`'s module globals as an unlocked search — two builds
     overlapping can pair one's `_entity_ids` with the other's `_entity_index`, so FAISS
-    positions resolve to the wrong entities. It also left `_indexes_ready` untouched, so
-    an explicit rebuild did not clear staleness.
+    positions resolve to the wrong entities. It also left readiness untouched, so an
+    explicit rebuild did not clear staleness. Keyed per workspace (#113).
     """
-    global _indexes_ready
     with _index_lock:
         stats = build_indexes(conn)
-        _indexes_ready = True
+        _indexes_ready.add(_ws_key(conn))
         return stats
 
 
@@ -132,15 +136,18 @@ def _enrich_results(conn: sqlite3.Connection, results: SubQueryResults):
             c.document_title = row[2] or ""
 
 
-def _retrieve_for_subquery(conn: sqlite3.Connection, query: str) -> SubQueryResults:
-    """Stage 1: Run all retrieval channels for a single sub-query."""
+def _retrieve_for_subquery(conn: sqlite3.Connection, query: str, key: str) -> SubQueryResults:
+    """Stage 1: Run all retrieval channels for a single sub-query.
+
+    `key` selects the workspace's own FAISS index (#113); the exact channel uses `conn`
+    directly and is already workspace-scoped."""
     query_embedding = embed_text(query)
 
     # Channel A: Semantic entity search
-    semantic_entities = search_entities_semantic(query_embedding, top_k=_config.entity_top_k)
+    semantic_entities = search_entities_semantic(query_embedding, key, top_k=_config.entity_top_k)
 
     # Channel B: Semantic chunk search
-    semantic_chunks = search_chunks_semantic(query_embedding, top_k=_config.chunk_top_k)
+    semantic_chunks = search_chunks_semantic(query_embedding, key, top_k=_config.chunk_top_k)
 
     # Channel C: Exact match
     exact_entities = search_entities_exact(conn, query, min_term_length=_config.exact_min_term_length)
@@ -181,6 +188,7 @@ async def search_knowledge_graph(
     # Safe to hand `conn` across: get_connection opens with check_same_thread=False, and
     # this awaits the thread, so the connection is never used from two threads at once.
     await anyio.to_thread.run_sync(_ensure_indexes_built, conn)
+    key = _ws_key(conn)   # select this workspace's index for the semantic channels (#113)
 
     # Stage 0: Query expansion
     if expand and relay is not None:
@@ -199,7 +207,7 @@ async def search_knowledge_graph(
     # Stage 1 + 2: Retrieve + entity-boost for each sub-query
     all_results = []
     for sq in sub_queries:
-        result = _retrieve_for_subquery(conn, sq)
+        result = _retrieve_for_subquery(conn, sq, key)
         result = boost_chunks_via_entities(conn, result, _config, total_docs)
         all_results.append(result)
 

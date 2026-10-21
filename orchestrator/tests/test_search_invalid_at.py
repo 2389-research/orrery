@@ -19,15 +19,32 @@ from src.pipeline.search import retrieval
 
 @pytest.fixture(autouse=True)
 def _restore_index_ready_flag():
-    """`_indexes_ready` is module-level state, so a test that sets it leaks into every
-    test that runs after it in the same process. The staleness tests below deliberately
-    set it True to simulate an already-built index; without this they would leave it
-    True (or False) for unrelated tests and the pollution would only show up as an
-    order-dependent failure somewhere else."""
+    """`_indexes_ready` (now a per-workspace set, #113) and the per-workspace view caches
+    are module-level state, so a test that mutates them leaks into every test that runs
+    after it in the same process. The staleness tests below deliberately mark a workspace
+    ready to simulate an already-built index; without this they would leave that state
+    for unrelated tests and the pollution would only show up as an order-dependent
+    failure somewhere else."""
     from src.pipeline.search import pipeline as search_pipeline
-    before = search_pipeline._indexes_ready
+    before = set(search_pipeline._indexes_ready)
+    before_e = dict(retrieval._entity_views)
+    before_c = dict(retrieval._chunk_views)
     yield
-    search_pipeline._indexes_ready = before
+    search_pipeline._indexes_ready.clear()
+    search_pipeline._indexes_ready.update(before)
+    retrieval._entity_views.clear(); retrieval._entity_views.update(before_e)
+    retrieval._chunk_views.clear(); retrieval._chunk_views.update(before_c)
+
+
+def _mark_ready(store):
+    """Simulate 'an index was built earlier for this workspace' under the new keyed set."""
+    from src.pipeline.search import pipeline as search_pipeline
+    search_pipeline._indexes_ready.add(retrieval._ws_key(store.conn))
+
+
+def _is_ready(store) -> bool:
+    from src.pipeline.search import pipeline as search_pipeline
+    return retrieval._ws_key(store.conn) in search_pipeline._indexes_ready
 
 
 def _seed(store):
@@ -67,7 +84,7 @@ def test_invalidated_entity_never_enters_the_index(test_store, monkeypatch):
     retrieval.build_indexes(test_store.conn)
     # The index and its ids are published as one tuple, so read the pair — that is also
     # what every reader does, making this an assertion about what searches actually see.
-    _index, entity_ids = retrieval._entity_view
+    _index, entity_ids = retrieval._entity_views[retrieval._ws_key(test_store.conn)]
     assert "e1" not in entity_ids
     assert {"e0", "e2"} <= set(entity_ids)
 
@@ -126,10 +143,10 @@ def test_a_correction_marks_the_search_index_stale(test_store):
     from src.pipeline.search import pipeline as search_pipeline
 
     _seed(test_store)
-    search_pipeline._indexes_ready = True          # simulate an index built earlier
+    _mark_ready(test_store)          # simulate an index built earlier
     graph_repair.apply_invalidation(test_store.conn, "e1", reason="test")
 
-    assert search_pipeline._indexes_ready is False, (
+    assert not _is_ready(test_store), (
         "a soft delete must force a rebuild; otherwise the removed entity keeps "
         "consuming a result slot an active entity should have had")
 
@@ -142,10 +159,10 @@ def test_rolling_a_correction_back_also_marks_the_index_stale(test_store):
 
     _seed(test_store)
     graph_repair.apply_invalidation(test_store.conn, "e1", reason="test")
-    search_pipeline._indexes_ready = True
+    _mark_ready(test_store)
     graph_repair.rollback_invalidation(test_store.conn, "e1")
 
-    assert search_pipeline._indexes_ready is False
+    assert not _is_ready(test_store)
 
 
 def test_a_merge_marks_the_search_index_stale(test_store):
@@ -166,10 +183,10 @@ def test_a_merge_marks_the_search_index_stale(test_store):
     from src.pipeline.search import pipeline as search_pipeline
 
     _seed(test_store)
-    search_pipeline._indexes_ready = True
+    _mark_ready(test_store)
     graph_repair.apply_merge(test_store.conn, "e1", "e0", reason="test")
 
-    assert search_pipeline._indexes_ready is False, (
+    assert not _is_ready(test_store), (
         "the merged-away entity is soft-deleted, so its vector must not keep "
         "occupying a top-k slot")
 
@@ -183,10 +200,10 @@ def test_rolling_a_merge_back_also_marks_the_index_stale(test_store):
 
     _seed(test_store)
     graph_repair.apply_merge(test_store.conn, "e1", "e0", reason="test")
-    search_pipeline._indexes_ready = True
+    _mark_ready(test_store)
     graph_repair.rollback_merge(test_store.conn, "e1")
 
-    assert search_pipeline._indexes_ready is False
+    assert not _is_ready(test_store)
 
 # ── Tests that originated HERE, in the base repo ─────────────────────────────
 # The fork never received these, so they are not in the file this was ported from.
@@ -281,7 +298,7 @@ def test_a_direct_rename_marks_the_search_index_stale(test_store):
     from src.pipeline.search import pipeline as search_pipeline
 
     _seed(test_store)
-    search_pipeline._indexes_ready = True
+    _mark_ready(test_store)
     graph_repair.apply_rename(test_store.conn, "e1", "renamed widget")
 
-    assert search_pipeline._indexes_ready is False
+    assert not _is_ready(test_store)

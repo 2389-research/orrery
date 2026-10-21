@@ -19,12 +19,39 @@ from .config import SearchConfig
 # search running during a rebuild could take positions from one build and ids from
 # another and return entities that were never the match — wrong answers, silently.
 #
-# Rebinding a name is a single bytecode, so a reader that grabs the tuple ONCE sees
+# Rebinding a dict entry is a single bytecode, so a reader that grabs the tuple ONCE sees
 # either the whole old pair or the whole new one, never a mix. That is the entire
 # protocol: writers assign the tuple last, readers bind it to a local first.
+#
+# Keyed per workspace (#113). One orchestrator serves many workspaces, each its own
+# SQLite file; a single global pair meant the index built for whichever workspace was
+# searched first answered every later search. The key is the connection's DB file path
+# (`_ws_key`) — derivable from the `conn` every caller already passes, so no workspace_id
+# has to be threaded through the corrections/judge path for an invalidation to find the
+# right index.
+#
+# These caches are never evicted: the process now retains one index pair per workspace
+# ever searched, for its lifetime. That is fine for the current single-host deployment
+# (few workspaces); if workspace count ever grows large, add idle eviction here (an LRU
+# keyed by `_ws_key`) rather than reverting to a single global.
 _model = None
-_entity_view: tuple = (None, [])   # (faiss index | None, ids)
-_chunk_view: tuple = (None, [])
+_entity_views: dict[str, tuple] = {}   # ws_key -> (faiss index | None, ids)
+_chunk_views: dict[str, tuple] = {}
+
+
+def _ws_key(conn) -> str:
+    """Per-workspace cache key: the connection's main DB file path.
+
+    Each workspace is a distinct SQLite file (the factory maps workspace_id -> a unique
+    path), so the file path is a stable per-workspace identity shared by every connection
+    to it. Falls back to the object id for an anonymous/in-memory connection, which only
+    arises outside the server (tests use file-backed DBs)."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        path = row[2] if row else ""        # (seq, name, file)
+        return path or f"anon:{id(conn)}"
+    except Exception:
+        return f"anon:{id(conn)}"
 
 
 def _get_model():
@@ -44,9 +71,11 @@ def embed_text(text: str | list[str]) -> np.ndarray:
 
 
 def build_indexes(conn: sqlite3.Connection) -> dict:
-    """Build FAISS indexes from stored embeddings, or embed if missing. SQLite only."""
+    """Build FAISS indexes from stored embeddings, or embed if missing. SQLite only.
+
+    Publishes into the per-workspace caches under `_ws_key(conn)` (#113)."""
     import faiss
-    global _entity_view, _chunk_view
+    key = _ws_key(conn)
 
     # NOT `model = _get_model()` up front. That instantiates (and, on a cold host,
     # DOWNLOADS) all-MiniLM-L6-v2 on every index build — including the common case
@@ -85,8 +114,8 @@ def build_indexes(conn: sqlite3.Connection) -> dict:
         entity_index.add(entity_matrix)
     else:
         entity_index, entity_ids = None, []
-    # Published as one value, AFTER it is fully built — see `_entity_view`.
-    _entity_view = (entity_index, entity_ids)
+    # Published as one value, AFTER it is fully built — see `_entity_views`.
+    _entity_views[key] = (entity_index, entity_ids)
 
     # Chunk index
     chunks = conn.execute("SELECT c.id, c.text, c.embedding FROM chunks c JOIN documents d ON c.document_id = d.id WHERE d.invalid_at IS NULL ORDER BY c.id").fetchall()
@@ -116,7 +145,7 @@ def build_indexes(conn: sqlite3.Connection) -> dict:
         chunk_index.add(chunk_matrix)
     else:
         chunk_index, chunk_ids = None, []
-    _chunk_view = (chunk_index, chunk_ids)
+    _chunk_views[key] = (chunk_index, chunk_ids)
 
     return {"entities": len(entity_ids), "chunks": len(chunk_ids)}
 
@@ -151,11 +180,11 @@ def embed_new_chunks(conn: sqlite3.Connection):
     return len(rows)
 
 
-def search_entities_semantic(query_embedding: np.ndarray, top_k: int = 20) -> list[ScoredEntity]:
-    """Channel A: FAISS entity search."""
+def search_entities_semantic(query_embedding: np.ndarray, key: str, top_k: int = 20) -> list[ScoredEntity]:
+    """Channel A: FAISS entity search, over the workspace's own index (`key`)."""
     # Bind the pair ONCE: a rebuild between these statements would otherwise pair this
     # index's positions with the next build's ids.
-    index, ids = _entity_view
+    index, ids = _entity_views.get(key, (None, []))
     if index is None or index.ntotal == 0:
         return []
     k = min(top_k, index.ntotal)
@@ -171,9 +200,9 @@ def search_entities_semantic(query_embedding: np.ndarray, top_k: int = 20) -> li
     return results
 
 
-def search_chunks_semantic(query_embedding: np.ndarray, top_k: int = 20) -> list[ScoredChunk]:
-    """Channel B: FAISS chunk search."""
-    index, ids = _chunk_view
+def search_chunks_semantic(query_embedding: np.ndarray, key: str, top_k: int = 20) -> list[ScoredChunk]:
+    """Channel B: FAISS chunk search, over the workspace's own index (`key`)."""
+    index, ids = _chunk_views.get(key, (None, []))
     if index is None or index.ntotal == 0:
         return []
     k = min(top_k, index.ntotal)

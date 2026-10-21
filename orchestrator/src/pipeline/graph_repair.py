@@ -102,8 +102,9 @@ def _log(conn, *, action, before_value=None, after_value=None, from_entity_id=No
 
 
 
-def _mark_search_index_stale() -> None:
-    """Tell search its FAISS index no longer matches the graph.
+def _mark_search_index_stale(conn) -> None:
+    """Tell search the FAISS index for THIS workspace (keyed by `conn`) no longer matches
+    the graph.
 
     Imported lazily: the search package pulls in faiss/torch, and graph_repair sits on
     request paths that must not pay that cost.
@@ -121,7 +122,7 @@ def _mark_search_index_stale() -> None:
                        "search results may keep ranking corrected entities")
         return
     try:
-        mark_indexes_stale()
+        mark_indexes_stale(conn)
     except Exception:  # pragma: no cover - defensive; the flag flip cannot fail today
         logger.exception("failed to mark the search index stale; it may now be serving "
                          "vectors for entities that no longer exist")
@@ -156,7 +157,7 @@ def apply_invalidation(conn, entity_id, *, reason=None, actor="human",
         conn.commit()
         # AFTER the commit, never before: a rebuild racing a pre-commit mark reads the
         # old rows, then publishes itself ready — leaving a stale index believed fresh.
-        _mark_search_index_stale()
+        _mark_search_index_stale(conn)
     return {"edges_invalidated": len(edge_ids)}
 
 
@@ -180,7 +181,7 @@ def rollback_invalidation(conn, entity_id, *, commit=True):
         conn.commit()
         # AFTER the commit, never before: a rebuild racing a pre-commit mark reads the
         # old rows, then publishes itself ready — leaving a stale index believed fresh.
-        _mark_search_index_stale()
+        _mark_search_index_stale(conn)
     return {"edges_restored": len(edge_ids)}
 
 
@@ -226,7 +227,7 @@ def apply_rename(conn, entity_id, new_name, *, actor="human", reason=None,
         # still serving the old vector, with nothing scheduled to replace it. Clearing
         # the embedding made this MORE important, not less: the stored data is now
         # correct and only a rebuild propagates it.
-        _mark_search_index_stale()
+        _mark_search_index_stale(conn)
     return {"before": row[0], "after": new_name}
 
 
@@ -314,7 +315,7 @@ def apply_merge(conn, loser_id, survivor_id, *, actor="human", reason=None,
         conn.commit()
         # AFTER the commit, never before: a rebuild racing a pre-commit mark reads the
         # old rows, then publishes itself ready — leaving a stale index believed fresh.
-        _mark_search_index_stale()
+        _mark_search_index_stale(conn)
     return {"survivor": survivor_id, "loser": loser_id, "edges_recomputed": len(rows)}
 
 
@@ -361,7 +362,7 @@ def rollback_merge(conn, loser_id, *, commit=True):
         conn.commit()
         # AFTER the commit, never before: a rebuild racing a pre-commit mark reads the
         # old rows, then publishes itself ready — leaving a stale index believed fresh.
-        _mark_search_index_stale()
+        _mark_search_index_stale(conn)
     return {"restored": loser_id if restored else None, "sourceless": not restored}
 
 
@@ -420,5 +421,5 @@ def resolve_correction(conn, issue_id, action, *, reviewer="human"):
     # a spurious rebuild is cheap by design, whereas enumerating actions is how `rename`
     # and `retype` were missed: both mutate `canonical_name`/`type`, which is exactly
     # what the entity index embeds, yet neither ever marked it stale.
-    _mark_search_index_stale()
+    _mark_search_index_stale(conn)
     return {"status": "accepted", "applied": applied}
