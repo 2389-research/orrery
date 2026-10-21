@@ -1,0 +1,101 @@
+# ABOUTME: GET /graph with an active slice (ad-hoc params or virtual noosphere) builds on demand + TTL cache (#119).
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from src.routes import graph as graph_route
+from src.routes import workspace_routes
+
+
+def _ts(days_ago):
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _seed(store):
+    c = store.conn
+    c.execute("INSERT INTO domains (path, document_count) VALUES ('alpha', 2)")
+    for did, age in (("old", 60), ("new", 1)):
+        c.execute("INSERT INTO documents (id,title,created_at) VALUES (?,?,?)", (did, did, _ts(age)))
+        c.execute("INSERT INTO document_domains (document_id,domain_path,is_primary,confidence) VALUES (?,'alpha',1,1.0)", (did,))
+        c.execute("INSERT INTO chunks (id,document_id,chunk_index,text) VALUES (?,?,0,'x')", (f"c_{did}", did))
+    c.execute("INSERT INTO entities (id,canonical_name,type) VALUES ('E','E','Concept')")
+    c.execute("INSERT INTO entities (id,canonical_name,type) VALUES ('OLD','OLD','Concept')")
+    c.execute("INSERT INTO entity_sources (entity_id,document_id,chunk_id) VALUES ('E','old','c_old')")
+    c.execute("INSERT INTO entity_sources (entity_id,document_id,chunk_id) VALUES ('E','new','c_new')")
+    c.execute("INSERT INTO entity_sources (entity_id,document_id,chunk_id) VALUES ('OLD','old','c_old')")
+    c.commit()
+
+
+@pytest.fixture
+def client(test_client, test_store, tmp_path, monkeypatch):
+    monkeypatch.setattr(workspace_routes, "_registry_path",
+                        lambda create=True: str(tmp_path / "registry.json"))
+    graph_route.clear_slice_cache()
+    _seed(test_store)
+    yield test_client
+    graph_route.clear_slice_cache()
+
+
+def test_unsliced_unchanged(client):
+    p = client.get("/graph").json()
+    assert "node_index" in p
+    assert "slice" not in p.get("meta", {})
+    assert "OLD" in p["node_index"]
+
+
+def test_adhoc_window_slices(client):
+    r = client.get("/graph?window=1w")
+    assert r.status_code == 200
+    p = r.json()
+    s = p["meta"]["slice"]
+    assert s["since"] and s["until"] is None
+    assert s["domains"] is None and s["collections"] is None
+    assert "OLD" not in p["node_index"]
+    assert p["node_index"]["E"]["mention_count"] == 1
+
+
+def test_virtual_noosphere_uses_view_slice(client):
+    vid = client.post("/views", json={"name": "wk", "parent": "default",
+                                      "slice": {"window": "1w"}}).json()["id"]
+    r = client.get("/graph", headers={"X-Workspace-Id": vid})
+    assert r.status_code == 200
+    p = r.json()
+    assert p["meta"]["slice"]["since"]
+    assert "OLD" not in p["node_index"]
+
+
+def test_cache_hit_then_rebuild(client, monkeypatch):
+    calls = []
+    real = graph_route.build_graph_v5
+
+    def spy(store, **kw):
+        calls.append(kw)
+        return real(store, **kw)
+
+    monkeypatch.setattr(graph_route, "build_graph_v5", spy)
+    a = client.get("/graph?domain=alpha").json()
+    b = client.get("/graph?domain=alpha").json()
+    assert len(calls) == 1 and a == b
+    graph_route.clear_slice_cache()
+    client.get("/graph?domain=alpha")
+    assert len(calls) == 2
+
+
+def test_cache_keyed_by_slice(client, monkeypatch):
+    calls = []
+    real = graph_route.build_graph_v5
+    monkeypatch.setattr(graph_route, "build_graph_v5",
+                        lambda s, **kw: (calls.append(1), real(s, **kw))[1])
+    client.get("/graph?domain=alpha")
+    client.get("/graph?domain=beta")
+    assert len(calls) == 2
+
+
+def test_legacy_silo_kind_unchanged(client):
+    p = client.get("/graph?silo=none").json()
+    assert "slice" not in p.get("meta", {})
+    assert "node_index" in p
+
+
+def test_bad_window_400(client):
+    assert client.get("/graph?window=nope").status_code == 400
