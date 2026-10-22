@@ -12,7 +12,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 from ..dependencies import get_auth_store, AuthStore
 from ..pipeline.graph_v5 import build_graph_v5
-from ..pipeline.slice import parse_slice
+from ..pipeline.slice import parse_slice, Slice, ensure_slice_doc_temp_table
 from ..pipeline.time_scope import TimeScopeError
 
 router = APIRouter()
@@ -169,10 +169,12 @@ def _collection_structure(store, collection_id: str, max_files: int) -> dict:
     conn = store.conn
     collection_info = _collection_with_domain(conn, collection_id)
 
+    ensure_slice_doc_temp_table(conn, Slice(collections=(collection_id,)))
     docs = conn.execute(
         "SELECT d.id, d.title, d.content, d.source_path, dc.role, dc.parent_path "
-        "FROM documents d JOIN document_collections dc ON d.id = dc.document_id "
-        "WHERE dc.collection_id = ? AND d.invalid_at IS NULL",
+        "FROM documents d "
+        "JOIN _slice_docs sd ON sd.doc_id = d.id "
+        "JOIN document_collections dc ON dc.document_id = d.id AND dc.collection_id = ?",
         (collection_id,),
     ).fetchall()
 

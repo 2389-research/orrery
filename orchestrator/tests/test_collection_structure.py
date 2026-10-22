@@ -162,5 +162,21 @@ def test_structure_topn_tiebreak_is_deterministic(test_client, test_store):
     assert first == ["r1-f0", "r1-f1", "r1-f2"]  # ties broken by ascending doc id
 
 
+def test_structure_excludes_invalidated_docs(test_client, test_store):
+    # Two leaf docs; soft-delete one. The resolver's invalid_at gate must keep it out
+    # of both the file count and the rendered modules after the slice-resolver fold.
+    _seed_repo_with_files(test_store, "r1", n_files=2)
+    test_store.conn.execute(
+        "UPDATE documents SET invalid_at = '2020-01-01 00:00:00' WHERE id = ?", ("r1-f1",))
+    test_store.conn.commit()
+
+    body = test_client.get("/collections/r1/structure").json()
+
+    assert body["total_files"] == 1
+    file_ids = {f["id"] for m in body["modules"] for f in m["files"]}
+    assert "r1-f1" not in file_ids
+    assert "r1-f2" in file_ids
+
+
 def test_structure_404_for_unknown_repo(test_client):
     assert test_client.get("/collections/nope/structure").status_code == 404
