@@ -13,6 +13,7 @@ what the `_reflects_updated_kind_with_no_reingest` tests pin.
 import numpy as np
 import pytest
 
+pytest.importorskip("mcp")  # FastMCP optional dep; skip these when absent
 import src.mcp_server as mcp_server
 
 

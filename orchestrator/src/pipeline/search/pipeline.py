@@ -178,6 +178,7 @@ async def search_knowledge_graph(
     top_k: int = 20,
     since: str | None = None,
     until: str | None = None,
+    in_slice: bool = False,
 ) -> SearchResponse:
     """Full search pipeline. Returns ranked entities + chunks.
 
@@ -194,7 +195,9 @@ async def search_knowledge_graph(
     an index-side (allowlist) filter — tracked as #116 follow-up. Widen _SCOPE_OVERFETCH if
     this bites in practice.
     """
-    scoped = bool(since or until)
+    # `in_slice`: the caller has materialised TEMP `_slice_docs` (graph slices, #119); it
+    # is then the sole validity filter and subsumes since/until (time is one slice facet).
+    scoped = bool(since or until or in_slice)
     fetch_k = top_k * _SCOPE_OVERFETCH if scoped else top_k
     # A PER-CALL config, not a mutated shared global. `search_knowledge_graph` is async and
     # several /search requests interleave on the event loop across its await points
@@ -248,7 +251,8 @@ async def search_knowledge_graph(
     # window hits never consumed a top_k slot a valid one should have had (the reason for
     # the over-fetch above). Truncate to the caller's real top_k at the end.
     if scoped:
-        response = _filter_response_to_window(conn, response, since, until, top_k)
+        response = _filter_response_to_window(conn, response, since, until, top_k,
+                                              in_slice=in_slice)
 
     return response
 
@@ -281,6 +285,30 @@ def _batches(ids: list, room_for: int):
     size = max(1, _SQLITE_MAX_VARS - room_for)
     for i in range(0, len(ids), size):
         yield ids[i:i + size]
+
+
+def _docs_in_slice(conn: sqlite3.Connection, doc_ids: list[str]) -> dict:
+    """{document_id: created_at} for those of `doc_ids` present in TEMP `_slice_docs`."""
+    out: dict = {}
+    for batch in _batches(doc_ids, 0):
+        ph = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT id, created_at FROM documents WHERE id IN ({ph}) "
+            "AND id IN (SELECT doc_id FROM _slice_docs)", list(batch)).fetchall()
+        out.update({r[0]: r[1] for r in rows})
+    return out
+
+
+def _entities_with_in_slice_source(conn: sqlite3.Connection, entity_ids: list[str]) -> set:
+    """Entities with at least one source document in TEMP `_slice_docs`."""
+    out: set = set()
+    for batch in _batches(entity_ids, 0):
+        ph = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT DISTINCT entity_id FROM entity_sources WHERE entity_id IN ({ph}) "
+            "AND document_id IN (SELECT doc_id FROM _slice_docs)", list(batch)).fetchall()
+        out.update(r[0] for r in rows)
+    return out
 
 
 def _docs_in_window(conn: sqlite3.Connection, doc_ids: list[str],
@@ -318,17 +346,20 @@ def _entities_with_in_window_source(conn: sqlite3.Connection, entity_ids: list[s
 
 
 def _filter_response_to_window(conn: sqlite3.Connection, response: SearchResponse,
-                               since: str | None, until: str | None, top_k: int) -> SearchResponse:
-    in_win_docs = _docs_in_window(
-        conn, [c["document_id"] for c in response.chunks if c.get("document_id")], since, until)
+                               since: str | None, until: str | None, top_k: int,
+                               in_slice: bool = False) -> SearchResponse:
+    chunk_docs = [c["document_id"] for c in response.chunks if c.get("document_id")]
+    in_win_docs = (_docs_in_slice(conn, chunk_docs) if in_slice
+                   else _docs_in_window(conn, chunk_docs, since, until))
     kept_chunks = []
     for c in response.chunks:
         if c["document_id"] in in_win_docs:
             c["created_at"] = in_win_docs[c["document_id"]]   # expose for timeline sorting
             kept_chunks.append(c)
 
-    in_win_ents = _entities_with_in_window_source(
-        conn, [e["id"] for e in response.entities], since, until)
+    ent_ids = [e["id"] for e in response.entities]
+    in_win_ents = (_entities_with_in_slice_source(conn, ent_ids) if in_slice
+                   else _entities_with_in_window_source(conn, ent_ids, since, until))
     kept_entities = [e for e in response.entities if e["id"] in in_win_ents]
 
     response.total_entities = len(kept_entities)

@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import FileResponse, PlainTextResponse
 from ..dependencies import get_auth_store, require_writable, AuthStore, query_id
 from ..repositories.factory import get_store
-from ..pipeline.time_scope import resolve_scope, TimeScopeError
+from ..pipeline.slice import ensure_slice_doc_temp_table
+from .entities import _active_slice, _scope
 from ..pipeline.file_extractor import (
     TEXT_EXTENSIONS, PDF_EXTENSIONS, DOCX_EXTENSIONS, NOTEBOOK_EXTENSIONS,
 )
@@ -21,22 +22,21 @@ router = APIRouter()
 def list_documents(limit: int = 50, offset: int = 0,
                    since: str | None = None, until: str | None = None,
                    as_of: str | None = None, order: str = "desc",
+                   window: str | None = None, domain: str | None = None,
+                   collection: str | None = None,
                    auth: AuthStore = Depends(get_auth_store)):
-    """List documents, newest-first. Optional TimeScope window (#116): `since`/`until`/
-    `as_of` filter on `created_at`, and `order=asc|desc` sorts. Time values are ISO-8601
-    (`2026-10-19` or `2026-10-19T00:00:00Z`) or a relative duration `-<n><m|h|d>` (minutes/
-    hours/days, e.g. `-7d`, `-24h`, `-30m`). With no time param the response is a bare list
-    (same shape as before, now with `source_path` on each item); with one, it is
-    `{"documents": [...], "scope": {...}}` echoing the resolved window."""
-    scoped = any(p is not None for p in (since, until, as_of))
-    try:
-        scope = resolve_scope(since=since, until=until, as_of=as_of)
-    except TimeScopeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+    """List documents, newest-first. Slice-aware like /search and /entities: the effective
+    slice is the virtual noosphere's (`auth.slice`) or the ad-hoc `since`/`until`/`as_of`/
+    `window`/`domain`/`collection` params (400 on bad input). `since`/`until`/`as_of` filter
+    on `created_at` (ISO-8601 or relative `-<n><m|h|d>`); `order=asc|desc` sorts. Unsliced,
+    the response is a bare list; sliced, `{"documents": [...], "scope": {...}}`."""
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
     store = auth.store
-    docs = store.documents.list(limit=limit, offset=offset,
-                                since=scope["since"], until=scope["until"], order=order)
+    if slc is None:
+        docs = store.documents.list(limit=limit, offset=offset, order=order)
+    else:
+        ensure_slice_doc_temp_table(store.conn, slc)
+        docs = store.documents.list(limit=limit, offset=offset, order=order, in_slice=True)
     result = []
     for d in docs:
         entity_count = len(store.entities.get_for_document(d.id)) if d.id else 0
@@ -46,7 +46,7 @@ def list_documents(limit: int = 50, offset: int = 0,
             "content_type": d.content_type, "source_path": d.source_path,
         })
     store.close()
-    return {"documents": result, "scope": scope} if scoped else result
+    return {"documents": result, "scope": _scope(slc)} if slc is not None else result
 
 @router.get("/documents/{document_id}")
 def get_document(document_id: str, auth: AuthStore = Depends(get_auth_store), qid: str = Depends(query_id)):

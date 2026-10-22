@@ -8,24 +8,32 @@ Install (Claude Code) — register the stdio server once (orchestrator must be r
 (run from the `orchestrator/` dir, or point at its venv). Transport is stdio today; an
 HTTP transport for Docker/remote callers is a follow-up.
 
+Slice params: every read tool below (except list_domains / search_images) also takes the optional
+slice facets since, until, as_of, window, domain, collection (e.g. window="1w", since="-7d").
+Empty = unsliced. A scoped response echoes a trailing "Slice: ..." line.
+
 Tools — Session:
 - list_noospheres() — see available workspaces
 - select_noosphere(name_or_id) — set active workspace for subsequent calls
+- create_view(name, parent, window, since, until, as_of, domain, collection) — create a READ-ONLY
+    saved slice ("view") of a noosphere; it appears in list_noospheres as `[view of <parent>: ...]`;
+    then select_noosphere(<id>) to use it
 
 Tools — Search & Read:
-- search_knowledge_graph(query, top_k, include_images, expand) — semantic search over entities and chunks (optionally cross-modal image hits; expand=True adds LLM query enrichment)
+- search_knowledge_graph(query, top_k, include_images, expand, +slice) — semantic search over entities and chunks (optionally cross-modal image hits; expand=True adds LLM query enrichment)
 - search_images(query, top_k) — SigLIP cross-modal image search
-- get_entity(name) — look up entity details, sources, co-occurrences
+- get_entity(name, +slice) — look up entity details, sources, co-occurrences
 - get_document(title) — read a document with entity highlights (notes content_type for image docs)
 - list_domains() — see the domain taxonomy
-- list_entities(type, limit) — browse entities by type
+- list_documents(since, until, as_of, order, window, domain, collection, limit) — list documents (id, title, created_at, content_type), optionally sliced
+- list_entities(type, limit, +slice) — browse entities by type
 
 Tools — Graph Traversal:
-- get_neighborhood(entity_name, depth, max_nodes) — multi-hop neighborhood expansion
-- get_shared_context(entity_a, entity_b) — shared docs, neighbors, domains between two entities
-- find_paths(entity_a, entity_b, max_depth) — shortest path(s) through co-occurrence edges
-- get_subgraph(entity_names, max_hops) — bounded subgraph around seed entities
-- explore_domain(domain_path) — domain overview with top entities and related domains
+- get_neighborhood(entity_name, depth, max_nodes, +slice) — multi-hop neighborhood expansion
+- get_shared_context(entity_a, entity_b, +slice) — shared docs, neighbors, domains between two entities
+- find_paths(entity_a, entity_b, max_depth, +slice) — shortest path(s) through co-occurrence edges
+- get_subgraph(entity_names, max_hops, +slice) — bounded subgraph around seed entities
+- explore_domain(domain_path, +slice) — domain overview with top entities and related domains
 
 Tools — Write (ingestion & jobs; direct writes, no human gate):
 - ingest_text(title, content) — ingest a document from raw text into the active noosphere
@@ -52,9 +60,31 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from urllib.parse import quote
 
+from src.mcp_slice import slice_query, normalize_list
+
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8100")
 
 mcp = FastMCP("noospheric-orrery")
+
+
+def _sq(**facets) -> dict | None:
+    """slice_query(...) as call_api `params=`; None when no facet is set, so an
+    unsliced call sends exactly the request it always did."""
+    return slice_query(**facets) or None
+
+
+def _slice_line(scope) -> str:
+    """Concise echo of the active slice ('' when the response carried no scope). Iterates
+    the scope generically (the server's keys are since/until/domains/collections/silo/kind),
+    so any facet shows up; empty/None facets are omitted."""
+    if not isinstance(scope, dict):
+        return ""
+    parts = []
+    for k, v in scope.items():
+        if v is None or v == "" or v == [] or v == ():
+            continue
+        parts.append(f"{k}={','.join(map(str, v)) if isinstance(v, (list, tuple)) else v}")
+    return ("\nSlice: " + " ".join(parts)) if parts else ""
 
 
 # ── Machine-traceable ids for "active work" capture (issue #93) ────────────────
@@ -102,7 +132,8 @@ def _did(obj: dict) -> str:
 _active_workspace: str | None = None
 
 
-async def call_api(path: str, method: str = "GET", body: dict | None = None) -> dict:
+async def call_api(path: str, method: str = "GET", body: dict | None = None,
+                   params: dict | None = None) -> dict:
     """Call the orchestrator API. Returns the JSON body on success, or a
     {"detail": ...} dict on transport / status / decode errors so MCP tools
     can surface a readable message instead of crashing.
@@ -116,9 +147,9 @@ async def call_api(path: str, method: str = "GET", body: dict | None = None) -> 
     try:
         async with httpx.AsyncClient() as client:
             if method == "GET":
-                resp = await client.get(f"{ORCHESTRATOR_URL}{path}", headers=headers, timeout=30)
+                resp = await client.get(f"{ORCHESTRATOR_URL}{path}", headers=headers, params=params, timeout=30)
             else:
-                resp = await client.post(f"{ORCHESTRATOR_URL}{path}", headers=headers, json=body, timeout=30)
+                resp = await client.post(f"{ORCHESTRATOR_URL}{path}", headers=headers, json=body, params=params, timeout=30)
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPStatusError as e:
@@ -141,7 +172,12 @@ async def list_noospheres() -> str:
     lines = ["Available noospheres:\n"]
     for ws in workspaces:
         active = " ← active" if _active_workspace == ws["id"] else ""
-        lines.append(f"  • {ws['name']} (id: {ws['id']}){active}")
+        view = ""
+        if ws.get("kind") == "virtual":
+            sl = ws.get("slice") or {}
+            summary = " ".join(f"{k}={v}" for k, v in sl.items() if v) if isinstance(sl, dict) else str(sl)
+            view = f" [view of {ws.get('parent') or '?'}: {summary or 'no slice'}]"
+        lines.append(f"  • {ws['name']}{view} (id: {ws['id']}){active}")
     if not _active_workspace:
         lines.append("\nNo noosphere selected — use select_noosphere() to pick one.")
     return "\n".join(lines)
@@ -175,16 +211,19 @@ async def select_noosphere(name_or_id: str) -> str:
 # ── Search & Read ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def search_knowledge_graph(query: str, top_k: int = 15, include_images: bool = False, expand: bool = False) -> str:
+async def search_knowledge_graph(query: str, top_k: int = 15, include_images: bool = False, expand: bool = False, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
     """Search the knowledge graph for entities and document chunks matching a query.
     Returns ranked entities with types and relevant document excerpts.
     Set include_images=True to also surface visually-matching image documents via SigLIP cross-modal search.
     Set expand=True to LLM-generate sub-queries for higher recall — off by default because it adds
     latency and depends on the LLM backend being reachable (plain semantic search does not).
-    The galaxy visualization will light up showing where the results live in the graph."""
+    The galaxy visualization will light up showing where the results live in the graph.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
     inc = "true" if include_images else "false"
     exp = "true" if expand else "false"
-    result = await call_api(f"/search?q={quote(query)}&top_k={top_k}&expand={exp}&include_images={inc}")
+    result = await call_api(f"/search?q={quote(query)}&top_k={top_k}&expand={exp}&include_images={inc}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if "detail" in result and "query" not in result:
         return f"Search error: {result['detail']}"
     lines = [f"Search: \"{result['query']}\" — {result['total_entities']} entities, {result['total_chunks']} chunks{_query_tag(result)}"]
@@ -217,7 +256,7 @@ async def search_knowledge_graph(query: str, top_k: int = 15, include_images: bo
         lines.append(f"\nImage matches ({len(images)}):")
         for img in images[:5]:
             lines.append(f"  [image:{img['document_id']}] {img['title']} (score {img.get('score', 0):.3f}) — {img.get('description', '')}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(result.get("scope"))
 
 
 @mcp.tool()
@@ -242,8 +281,11 @@ async def search_images(query: str, top_k: int = 10) -> str:
 
 
 @mcp.tool()
-async def get_entity(name: str) -> str:
-    """Look up a specific entity by name. Returns its type, source documents, merge history, and co-occurring entities."""
+async def get_entity(name: str, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
+    """Look up a specific entity by name. Returns its type, source documents, merge history, and co-occurring entities.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
     # Resolve server-side. This used to fetch `?limit=500` and scan here, so an entity
     # past position 500 was reported "not found" — on a 94k-node graph, almost all of
     # them. /neighborhood resolves by name in SQL and returns the node it matched.
@@ -258,7 +300,7 @@ async def get_entity(name: str) -> str:
     #    the tool would report the entire graph payload as this entity's neighborhood.
     #
     # A query value is opaque to both — no path normalisation, no re-splitting.
-    seed = await call_api(f"/graph/neighborhood?name={quote(name, safe='')}&depth=1&max_nodes=1")
+    seed = await call_api(f"/graph/neighborhood?name={quote(name, safe='')}&depth=1&max_nodes=1", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if "detail" in seed:
         # Only a genuine 404 means "no such entity". Reporting a 500 or a connection
         # failure as "not found" tells the caller the graph lacks something it may well
@@ -271,10 +313,10 @@ async def get_entity(name: str) -> str:
             return f"Entity '{name}' not found"
         return f"Error looking up '{name}': {seed['detail']}"
     entity_id = seed["seed"]["id"]
-    detail = await call_api(f"/entities/{entity_id}")
+    detail = await call_api(f"/entities/{entity_id}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if isinstance(detail, dict) and "canonical_name" not in detail:
         return f"Error fetching entity detail: {detail.get('detail', detail)}"
-    coocs = await call_api(f"/entities/{entity_id}/cooccurrences")
+    coocs = await call_api(f"/entities/{entity_id}/cooccurrences", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     cooc_warning: str | None = None
     if isinstance(coocs, dict) and "detail" in coocs:
         # Distinguish "fetch failed" from "no co-occurrences" so the agent isn't misled.
@@ -298,7 +340,7 @@ async def get_entity(name: str) -> str:
         lines.append("\nOften appears with:")
         for c in coocs[:8]:
             lines.append(f"  • {c['canonical_name']} ({c['type']}) — weight {c['weight']}{_eid(c)}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(detail.get("scope") or seed.get("scope"))
 
 
 @mcp.tool()
@@ -306,9 +348,11 @@ async def get_document(title: str) -> str:
     """Read a document with entity highlights. Returns the document text segmented with entity annotations.
     For image documents the body is the vision-model description, and the result notes the content_type
     so the agent knows to fetch the raw image via /images/{document_id} if needed."""
-    docs = await call_api("/documents")
-    if isinstance(docs, dict) and "detail" in docs:
-        return f"Error: {docs['detail']}"
+    resp = await call_api("/documents")
+    if isinstance(resp, dict) and "detail" in resp and "documents" not in resp:
+        return f"Error: {resp['detail']}"
+    # Bare list unsliced; {"documents": [...], "scope": {...}} under a view/slice.
+    docs, _scope = normalize_list(resp, "documents")
     match = next((d for d in docs if title.lower() in d["title"].lower()), None)
     if not match:
         return f"Document matching '{title}' not found"
@@ -331,6 +375,29 @@ async def get_document(title: str) -> str:
 
 
 @mcp.tool()
+async def list_documents(since: str = "", until: str = "", as_of: str = "", order: str = "", window: str = "", domain: str = "", collection: str = "", limit: int = 20) -> str:
+    """List documents in the active noosphere (id, title, created_at, content_type).
+    Optional slice params narrow the list: since/until/as_of take ISO dates or relative offsets
+    ("-7d"); window takes a preset ("1w", "30d"); domain is a domain-path prefix; collection scopes
+    to one collection. order sets the sort (server-defined, e.g. "created_at"); limit caps results."""
+    params = dict(slice_query(since=since, until=until, as_of=as_of, window=window,
+                              domain=domain, collection=collection))
+    if order:
+        params["order"] = order
+    params["limit"] = limit
+    resp = await call_api("/documents", params=params)
+    if isinstance(resp, dict) and "detail" in resp and "documents" not in resp:
+        return f"Error: {resp['detail']}"
+    docs, scope = normalize_list(resp, "documents")
+    docs = docs[:limit] if limit and limit > 0 else docs
+    lines = [f"Documents ({len(docs)}):"]
+    for d in docs:
+        lines.append(f"  • {d.get('title', '?')} ({d.get('content_type') or 'text'}) "
+                     f"created {d.get('created_at') or '?'}{_did(d)}")
+    return "\n".join(lines) + _slice_line(scope)
+
+
+@mcp.tool()
 async def list_domains() -> str:
     """List all domains in the knowledge graph taxonomy with document counts and spec status."""
     domains = await call_api("/domains")
@@ -342,26 +409,36 @@ async def list_domains() -> str:
 
 
 @mcp.tool()
-async def list_entities(type: str = "", limit: int = 20) -> str:
-    """Browse entities, optionally filtered by type (Person, Organization, Product, Technology, Event, Concept, Location, Domain, etc.)."""
+async def list_entities(type: str = "", limit: int = 20, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
+    """Browse entities, optionally filtered by type (Person, Organization, Product, Technology, Event, Concept, Location, Domain, etc.).
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
     path = f"/entities?limit={limit}"
     if type:
         path += f"&type={type}"
-    entities = await call_api(path)
-    lines = [f"Entities ({len(entities)}):{_query_tag(entities)}\n"]
+    resp = await call_api(path, params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
+    if isinstance(resp, dict) and "detail" in resp and "entities" not in resp:
+        return f"Error: {resp['detail']}"
+    # Bare list unsliced; {"entities": [...], "scope": {...}} under a view/slice.
+    entities, scope = normalize_list(resp, "entities")
+    lines = [f"Entities ({len(entities)}):{_query_tag(resp)}\n"]
     for e in entities:
         lines.append(f"  • {e['canonical_name']} ({e['type']}) — {e['source_count']} sources{_eid(e)}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(scope)
 
 
 # ── Graph Traversal ─────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def get_neighborhood(entity_name: str, depth: int = 1, max_nodes: int = 20) -> str:
+async def get_neighborhood(entity_name: str, depth: int = 1, max_nodes: int = 20, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
     """Expand the neighborhood around an entity. Returns connected entities within N hops.
     Use depth=1 for immediate neighbors, depth=2 to see friends-of-friends.
-    This is the primary graph exploration tool — start here after search."""
-    result = await call_api(f"/graph/neighborhood?name={quote(entity_name, safe='')}&depth={depth}&max_nodes={max_nodes}")
+    This is the primary graph exploration tool — start here after search.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
+    result = await call_api(f"/graph/neighborhood?name={quote(entity_name, safe='')}&depth={depth}&max_nodes={max_nodes}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if "detail" in result:
         return f"Error: {result['detail']}"
     seed = result["seed"]
@@ -384,14 +461,17 @@ async def get_neighborhood(entity_name: str, depth: int = 1, max_nodes: int = 20
             silo = n.get("silo_id") or "no silo"
             kind = n.get("kind") or "unspecified kind"
             lines.append(f"    • {n['name']} ({n['type']}) — {n['source_count']} docs [{silo}, {kind}]{_eid(n)}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(result.get("scope"))
 
 
 @mcp.tool()
-async def get_shared_context(entity_a: str, entity_b: str) -> str:
+async def get_shared_context(entity_a: str, entity_b: str, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
     """Find what two entities have in common: shared documents, shared neighbors, shared domains.
-    Use this to understand WHY two entities are related or to discover non-obvious connections."""
-    result = await call_api(f"/graph/shared-context?a={quote(entity_a, safe='')}&b={quote(entity_b, safe='')}")
+    Use this to understand WHY two entities are related or to discover non-obvious connections.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
+    result = await call_api(f"/graph/shared-context?a={quote(entity_a, safe='')}&b={quote(entity_b, safe='')}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if "detail" in result:
         return f"Error: {result['detail']}"
     ea, eb = result["entity_a"], result["entity_b"]
@@ -410,14 +490,17 @@ async def get_shared_context(entity_a: str, entity_b: str) -> str:
             lines.append(f"    • {n['name']} ({n['type']}) — weight to A: {n['weight_to_a']}, to B: {n['weight_to_b']}{_eid(n)}")
     if result["shared_domains"]:
         lines.append(f"\n  Shared domains: {', '.join(result['shared_domains'])}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(result.get("scope"))
 
 
 @mcp.tool()
-async def find_paths(entity_a: str, entity_b: str, max_depth: int = 4) -> str:
+async def find_paths(entity_a: str, entity_b: str, max_depth: int = 4, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
     """Find shortest path(s) between two entities through co-occurrence edges.
-    Shows HOW two entities connect through the graph — useful for discovering indirect relationships."""
-    result = await call_api(f"/graph/paths?a={quote(entity_a, safe='')}&b={quote(entity_b, safe='')}&max_depth={max_depth}")
+    Shows HOW two entities connect through the graph — useful for discovering indirect relationships.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
+    result = await call_api(f"/graph/paths?a={quote(entity_a, safe='')}&b={quote(entity_b, safe='')}&max_depth={max_depth}", params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))
     if "detail" in result:
         return f"Error: {result['detail']}"
     ea, eb = result["entity_a"], result["entity_b"]
@@ -427,14 +510,18 @@ async def find_paths(entity_a: str, entity_b: str, max_depth: int = 4) -> str:
     for i, path in enumerate(result["paths"]):
         chain = " → ".join(f"{n['name']} ({n['type']}){_eid(n)}" for n in path["nodes"])
         lines.append(f"\n  Path {i+1} (length {path['length']}): {chain}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(result.get("scope"))
 
 
 @mcp.tool()
-async def get_subgraph(entity_names: list[str], max_hops: int = 1) -> str:
+async def get_subgraph(entity_names: list[str], max_hops: int = 1, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
     """Get the subgraph connecting a set of entities. Given seed entities (from a search or exploration),
-    returns all nodes and edges between them. Use this to understand how search results relate to each other."""
-    result = await call_api("/graph/subgraph", method="POST", body={"entity_names": entity_names, "max_hops": max_hops})
+    returns all nodes and edges between them. Use this to understand how search results relate to each other.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
+    result = await call_api("/graph/subgraph", method="POST", body={"entity_names": entity_names, "max_hops": max_hops},
+                           params=_sq(since=since, until=until, as_of=as_of, window=window, domain=domain, collection=collection))  # facets are QUERY params, not body
     if "detail" in result:
         return f"Error: {result['detail']}"
     seed_names = [s["name"] for s in result["seeds"]]
@@ -462,14 +549,18 @@ async def get_subgraph(entity_names: list[str], max_hops: int = 1) -> str:
         name_map = {n["id"]: n["name"] for n in result["nodes"]}
         for e in top_edges:
             lines.append(f"    {name_map.get(e['source'], '?')} ↔ {name_map.get(e['target'], '?')} (weight {e['weight']})")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(result.get("scope"))
 
 
 @mcp.tool()
-async def explore_domain(domain_path: str) -> str:
+async def explore_domain(domain_path: str, since: str = "", until: str = "", as_of: str = "", window: str = "", domain: str = "", collection: str = "") -> str:
     """Overview of a domain: documents, top entities, entity type distribution, and related domains.
-    Use this to understand what a domain contains before diving into individual entities."""
-    result = await call_api(f"/graph/domain-overview/{quote(domain_path, safe='/')}")
+    Use this to understand what a domain contains before diving into individual entities.
+    Optional slice (time/scope) params narrow the view: since/until/as_of take ISO dates or relative
+    offsets ("-7d", "-2w"); window takes a preset ("1w", "30d"); domain is a domain-path prefix;
+    collection scopes to one collection. All empty = the unsliced graph."""
+    # The domain path is already in the URL, so the `domain` facet is deliberately NOT forwarded.
+    result = await call_api(f"/graph/domain-overview/{quote(domain_path, safe='/')}", params=_sq(since=since, until=until, as_of=as_of, window=window, collection=collection))
     if "detail" in result:
         return f"Error: {result['detail']}"
     domain = result["domain"]
@@ -495,7 +586,7 @@ async def explore_domain(domain_path: str) -> str:
         lines.append("\n  Related domains:")
         for rd in result["related_domains"]:
             lines.append(f"    • {rd['path']} ({rd['shared_entities']} shared entities)")
-    return "\n".join(lines)
+    return "\n".join(lines) + _slice_line(result.get("scope"))
 
 
 # ── Corrections (write) ───────────────────────────────────────────────────────
@@ -610,6 +701,25 @@ async def create_noosphere(name: str, description: str = "") -> str:
         return f"Could not create noosphere: {result.get('detail', result)}"
     return (f"Created noosphere '{result['name']}' (id: {result['workspaceId']}). "
             f"Use select_noosphere('{result['workspaceId']}') to switch to it.")
+
+
+@mcp.tool()
+async def create_view(name: str, parent: str, window: str = "", since: str = "", until: str = "", as_of: str = "", domain: str = "", collection: str = "") -> str:
+    """Create a saved slice ("view") of a noosphere. `parent` is the id of the real noosphere to slice;
+    at least one slice facet is required (window/since/until/as_of/domain/collection). The view is
+    READ-ONLY (no ingestion into it). Afterwards call select_noosphere(<view id>) to use it."""
+    sl = slice_query(since=since, until=until, as_of=as_of, window=window,
+                     domain=domain, collection=collection)
+    result = await call_api("/views", method="POST",
+                            body={"name": name, "parent": parent, "slice": sl})
+    if not isinstance(result, dict) or "detail" in result:
+        detail = result.get("detail", result) if isinstance(result, dict) else result
+        return f"Error: {detail}"
+    vid = result.get("id") or result.get("workspaceId") or "?"
+    resolved = result.get("slice") or sl
+    summary = " ".join(f"{k}={v}" for k, v in resolved.items() if v) if isinstance(resolved, dict) else str(resolved)
+    return (f"Created view '{result.get('name', name)}' (id: {vid}) of {parent}: {summary}. "
+            f"Read-only. Use select_noosphere('{vid}') to switch to it.")
 
 
 @mcp.tool()
