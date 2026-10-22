@@ -46,7 +46,7 @@ def test_eid_did_absent_ids_never_raise_and_emit_nothing():
 
 @pytest.mark.asyncio
 async def test_search_emits_query_entity_and_doc_ids(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {
             "query": "widget", "total_entities": 1, "total_chunks": 1, "sub_queries_used": [],
             "entities": [{"id": "e1", "name": "Widget", "type": "Concept", "source_count": 2,
@@ -66,7 +66,7 @@ async def test_search_emits_query_entity_and_doc_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_entity_emits_own_id_and_cooccurrence_ids(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         if "neighborhood" in path:
             return {"seed": {"id": "e1"}}
         if "cooccurrences" in path:
@@ -83,7 +83,7 @@ async def test_get_entity_emits_own_id_and_cooccurrence_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_neighborhood_tags_seed_and_nodes(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {
             "seed": {"id": "e1", "name": "Widget", "type": "Concept", "silo_id": "ws1", "kind": "agent_report"},
             "depth": 1, "node_count": 2, "edge_count": 1,
@@ -103,7 +103,7 @@ async def test_get_neighborhood_tags_seed_and_nodes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_one_query_id_groups_the_entities_of_a_single_retrieval(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {
             "query": "q", "total_entities": 2, "total_chunks": 0, "sub_queries_used": [],
             "entities": [
@@ -122,7 +122,7 @@ async def test_one_query_id_groups_the_entities_of_a_single_retrieval(monkeypatc
 
 @pytest.mark.asyncio
 async def test_get_document_emits_doc_and_query(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         if path == "/documents":
             return [{"id": "d1", "title": "Doc One", "content_type": "text"}]
         if "/reader" in path:
@@ -140,7 +140,7 @@ async def test_get_document_emits_doc_and_query(monkeypatch):
 async def test_list_entities_emits_entity_ids_but_no_query(monkeypatch):
     # /entities is a LIST endpoint — header-only on the API, no body query_id — so list_entities
     # surfaces entity ids but no [query:…] tag (the MCP never mints one).
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return [{"canonical_name": "A", "type": "Concept", "source_count": 1, "id": "e1"}]
     monkeypatch.setattr(mcp_server, "call_api", fake)
     out = await mcp_server.list_entities()
@@ -150,7 +150,7 @@ async def test_list_entities_emits_entity_ids_but_no_query(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_shared_context_emits_entities_and_doc(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {
             "entity_a": {"id": "ea", "name": "A", "type": "Concept"},
             "entity_b": {"id": "eb", "name": "B", "type": "Concept"},
@@ -169,7 +169,7 @@ async def test_get_shared_context_emits_entities_and_doc(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_paths_emits_path_node_ids(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {"entity_a": {"name": "A"}, "entity_b": {"name": "B"},
                 "path_count": 1, "searched_depth": 2,
                 "paths": [{"length": 1, "nodes": [
@@ -183,7 +183,7 @@ async def test_find_paths_emits_path_node_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_subgraph_emits_seed_and_node_ids(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {"seeds": [{"id": "e1", "name": "A", "type": "Concept", "silo_id": None, "kind": None}],
                 "node_count": 2, "edge_count": 1,
                 "nodes": [{"id": "e1", "name": "A", "type": "Concept", "silo_id": None, "kind": None, "is_seed": True},
@@ -197,7 +197,7 @@ async def test_get_subgraph_emits_seed_and_node_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_explore_domain_emits_entity_and_doc(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {"domain": {"path": "alpha", "document_count": 1, "spec_version": None},
                 "documents": [{"id": "d1", "title": "Doc", "content_type": "text"}],
                 "entity_type_distribution": {"Concept": 2},
@@ -212,7 +212,7 @@ async def test_explore_domain_emits_entity_and_doc(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_search_images_emits_image_and_query(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {"images": [{"document_id": "img1", "title": "Pic", "score": 0.5, "description": "a picture"}],
                 "query_id": _SQID}
     monkeypatch.setattr(mcp_server, "call_api", fake)
@@ -224,7 +224,7 @@ async def test_search_images_emits_image_and_query(monkeypatch):
 @pytest.mark.asyncio
 async def test_expand_off_by_default_no_subquery_echo(monkeypatch):
     captured = {}
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         captured["path"] = path
         return {"query": "widget", "total_entities": 0, "total_chunks": 0,
                 "sub_queries_used": ["widget"], "entities": [], "chunks": [], "query_id": _SQID}

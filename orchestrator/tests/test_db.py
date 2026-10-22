@@ -43,17 +43,19 @@ def test_init_db_idempotent(tmp_path):
 
 
 def test_document_image_columns(tmp_path):
-    """Documents table has content_type, image_path, thumbnail_path for image support."""
+    """Documents table supports images via content_type + thumbnail_path. The image file
+    lives in source_path — the dedicated image_path column was consolidated away, so an
+    image row stores its path there (see routes/ingest.py `_ingest_image`)."""
     db_path = str(tmp_path / "test.db")
     init_db(db_path)
     conn = get_connection(db_path)
     conn.execute(
-        "INSERT INTO documents (id, title, content, status, content_type, image_path, thumbnail_path) "
+        "INSERT INTO documents (id, title, content, status, content_type, source_path, thumbnail_path) "
         "VALUES ('d1', 'photo', '', 'pending', 'image', '/data/img.jpg', '/data/thumb.jpg')"
     )
-    row = conn.execute("SELECT content_type, image_path, thumbnail_path FROM documents WHERE id = 'd1'").fetchone()
+    row = conn.execute("SELECT content_type, source_path, thumbnail_path FROM documents WHERE id = 'd1'").fetchone()
     assert row["content_type"] == "image"
-    assert row["image_path"] == "/data/img.jpg"
+    assert row["source_path"] == "/data/img.jpg"
     assert row["thumbnail_path"] == "/data/thumb.jpg"
     # Default is 'text'
     conn.execute("INSERT INTO documents (id, title, content, status) VALUES ('d2', 'notes', 'hello', 'pending')")

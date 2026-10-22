@@ -4,8 +4,17 @@ from pathlib import Path
 
 
 def test_image_simmer_trigger(test_client, test_store):
-    """POST /simmer/general/image queues an image simmer job."""
-    resp = test_client.post("/simmer/general/image")
+    """POST /simmer/{domain}/image queues a per-domain image simmer job.
+
+    Image simmering is per-domain now — it layers domain recognition context onto the
+    static general image spec (`trigger_domain_image_simmer`) — so the domain must exist.
+    """
+    test_store.conn.execute(
+        "INSERT INTO domains (id, path, document_count) VALUES ('d1', 'software/ai-agents', 1)"
+    )
+    test_store.conn.commit()
+
+    resp = test_client.post("/simmer/software/ai-agents/image")
     assert resp.status_code == 200
     data = resp.json()
     assert "job_id" in data
@@ -15,14 +24,25 @@ def test_image_simmer_trigger(test_client, test_store):
     job = test_store.conn.execute(
         "SELECT type, target, status FROM jobs WHERE id = ?", (data["job_id"],)
     ).fetchone()
-    assert job["type"] == "simmer_general_image"
+    assert job["type"] == "simmer_domain_image"
+    assert job["target"] == "software/ai-agents"
     assert job["status"] == "queued"
 
 
+def test_image_simmer_unknown_domain_404(test_client, test_store):
+    """A per-domain image simmer for a domain that doesn't exist is a 404."""
+    resp = test_client.post("/simmer/does/not/exist/image")
+    assert resp.status_code == 404
+
+
 def test_image_simmer_conflict(test_client, test_store):
-    """Can't trigger image simmer when one is already running."""
-    test_client.post("/simmer/general/image")
-    resp = test_client.post("/simmer/general/image")
+    """Can't trigger a domain image simmer when one is already running for it."""
+    test_store.conn.execute(
+        "INSERT INTO domains (id, path, document_count) VALUES ('d1', 'software/ai-agents', 1)"
+    )
+    test_store.conn.commit()
+    assert test_client.post("/simmer/software/ai-agents/image").status_code == 200
+    resp = test_client.post("/simmer/software/ai-agents/image")
     assert resp.status_code == 409
 
 

@@ -120,7 +120,7 @@ def test_graph_subgraph_route_annotates_nodes_with_silo_and_kind(test_client, te
 
 @pytest.mark.asyncio
 async def test_mcp_get_entity_surfaces_silo_and_kind(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         if "neighborhood" in path:
             return {"seed": {"id": "e1"}}
         if "cooccurrences" in path:
@@ -135,7 +135,7 @@ async def test_mcp_get_entity_surfaces_silo_and_kind(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mcp_get_neighborhood_surfaces_silo_and_kind(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {
             "seed": {"id": "e1", "name": "Widget", "type": "Concept",
                      "silo_id": "ws1", "kind": "agent_report"},
@@ -237,7 +237,7 @@ def test_search_reflects_updated_kind_with_no_reingest(test_client, test_store):
 
 @pytest.mark.asyncio
 async def test_mcp_search_knowledge_graph_surfaces_silo_and_kind(monkeypatch):
-    async def fake(path, method="GET", body=None):
+    async def fake(path, method="GET", body=None, **kwargs):
         return {
             "query": "widget", "total_entities": 1, "total_chunks": 1,
             "sub_queries_used": [],
