@@ -71,8 +71,11 @@ def _slice_facets(slc: "Slice") -> tuple[list[str], list[str], list]:
         clauses.append("d.created_at < ?")
         params.append(slc.until)
     if slc.silo:
-        clauses.append("d.silo_id = ?")
-        params.append(slc.silo)
+        if slc.silo == "none":
+            clauses.append("d.silo_id IS NULL")
+        else:
+            clauses.append("d.silo_id = ?")
+            params.append(slc.silo)
     if slc.domains:
         joins.append("JOIN document_domains dd ON dd.document_id = d.id")
         clauses.append("(" + " OR ".join("dd.domain_path LIKE ? || '%'" for _ in slc.domains) + ")")
