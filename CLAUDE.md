@@ -95,6 +95,10 @@ In Docker, this maps to the `orrery-data` volume mounted at `/data`.
 ```bash
 # Docker (recommended):
 docker compose up
+# NOTE: this Mac has only the standalone `docker-compose` binary (no `docker compose`
+# v2 subcommand — `docker compose -f …` fails with "unknown shorthand flag: 'f'").
+# Use `docker-compose` (hyphenated) here. The Mac-local stack is both files:
+#   docker-compose -f docker-compose.yml -f docker-compose.ollama.yml up -d --build
 
 # Requires: .env file with LLM credentials (ANTHROPIC_BACKEND, AWS_ACCESS_KEY, etc.)
 # Data persists at ./data/ on the host filesystem
