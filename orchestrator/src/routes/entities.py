@@ -1,6 +1,37 @@
+import dataclasses
+
 from fastapi import APIRouter, HTTPException, Depends
 from ..dependencies import get_auth_store, AuthStore, query_id
 from ..repositories.factory import get_store
+from ..pipeline.slice import parse_slice, ensure_slice_doc_temp_table, ensure_slice_temp_table
+from ..pipeline.slice_edges import in_slice_cooccurrences
+from ..pipeline.time_scope import TimeScopeError
+from ..repositories.graph_reads import _chunks
+
+
+def _in_slice_present(conn, entity_id: str) -> bool:
+    """True when the entity has at least one source document inside `_slice_docs`."""
+    return conn.execute(
+        "SELECT 1 FROM entity_sources es JOIN _slice_docs sd ON sd.doc_id = es.document_id "
+        "WHERE es.entity_id = ? LIMIT 1", (entity_id,)).fetchone() is not None
+
+
+def _active_slice(auth, since, until, as_of, window, domain, collection):
+    """auth.slice (virtual noosphere) wins; else ad-hoc params; None if unsliced. 400 on bad input."""
+    if auth.slice is not None:
+        return auth.slice
+    try:
+        return parse_slice({"since": since, "until": until, "as_of": as_of, "window": window,
+                            "domain": domain, "collection": collection})
+    except (TimeScopeError, ValueError) as e:
+        # get_auth_store created this store as a dependency with no FastAPI teardown, so
+        # close it before bailing or the SQLite connection leaks on every bad request.
+        auth.store.close()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _scope(slc):
+    return {k: (list(v) if isinstance(v, tuple) else v) for k, v in dataclasses.asdict(slc).items()}
 
 router = APIRouter()
 
@@ -11,46 +42,100 @@ def list_entities(
     type: str | None = None,
     domain: str | None = None,
     job_id: str | None = None,
+    since: str | None = None, until: str | None = None, as_of: str | None = None,
+    window: str | None = None, collection: str | None = None,
     auth: AuthStore = Depends(get_auth_store),
 ):
+    # `domain` is the pre-existing entity domain FILTER with bare-list semantics — it does
+    # NOT by itself trigger slicing (so `/entities?domain=X` stays an unsliced legacy
+    # response). Slicing is driven only by the time/collection facets or a virtual
+    # noosphere; `domain` is then an additional filter, restricted to the slice via
+    # `domain_filter` + `in_slice`. (Pass domain=None into the slice resolver.)
+    slc = _active_slice(auth, since, until, as_of, window, None, collection)
     store = auth.store
+    if slc is not None:
+        ensure_slice_doc_temp_table(store.conn, slc)
     entities = store.entities.list(
         limit=limit, offset=offset,
-        type_filter=type, domain_filter=domain, job_id=job_id,
+        type_filter=type, domain_filter=domain, job_id=job_id, in_slice=slc is not None,
     )
     store.close()
-    return [{"id": e.id, "canonical_name": e.canonical_name, "type": e.type,
-             "source_count": e.source_count} for e in entities]
+    items = [{"id": e.id, "canonical_name": e.canonical_name, "type": e.type,
+              "source_count": e.source_count} for e in entities]
+    return {"entities": items, "scope": _scope(slc)} if slc is not None else items
 
 
 @router.get("/entities/{entity_id}/cooccurrences")
-def get_cooccurrences(entity_id: str, limit: int = 10, auth: AuthStore = Depends(get_auth_store)):
+def get_cooccurrences(entity_id: str, limit: int = 10, auth: AuthStore = Depends(get_auth_store),
+                      since: str | None = None, until: str | None = None, as_of: str | None = None,
+                      window: str | None = None, domain: str | None = None,
+                      collection: str | None = None):
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
     store = auth.store
-    coentities = store.relationships.get_cooccurrences(entity_id, limit=limit)
+    if slc is None:
+        coentities = store.relationships.get_cooccurrences(entity_id, limit=limit)
+        store.close()
+        return [{"id": c.id, "canonical_name": c.canonical_name, "type": c.type,
+                 "weight": c.weight} for c in coentities]
+    # In-slice edges are recomputed live from in-slice chunks (stored edges can't be filtered).
+    ensure_slice_temp_table(store.conn, slc)
+    ensure_slice_doc_temp_table(store.conn, slc)
+    if not _in_slice_present(store.conn, entity_id):
+        store.close()
+        raise HTTPException(status_code=404, detail="Entity not found in slice")
+    nbrs = in_slice_cooccurrences(store.conn, entity_id, limit)
+    items = []
+    if nbrs:
+        meta = {}
+        for chunk in _chunks([n for n, _ in nbrs], 400):  # stay under SQLite's 999-variable cap
+            ph = ",".join("?" * len(chunk))
+            for r in store.conn.execute(
+                    f"SELECT id, canonical_name, type FROM entities "
+                    f"WHERE id IN ({ph}) AND invalid_at IS NULL", chunk):
+                meta[r["id"]] = r
+        items = [{"id": n, "canonical_name": meta[n]["canonical_name"], "type": meta[n]["type"],
+                  "weight": w} for n, w in nbrs if n in meta]
     store.close()
-    return [{"id": c.id, "canonical_name": c.canonical_name, "type": c.type,
-             "weight": c.weight} for c in coentities]
+    return {"cooccurrences": items, "scope": _scope(slc)}
 
 
 @router.get("/entities/{entity_id}/star-graph")
-def get_star_graph(entity_id: str, co_limit: int = 150, auth: AuthStore = Depends(get_auth_store)):
+def get_star_graph(entity_id: str, co_limit: int = 150, auth: AuthStore = Depends(get_auth_store),
+                   since: str | None = None, until: str | None = None, as_of: str | None = None,
+                   window: str | None = None, domain: str | None = None,
+                   collection: str | None = None):
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
     store = auth.store
-    result = store.relationships.get_star_graph(entity_id, co_limit=co_limit)
-    if not result:
-        store.close()
-        raise HTTPException(status_code=404, detail="Entity not found")
+    if slc is not None:
+        ensure_slice_temp_table(store.conn, slc)
+        ensure_slice_doc_temp_table(store.conn, slc)
+    result = store.relationships.get_star_graph(entity_id, co_limit=co_limit, in_slice=slc is not None)
     store.close()
+    if not result:
+        raise HTTPException(status_code=404,
+                            detail="Entity not found in slice" if slc is not None else "Entity not found")
+    if slc is not None:
+        result["scope"] = _scope(slc)
     return result
 
 
 @router.get("/entities/{entity_id}")
-def get_entity(entity_id: str, auth: AuthStore = Depends(get_auth_store), qid: str = Depends(query_id)):
+def get_entity(entity_id: str, auth: AuthStore = Depends(get_auth_store), qid: str = Depends(query_id),
+               since: str | None = None, until: str | None = None, as_of: str | None = None,
+               window: str | None = None, domain: str | None = None, collection: str | None = None):
+    slc = _active_slice(auth, since, until, as_of, window, domain, collection)
+    sliced = slc is not None
     store = auth.store
-    entity = store.entities.get(entity_id)
+    if sliced:
+        ensure_slice_doc_temp_table(store.conn, slc)
+    entity = store.entities.get(entity_id, in_slice=sliced)
     if not entity:
         store.close()
         raise HTTPException(status_code=404, detail="Entity not found")
-    sources = store.entity_sources.get_for_entity(entity_id)
+    sources = store.entity_sources.get_for_entity(entity_id, in_slice=sliced)
+    if sliced and not sources:
+        store.close()
+        raise HTTPException(status_code=404, detail="Entity not found in slice")
     merge_history = store.normalization.get_merge_history(entity_id)
     # Attach each source doc's title/content_type so the client can label them
     # directly. Previously the panel joined against the paginated /documents list
@@ -61,7 +146,7 @@ def get_entity(entity_id: str, auth: AuthStore = Depends(get_auth_store), qid: s
     # (task 11a), not just after a snapshot rebuild.
     titles = store.documents.get_titles([s.document_id for s in sources])
     store.close()
-    return {
+    result = {
         "id": entity.id, "canonical_name": entity.canonical_name, "type": entity.type,
         "created_at": entity.created_at,
         "sources": [{"document_id": s.document_id, "chunk_id": s.chunk_id,
@@ -75,3 +160,7 @@ def get_entity(entity_id: str, auth: AuthStore = Depends(get_auth_store), qid: s
         "merge_history": merge_history,
         "query_id": qid,
     }
+    if sliced:
+        result["source_count"] = entity.source_count
+        result["scope"] = _scope(slc)
+    return result

@@ -183,14 +183,19 @@ def co_entities(conn, entity_id, *, doc_ids=None, limit=30) -> list[dict]:
 
 # ── 5. container contents ───────────────────────────────────────────────────
 
-def entities_in_domain(conn, domain_path, *, limit=50, recursive=False) -> list[dict]:
-    """Active entities mentioned in a domain's documents, by degree."""
+def entities_in_domain(conn, domain_path, *, limit=50, recursive=False,
+                       in_slice: bool = False) -> list[dict]:
+    """Active entities mentioned in a domain's documents, by degree.
+
+    `in_slice=True` counts only documents in TEMP TABLE `_slice_docs` (caller created it).
+    """
+    sj = "JOIN _slice_docs sd ON sd.doc_id = es.document_id " if in_slice else ""
     match = "dd.domain_path LIKE ? || '/%' OR dd.domain_path = ?" if recursive else "dd.domain_path = ?"
     params = [domain_path, domain_path] if recursive else [domain_path]
     rows = conn.execute(
         f"""SELECT e.id, e.canonical_name, e.type, COUNT(DISTINCT es.document_id) AS degree
             FROM entity_sources es
-            JOIN document_domains dd ON dd.document_id = es.document_id
+            {sj}JOIN document_domains dd ON dd.document_id = es.document_id
             JOIN entities e ON e.id = es.entity_id AND e.{ACTIVE}
             WHERE {match}
             GROUP BY e.id ORDER BY degree DESC, e.canonical_name LIMIT ?""",
@@ -200,13 +205,18 @@ def entities_in_domain(conn, domain_path, *, limit=50, recursive=False) -> list[
              "degree": r["degree"]} for r in rows]
 
 
-def domain_neighbours(conn, domain_path, *, limit=10) -> list[dict]:
+def domain_neighbours(conn, domain_path, *, limit=10, in_slice: bool = False) -> list[dict]:
     """Domains sharing entities with `domain_path`, strongest first.
 
     Served from the materialized `domain_edges` table when it has been populated, and
     computed live otherwise — a correct slow answer beats an empty fast one, and a graph
     that has never been built must still be able to answer.
+
+    `in_slice=True` bypasses the materialized table (it is all-time) and always computes
+    live over TEMP TABLE `_slice_docs` (caller created it).
     """
+    if in_slice:
+        return _domain_neighbours_live(conn, domain_path, limit=limit, in_slice=True)
     rows = conn.execute(
         """SELECT CASE WHEN source = ? THEN target ELSE source END AS path, weight
            FROM domain_edges WHERE source = ? OR target = ?
@@ -314,24 +324,28 @@ def silo_kinds_of(conn, silo_ids) -> dict[str, str | None]:
     return out
 
 
-def _domain_neighbours_live(conn, domain_path, *, limit=10) -> list[dict]:
+def _domain_neighbours_live(conn, domain_path, *, limit=10, in_slice: bool = False) -> list[dict]:
     """The scoped form of the whole-graph co-occurrence edge set.
 
     `weight` is the same quantity the full edge set reports, so a caller can show one
     domain's neighbours without pulling every edge in the graph. `shared_entities` is
     the more interpretable number (how many entities they have in common) and is
     returned alongside rather than instead of it.
+
+    `in_slice=True` restricts BOTH sides of the self-join to `_slice_docs`.
     """
+    s1 = "JOIN _slice_docs sd1 ON sd1.doc_id = es1.document_id " if in_slice else ""
+    s2 = "JOIN _slice_docs sd2 ON sd2.doc_id = es2.document_id " if in_slice else ""
     rows = conn.execute(
         f"""SELECT dd2.domain_path AS path,
                    COUNT(*) AS weight,
                    COUNT(DISTINCT es1.entity_id) AS shared_entities
             FROM document_domains dd1
             JOIN entity_sources es1 ON dd1.document_id = es1.document_id
-            JOIN entities e ON e.id = es1.entity_id AND e.{ACTIVE}
+            {s1}JOIN entities e ON e.id = es1.entity_id AND e.{ACTIVE}
             JOIN entity_sources es2 ON es1.entity_id = es2.entity_id
                                    AND es1.document_id != es2.document_id
-            JOIN document_domains dd2 ON es2.document_id = dd2.document_id
+            {s2}JOIN document_domains dd2 ON es2.document_id = dd2.document_id
             WHERE dd1.domain_path = ? AND dd2.domain_path != ?
             GROUP BY dd2.domain_path
             ORDER BY weight DESC, dd2.domain_path
