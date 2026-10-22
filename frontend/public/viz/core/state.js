@@ -116,9 +116,6 @@ export class WorldState {
     const PADDING = 0.08;
     for (const [path, pos] of Object.entries(domainPositions)) {
       const vc = docCountOf(path);
-      // In a slice, skip domains with no in-slice docs — they're part of the full-graph
-      // backbone but inactive here. (Full/unsliced view keeps them, as before.)
-      if (slicedView && vc === 0) continue;
       const isSub = isSubdomainOf(path);
       const specVersion = specVersionOf(path);
       const hasSpec = specVersion > 0;
@@ -167,6 +164,20 @@ export class WorldState {
 
     // Enforce minimum separation
     this._enforceMinSeparation(400, 200);
+
+    // Under a slice, drop domains with no in-slice docs — but AFTER separation, so each
+    // surviving domain keeps the exact coordinates it would have in the full graph.
+    // `_enforceMinSeparation` perturbs positions based on which neighbours are present,
+    // so filtering BEFORE it would drift a surviving domain's home between slices (the
+    // opposite of what the slice view wants: a stable map you can compare across days).
+    // The full/unsliced view keeps every positioned domain. Entities only ever reference
+    // domains that still have in-slice docs (both derive from document_domains ⋈ the
+    // in-slice doc set), so this prune never orphans a rendered entity.
+    if (slicedView) {
+      for (const [path, d] of this.domains) {
+        if (d.docCount === 0) this.domains.delete(path);
+      }
+    }
 
     // Compute clusters
     this._computeClusters(600);
