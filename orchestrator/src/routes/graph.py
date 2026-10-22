@@ -105,6 +105,13 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
                 slc = parse_slice(params)
             except TimeScopeError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            if slc is None:
+                # We entered this branch because a facet param was supplied, yet it
+                # resolved to no slice — the only cause is a supplied-but-EMPTY value
+                # (e.g. `?silo=` / `?kind=`), which parse_slice ignores. Don't silently
+                # fall through to the full graph; an empty filter is a malformed request.
+                raise HTTPException(status_code=400,
+                                    detail="empty facet value is not a valid filter")
         if slc is not None:
             # Sliced: built on demand + TTL-cached.
             def build():

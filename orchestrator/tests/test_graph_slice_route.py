@@ -120,6 +120,15 @@ def test_bad_window_400(client):
     assert client.get("/graph?window=nope").status_code == 400
 
 
+def test_empty_facet_400(client):
+    # A supplied-but-empty facet must 400, not silently return the full graph
+    # (CodeRabbit PR4): parse_slice ignores empty scalars, so the route guards it.
+    assert client.get("/graph?silo=").status_code == 400
+    assert client.get("/graph?kind=").status_code == 400
+    # Sanity: the no-facet request is unaffected and still serves the full graph.
+    assert client.get("/graph").status_code == 200
+
+
 def test_window_plus_silo_narrows_both(client, test_store):
     c = test_store.conn
     c.execute("UPDATE documents SET silo_id='sA' WHERE id='old'")
