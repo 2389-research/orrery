@@ -91,10 +91,29 @@ def test_cache_keyed_by_slice(client, monkeypatch):
     assert len(calls) == 2
 
 
-def test_legacy_silo_kind_unchanged(client):
+def test_bare_silo_is_sliced(client):
+    # A bare ?silo= now routes through the slice resolver (gains meta.slice).
+    # All docs in this fixture have silo_id NULL, so ?silo=none keeps the whole
+    # graph but now as a slice.
     p = client.get("/graph?silo=none").json()
-    assert "slice" not in p.get("meta", {})
+    assert p["meta"]["slice"]["silo"] == "none"
     assert "node_index" in p
+
+
+def test_bare_silo_sizes_are_in_slice(client, test_store):
+    c = test_store.conn
+    c.execute("UPDATE documents SET silo_id='sA' WHERE id='old'")
+    c.execute("UPDATE documents SET silo_id='sB' WHERE id='new'")
+    c.commit()
+    # E has one source in sA (old) and one in sB (new). A bare ?silo= is now a
+    # slice, so mention_count recomputes IN-SLICE (1), not the all-time 2 the
+    # legacy post-filter showed.
+    p = client.get("/graph?silo=sA").json()
+    assert p["meta"]["slice"]["silo"] == "sA"
+    assert p["node_index"]["E"]["mention_count"] == 1
+    q = client.get("/graph?silo=sB").json()
+    assert q["meta"]["slice"]["silo"] == "sB"
+    assert q["node_index"]["E"]["mention_count"] == 1
 
 
 def test_bad_window_400(client):

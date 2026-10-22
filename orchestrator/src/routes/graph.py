@@ -65,58 +65,6 @@ def _chunked(seq, size=900):
         yield seq[i:i + size]
 
 
-def _filter_by_silo_kind(payload: dict, *, silo: str | None, kind: str | None) -> dict:
-    """Post-filter the LOADED payload by `silo`/`kind` — the cached snapshot itself
-    (`get_or_build`'s return value, keyed in `graph_snapshot`) is never mutated;
-    this builds a new dict from it (task 11a: kind override propagation, without
-    reaching through the cache to rebuild it on every filtered request).
-
-    `silo="none"` selects the null-silo pool (nodes with no `silo_id` at all), not
-    the literal string "none" — no real silo id can collide with it since ids are
-    generated hex/uuid-shaped, never the four ASCII characters "none".
-
-    Only nodes/edges are touched — `taxonomy` and `layout` describe the domain
-    backbone, which has no silo of its own and stays whole. An edge is dropped only
-    if one of its endpoints WAS a filterable node (entity/collection/document) that
-    got excluded; a domain-cooccurrence edge's endpoints are domain PATHS, never
-    entity/collection ids, so it is untouched by this filter even though domain
-    nodes aren't in the render set to begin with.
-
-    A node's `silo_id` here is its DOMINANT silo (see `graph_reads._pick_dominant`) —
-    a node built from sources in more than one silo (rare: pre-#50 data, or a
-    deliberate cross-silo merge) collapses to its heaviest one, so `?silo=<a
-    non-dominant silo it still has sources in>` will not surface it. `get_entity`
-    is unaffected: it lists every source's own silo individually.
-    """
-    def matches(node: dict) -> bool:
-        if silo is not None:
-            want = None if silo == "none" else silo
-            if node.get("silo_id") != want:
-                return False
-        if kind is not None and node.get("kind") != kind:
-            return False
-        return True
-
-    all_nodes = payload.get("nodes", ())
-    node_index = payload.get("node_index", {})
-
-    kept_nodes = [n for n in all_nodes if matches(n)]
-    kept_index = {nid: n for nid, n in node_index.items() if matches(n)}
-
-    filterable_ids = {n["id"] for n in all_nodes} | set(node_index.keys())
-    kept_ids = {n["id"] for n in kept_nodes} | set(kept_index.keys())
-    dropped_ids = filterable_ids - kept_ids
-
-    edges = [e for e in payload.get("edges", ())
-             if e.get("source") not in dropped_ids and e.get("target") not in dropped_ids]
-
-    filtered = dict(payload)
-    filtered["nodes"] = kept_nodes
-    filtered["node_index"] = kept_index
-    filtered["edges"] = edges
-    return filtered
-
-
 @router.get("/graph")
 def get_graph_data(silo: str | None = None, kind: str | None = None,
                     since: str | None = None, until: str | None = None,
@@ -132,11 +80,13 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
 
     The `?format` parameter is gone with the v4 adapter: there is one format now.
 
-    `?silo=<id>` (or `?silo=none` for the null-silo pool) and `?kind=<k>` are a
-    POST-FILTER over the loaded snapshot (task 11a) — the cached payload stays whole;
-    only this response is narrowed. Because the snapshot is cached, a `provenance_kind`
-    changed after the last rebuild won't be reflected here until the snapshot rebuilds
-    (acceptable per the plan — live reads elsewhere resolve it immediately).
+    `?silo=<id>` (or `?silo=none` for the null-silo pool) and `?kind=<k>` are SLICE
+    FACETS routed through the resolver, exactly like `since/until/as_of/window/domain/
+    collection`: a bare `?silo=`/`?kind=` now builds a sliced payload (the response
+    gains `meta.slice`), node sizes/mention_count are recomputed IN-SLICE, and an
+    entity is included iff it has ≥1 in-slice source. `silo=none` selects the
+    null-silo pool via the resolver sentinel. Only the no-param full-graph request
+    takes the unsliced cached `get_or_build` snapshot path.
     """
     from ..pipeline.graph_snapshot import get_or_build
     store = auth.store
@@ -144,9 +94,9 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
         slc = auth.slice
         raw_spec = auth.slice_spec
         if slc is None and any(v is not None for v in
-                               (since, until, as_of, window, domain, collection)):
-            # Slice-defining params present: silo/kind become facets of the slice
-            # (no silent drop, no legacy post-filter). Otherwise stay on the legacy path.
+                               (since, until, as_of, window, domain, collection, silo, kind)):
+            # Any slice facet present (including a bare silo/kind): resolve the whole
+            # thing through the slice engine. Only the no-param request stays unsliced.
             params = {"since": since, "until": until, "as_of": as_of,
                       "window": window, "domain": domain, "collection": collection,
                       "silo": silo, "kind": kind}
@@ -156,7 +106,7 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
             except TimeScopeError as e:
                 raise HTTPException(status_code=400, detail=str(e))
         if slc is not None:
-            # Sliced: built on demand + TTL-cached. Legacy silo/kind post-filter is NOT applied.
+            # Sliced: built on demand + TTL-cached.
             def build():
                 p = dict(build_graph_v5(store, slice=slc))
                 meta = dict(p.get("meta") or {})
@@ -168,8 +118,6 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
         payload = get_or_build(store)
     finally:
         store.close()
-    if silo is not None or kind is not None:
-        payload = _filter_by_silo_kind(payload, silo=silo, kind=kind)
     return payload
 
 

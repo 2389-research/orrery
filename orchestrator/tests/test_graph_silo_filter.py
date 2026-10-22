@@ -1,13 +1,14 @@
-# ABOUTME: GET /graph exposes silo_id + kind on every node, and ?silo=/?kind= narrow
-# ABOUTME: the served (cached) payload as a post-filter without touching the cache.
+# ABOUTME: GET /graph exposes silo_id + kind on every node; ?silo=/?kind= are now
+# ABOUTME: SLICE FACETS routed through the resolver, not a post-filter over the cache.
 
-"""Task 11a: silo + kind in the graph read path.
+"""Task 11a / PR4: silo + kind in the graph read path.
 
 `kind` is never stored on a node — it's resolved via the `silo_kind` view join
-(documents.silo_id -> silo_kind) INSIDE the snapshot builder (`graph_v5.build_graph_v5`),
-so the SERVED snapshot carries a `kind` value that was live at build time. `?silo=`/
-`?kind=` then post-filter that already-loaded payload in the route; the cached blob
-itself is untouched (a second unfiltered request still sees every node).
+(documents.silo_id -> silo_kind) INSIDE the builder (`graph_v5.build_graph_v5`).
+A bare `?silo=`/`?kind=` now routes through the slice resolver like every other
+facet: the sliced builder recomputes node sizes IN-SLICE and includes an entity
+iff it has ≥1 in-slice source. The unsliced `get_or_build` snapshot is untouched
+by a sliced request (a later unfiltered request still sees every node).
 """
 
 
