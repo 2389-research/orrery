@@ -180,3 +180,25 @@ def test_doc_temp_table_populated(store):
     assert name == "_slice_docs"
     rows = {r[0] for r in store.conn.execute("SELECT doc_id FROM _slice_docs").fetchall()}
     assert rows == {"d_new"}
+
+
+def _seed_silo_pool(store):
+    c = store.conn
+    c.execute("INSERT INTO documents (id,title,created_at,silo_id) VALUES ('d_sA','a','2026-10-10 00:00:00','sA')")
+    c.execute("INSERT INTO documents (id,title,created_at,silo_id) VALUES ('d_null','n','2026-10-10 00:00:00',NULL)")
+    c.execute("INSERT INTO documents (id,title,created_at,silo_id) VALUES ('d_lit','l','2026-10-10 00:00:00','none')")
+    c.commit()
+
+
+def test_silo_none_selects_null_pool(store):
+    from src.pipeline.slice import resolve_slice_docs
+    _seed_silo_pool(store)
+    # silo="none" is the null-pool sentinel: documents whose silo_id IS NULL,
+    # NOT the document with the literal string silo_id 'none'.
+    assert resolve_slice_docs(store.conn, Slice(silo="none")) == {"d_null"}
+
+
+def test_silo_literal_still_matches(store):
+    from src.pipeline.slice import resolve_slice_docs
+    _seed_silo_pool(store)
+    assert resolve_slice_docs(store.conn, Slice(silo="sA")) == {"d_sA"}
