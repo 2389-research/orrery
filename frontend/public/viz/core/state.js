@@ -82,6 +82,20 @@ export class WorldState {
     const specVersionOf = p => taxByPath.get(p)?.spec_version || 0;
     const isSubdomainOf = p => !!taxByPath.get(p)?.is_subdomain;
 
+    // A sliced payload (a virtual-noosphere view, or ad-hoc time/domain/collection/silo
+    // facets) carries `meta.slice`. `layout.positions` is the FULL noosphere's domain
+    // basis (so a domain keeps its UMAP home across slices — the point of the layout),
+    // but `taxonomy.document_count` is the in-slice count, 0 for domains with no docs in
+    // the slice. Without this gate every slice would still instantiate all ~N positioned
+    // domains at base radius, so the galaxies look identical. In a slice we draw only the
+    // domains ACTIVE in-slice (docCount > 0); positions are untouched, so the structure is
+    // preserved and the galaxy visibly changes between slices. The unsliced full graph is
+    // unaffected (it draws every positioned domain, as before).
+    const slice = data.meta?.slice;
+    const slicedView = !!(slice && (slice.since || slice.until ||
+      (slice.domains && slice.domains.length) ||
+      (slice.collections && slice.collections.length) || slice.silo || slice.kind));
+
     // Compute colors
     const domainList = Object.keys(domainPositions).map(path => ({
       path,
@@ -102,6 +116,9 @@ export class WorldState {
     const PADDING = 0.08;
     for (const [path, pos] of Object.entries(domainPositions)) {
       const vc = docCountOf(path);
+      // In a slice, skip domains with no in-slice docs — they're part of the full-graph
+      // backbone but inactive here. (Full/unsliced view keeps them, as before.)
+      if (slicedView && vc === 0) continue;
       const isSub = isSubdomainOf(path);
       const specVersion = specVersionOf(path);
       const hasSpec = specVersion > 0;
