@@ -47,14 +47,8 @@ jobs:
           AWS_ACCESS_KEY: ci-test-key
           AWS_SECRET_KEY: ci-test-secret
           AWS_REGION: us-east-1
-        # Pre-existing failures (image_path schema mismatch, two stale image_simmer
-        # route tests) are tracked separately — deselect them to keep the gate green
-        # while the underlying issues are fixed in their own PRs.
         run: |
-          python -m pytest tests/ -v \
-            --deselect tests/test_db.py::test_document_image_columns \
-            --deselect tests/test_image_routes.py::test_image_simmer_trigger \
-            --deselect tests/test_image_routes.py::test_image_simmer_conflict
+          python -m pytest tests/ -v
 
   desktop:
     name: desktop (signing scripts + supervisor)
