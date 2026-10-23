@@ -16,6 +16,7 @@ from .meridian_reader import (
     make_fetch, list_changed_sessions, get_session, get_agents, get_records, iter_agent_segments,
 )
 from .upsert_document import _recount_collection
+from .work_unit import resolve_work_units
 from .session_featurizer import summarize_segment, summarize_rollup, write_doc, upsert_domain
 
 SESSION_CONTENT_TYPE = "session_intent"
@@ -110,22 +111,23 @@ def _layout(agents, records, segments, title):
     return agent_by_id, parents, titles, _depth
 
 
-def _agent_meta(a, aid, parent_id, depth):
+def _agent_meta(a, aid, parent_id, depth, work_unit=None):
     meta = {"agent_id": aid, "agent_type": a.get("agent_type"), "description": a.get("description"),
             "parent_tool_use_id": a.get("parent_tool_use_id"), "spawn_depth": depth,
             "workflow_id": a.get("workflow_id"), "relation": a.get("relation"),
-            "rollup": a.get("rollup")}
+            "rollup": a.get("rollup"), "work_unit": work_unit}
     if aid != "main" and parent_id is None:
         meta["parent_unresolved"] = True
     return meta
 
 
-def _session_meta(session_key, session, pr_links, children_hash):
+def _session_meta(session_key, session, pr_links, children_hash, work_unit=None):
     return {"session_key": session_key, "contributor": session.get("contributor"),
             "cwd": session.get("cwd"), "git_branch": session.get("git_branch"),
             "lifecycle": session.get("lifecycle"), "started_at": session.get("started_at"),
             "last_activity_at": session.get("last_activity_at"), "pr_links": pr_links,
-            "rollup": session.get("rollup"), "children_hash": children_hash}
+            "rollup": session.get("rollup"), "children_hash": children_hash,
+            "work_unit": work_unit}
 
 
 def _set_doc_content(conn, doc_id, content, metadata):
@@ -231,17 +233,19 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
         if dom not in tax:
             tax.append(dom)
     pr_links = ((session.get("rollup") or {}).get("outputs") or {}).get("pr_links") or []
+    units = resolve_work_units(agents, session, records)
     try:
         upsert_domain(conn, dom)
         if dom != old_dom:
             conn.execute(
                 "UPDATE document_domains SET domain_path=? WHERE domain_path=? AND document_id IN "
                 "(SELECT id FROM documents WHERE source_path=?)", (dom, old_dom, source_path))
-        _set_doc_content(conn, group_id, session_rollup, _session_meta(session_key, session, pr_links, sess_hash))
+        _set_doc_content(conn, group_id, session_rollup, _session_meta(session_key, session, pr_links, sess_hash,
+                                                                  units.get("__session__")))
         for aid in sorted(agent_content, key=_depth):
             a = agent_by_id[aid]
             parent_id = parents.get(aid)
-            meta = _agent_meta(a, aid, parent_id, _depth(aid))
+            meta = _agent_meta(a, aid, parent_id, _depth(aid), units.get(aid))
             meta["children_hash"] = agent_content[aid][1]
             c, _, ex = agent_content[aid]
             if ex:
@@ -347,6 +351,7 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
 
     source_path = f"meridian:{session_key}"
     pr_links = ((session.get("rollup") or {}).get("outputs") or {}).get("pr_links") or []
+    units = resolve_work_units(agents, session, records)
     parents = _resolve_parents(agents, records)
     # agents with segments, plus any agent on the path to the root of one (so parents exist)
     agent_by_id = {a["agent_id"]: a for a in agents}
@@ -371,7 +376,8 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
             conn, collection_id, session_rollup, SESSION_CONTENT_TYPE, "group", None, "classified",
             title, dom, source_path=source_path,
             metadata=_session_meta(session_key, session, pr_links,
-                                   _children_hash([s for _, s in summaries])))
+                                   _children_hash([s for _, s in summaries]),
+                                   units.get("__session__")))
         for aid in sorted(by_agent_or_ancestors(by_agent, parents), key=_depth):
             a = agent_by_id[aid]
             parent_id = parents.get(aid)
@@ -379,7 +385,7 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
             meta = {"agent_id": aid, "agent_type": a.get("agent_type"), "description": a.get("description"),
                     "parent_tool_use_id": a.get("parent_tool_use_id"), "spawn_depth": _depth(aid),
                     "workflow_id": a.get("workflow_id"), "relation": a.get("relation"),
-                    "rollup": a.get("rollup"),
+                    "rollup": a.get("rollup"), "work_unit": units.get(aid),
                     "children_hash": _children_hash([s for _, s in by_agent.get(aid, [])])}
             if unresolved:
                 meta["parent_unresolved"] = True

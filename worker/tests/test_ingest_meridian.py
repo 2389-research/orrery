@@ -173,3 +173,73 @@ def test_identical_segment_text_keeps_one_row_per_position(monkeypatch, test_db)
         assert conn.execute("SELECT COUNT(*) FROM meridian_segments").fetchone()[0] == 2
     finally:
         conn.close()
+
+
+# ---- work_unit tagging -------------------------------------------------------------------------
+
+_ROOT = "/Users/x/Documents/GitHub/meadow"
+
+
+def _with_git(rec):
+    rec["raw"]["cwd"] = _ROOT
+    rec["raw"]["serverClassifierContext"] = {"context": {"git_state": {
+        "root": _ROOT, "branch": "b1",
+        "visibility": {"origin": {"host": "github.com", "remote": "acme/meadow"}}}}}
+    return rec
+
+
+def _wu_recs():
+    return [_with_git(_rec("m1", "main", "main work", "2026-10-01T00:00:01Z", "assistant", tool_use_id="tu9")),
+            _with_git(_rec("s1", "a1", "sub work", "2026-10-01T00:00:02Z"))]
+
+
+def _group_wu(test_db):
+    conn = get_connection(test_db)
+    try:
+        sess = conn.execute("SELECT group_doc_id FROM meridian_sessions").fetchone()[0]
+        sm = json.loads(conn.execute("SELECT metadata FROM documents WHERE id=?", (sess,)).fetchone()[0])
+        leaf_md = [r[0] for r in conn.execute(
+            "SELECT d.metadata FROM documents d JOIN document_collections dc ON dc.document_id=d.id "
+            "WHERE dc.role='leaf'")]
+        ndocs = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+    finally:
+        conn.close()
+    ad = _agent_docs(test_db)
+    return sm.get("work_unit"), {k: v[2].get("work_unit") for k, v in ad.items()}, leaf_md, ndocs
+
+
+def test_backfill_tags_session_and_agent_docs_with_work_unit(monkeypatch, test_db):
+    _, job = _setup(monkeypatch, test_db, _fake_fetch([MAIN, SUB], _wu_recs()))
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    sess_wu, agent_wu, leaf_md, _ = _group_wu(test_db)
+    # (the shared fixture's session PR link is a non-github URL, so the session key may be PR-derived;
+    # the git remote must still be among the session's keys)
+    assert sess_wu and sess_wu["key"] and "github.com/acme/meadow" in sess_wu["keys"]
+    # fixture session carries a PR link, which the main agent inherits (source "pr"); without it git_remote
+    assert agent_wu["main"]["source"] in ("pr", "git_remote")
+    assert agent_wu["main"]["key"] in ("x/pr/1", "github.com/acme/meadow")
+    assert any(u["key"] == "github.com/acme/meadow" for u in agent_wu["main"]["units"])
+    assert agent_wu["a1"]["key"]
+    assert all(m is None or "work_unit" not in json.loads(m) for m in leaf_md)
+
+
+def test_rederive_keeps_work_unit_and_no_duplicate_docs(monkeypatch, test_db):
+    fetch = _fake_fetch([MAIN, SUB], _wu_recs(), revision=2)
+    _, job = _setup(monkeypatch, test_db, fetch)
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    first = _group_wu(test_db)
+    # same revision: skipped
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    assert _group_wu(test_db) == first
+    # revision bump, unchanged content: re-derive path
+    monkeypatch.setattr(mod, "make_fetch", lambda url: _fake_fetch([MAIN, SUB], _wu_recs(), revision=3))
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    conn = get_connection(test_db)
+    try:
+        assert conn.execute("SELECT last_revision FROM meridian_sessions").fetchone()[0] == 3
+    finally:
+        conn.close()
+    again = _group_wu(test_db)
+    assert again[0] and again[0] == first[0]
+    assert again[1] == first[1]
+    assert again[3] == first[3]
