@@ -1,7 +1,9 @@
 # ABOUTME: Ingest meridian agent sessions (pull API) into the "Code Sessions" noosphere (agent_report).
 # ABOUTME: Each session -> group(session rollup) > group per agent (subagent-aware) > leaf per segment.
-# ABOUTME: Backfill (first sight) only; per-session atomic with its meridian_sessions/segments rows.
+# ABOUTME: Backfill on first sight; memoized incremental re-derive on a revision bump (only new/changed
+# ABOUTME: segments re-summarize). Per-session atomic with its meridian_sessions/segments rows.
 
+import hashlib
 import json
 import os
 import uuid
@@ -73,19 +75,210 @@ def _resolve_parents(agents: list[dict], records: list[dict]) -> dict:
     return parents
 
 
+def _children_hash(summaries: list[str]) -> str:
+    return hashlib.sha256(json.dumps(summaries).encode()).hexdigest()
+
+
+async def _rollup(relay, model, ctx, summaries, cache: dict) -> str:
+    """Rollup memoized (within a pass) by the hash of its ordered child summaries."""
+    h = _children_hash(summaries)
+    if h not in cache:
+        cache[h] = await summarize_rollup(relay, model, ctx, summaries)
+    return cache[h]
+
+
+def _layout(agents, records, segments, title):
+    """agent_by_id, parents, titles, depth-fn for the agents that own segments (+ ancestors)."""
+    parents = _resolve_parents(agents, records)
+    agent_by_id = {a["agent_id"]: a for a in agents}
+    for seg in segments:
+        agent_by_id.setdefault(seg["agent_id"], {"agent_id": seg["agent_id"], "agent_type": seg["agent_type"],
+                                                 "parent_tool_use_id": seg["parent_tool_use_id"]})
+        parents.setdefault(seg["agent_id"], None)
+    depth = {s["agent_id"]: s["spawn_depth"] for s in segments}
+    titles = {aid: _agent_title(title, a) for aid, a in agent_by_id.items()}
+
+    def _depth(aid):
+        d, cur, seen = 0, parents.get(aid), {aid}
+        while cur and cur not in seen:
+            seen.add(cur)
+            d += 1
+            cur = parents.get(cur)
+        return depth.get(aid, d)
+
+    return agent_by_id, parents, titles, _depth
+
+
+def _agent_meta(a, aid, parent_id, depth):
+    meta = {"agent_id": aid, "agent_type": a.get("agent_type"), "description": a.get("description"),
+            "parent_tool_use_id": a.get("parent_tool_use_id"), "spawn_depth": depth,
+            "workflow_id": a.get("workflow_id"), "relation": a.get("relation"),
+            "rollup": a.get("rollup")}
+    if aid != "main" and parent_id is None:
+        meta["parent_unresolved"] = True
+    return meta
+
+
+def _session_meta(session_key, session, pr_links, children_hash):
+    return {"session_key": session_key, "contributor": session.get("contributor"),
+            "cwd": session.get("cwd"), "git_branch": session.get("git_branch"),
+            "lifecycle": session.get("lifecycle"), "started_at": session.get("started_at"),
+            "last_activity_at": session.get("last_activity_at"), "pr_links": pr_links,
+            "rollup": session.get("rollup"), "children_hash": children_hash}
+
+
+def _set_doc_content(conn, doc_id, content, metadata):
+    """Update a group doc in place (content + its single chunk + metadata)."""
+    conn.execute("UPDATE documents SET content=?, content_hash=?, metadata=? WHERE id=?",
+                 (content, hashlib.sha256(content.encode()).hexdigest(), json.dumps(metadata), doc_id))
+    conn.execute("UPDATE chunks SET text=?, length=? WHERE document_id=? AND chunk_index=0",
+                 (content, len(content), doc_id))
+
+
+def _invalidate_doc(conn, doc_id):
+    conn.execute("UPDATE documents SET invalid_at = CURRENT_TIMESTAMP WHERE id=? AND invalid_at IS NULL",
+                 (doc_id,))
+
+
+async def _rederive_session(conn, relay, sum_model, fetch, collection_id, session_key, session,
+                            revision, known) -> str:
+    """Memoized incremental update. LLM calls happen first (nothing written until they all
+    succeed); then one transaction applies leaf/group changes and bumps last_revision."""
+    agents = get_agents(fetch, session_key)
+    records = get_records(fetch, session_key)
+    segments = [s for s in iter_agent_segments(records, agents) if s["text"].strip()]
+    title = _session_title(session_key, session)
+    ctx = f"Session project: {session.get('cwd') or '(unknown)'}"
+    group_id = known[1]
+
+    stored = {(r[0], r[1]): {"hash": r[2], "summary": r[3], "leaf": r[4]} for r in conn.execute(
+        "SELECT agent_id, seq, segment_hash, summary, leaf_doc_id FROM meridian_segments "
+        "WHERE session_key=?", (session_key,))}
+    by_hash = {v["hash"]: v["summary"] for v in stored.values()}
+
+    plan = []  # (seg, summary, action) action: reuse | replace | new
+    for seg in segments:
+        key = (seg["agent_id"], seg["seq"])
+        old = stored.get(key)
+        if old and old["hash"] == seg["content_hash"]:
+            plan.append((seg, old["summary"], "reuse"))
+            continue
+        summ = by_hash.get(seg["content_hash"])  # same text seen elsewhere in this session
+        if summ is None:
+            summ = await summarize_segment(relay, sum_model, ctx, seg["text"])
+            if not summ:
+                print(f"[ingest_meridian] session {session_key}: empty segment summary, will retry", flush=True)
+                return "retry"
+            by_hash[seg["content_hash"]] = summ
+        plan.append((seg, summ, "replace" if old else "new"))
+
+    by_agent: dict[str, list] = {}
+    for seg, summ, _ in plan:
+        by_agent.setdefault(seg["agent_id"], []).append(summ)
+    all_summaries = [summ for _, summ, _ in plan]
+    rollup_ctx = f"{ctx}\nStarted: {session.get('started_at')}"
+
+    agent_by_id, parents, titles, _depth = _layout(agents, records, segments, title)
+    cache: dict = {}
+
+    def _existing_agent_doc(aid):
+        return conn.execute(
+            "SELECT d.id, d.content, d.metadata FROM documents d JOIN document_collections dc "
+            "ON dc.document_id = d.id WHERE d.source_path=? AND dc.role='group' AND d.invalid_at IS NULL "
+            "AND json_extract(d.metadata,'$.agent_id')=?", (f"meridian:{session_key}", aid)).fetchone()
+
+    async def _group_content(existing, summaries, fallback):
+        h = _children_hash(summaries)
+        if existing:
+            em = json.loads(existing[2]) if existing[2] else {}
+            if em.get("children_hash") == h and existing[1]:
+                return existing[1], h
+        if not summaries:
+            return fallback, h
+        r = await _rollup(relay, sum_model, rollup_ctx, summaries, cache)
+        return r, h
+
+    sess_row = conn.execute("SELECT content, metadata FROM documents WHERE id=?", (group_id,)).fetchone()
+    session_rollup, sess_hash = await _group_content(
+        (group_id, sess_row[0], sess_row[1]) if sess_row else None, all_summaries, "(no recorded activity)")
+    if not session_rollup:
+        return "retry"
+    agent_content = {}
+    for aid in by_agent_or_ancestors(by_agent, parents):
+        a = agent_by_id[aid]
+        ex = _existing_agent_doc(aid)
+        c, h = await _group_content(ex, by_agent.get(aid, []),
+                                    a.get("description") or "(no recorded activity)")
+        if not c:
+            return "retry"
+        agent_content[aid] = (c, h, ex)
+
+    dom_row = conn.execute("SELECT domain_path FROM document_domains WHERE document_id=? AND is_primary=1",
+                           (group_id,)).fetchone()
+    dom = dom_row[0] if dom_row else _UNCLASSIFIED_DOMAIN
+    source_path = f"meridian:{session_key}"
+    pr_links = ((session.get("rollup") or {}).get("outputs") or {}).get("pr_links") or []
+    try:
+        upsert_domain(conn, dom)
+        _set_doc_content(conn, group_id, session_rollup, _session_meta(session_key, session, pr_links, sess_hash))
+        for aid in sorted(agent_content, key=_depth):
+            a = agent_by_id[aid]
+            parent_id = parents.get(aid)
+            meta = _agent_meta(a, aid, parent_id, _depth(aid))
+            meta["children_hash"] = agent_content[aid][1]
+            c, _, ex = agent_content[aid]
+            if ex:
+                _set_doc_content(conn, ex[0], c, meta)
+            else:
+                parent_title = title if parent_id is None else titles[parent_id]
+                write_doc(conn, collection_id, c, SESSION_CONTENT_TYPE, "group", parent_title,
+                          "classified", titles[aid], dom, metadata=meta, source_path=source_path)
+        current = set()
+        for seg, summ, action in plan:
+            aid, seq = seg["agent_id"], seg["seq"]
+            current.add((aid, seq))
+            if action == "reuse":
+                continue
+            if action == "replace":
+                _invalidate_doc(conn, stored[(aid, seq)]["leaf"])
+            leaf_id = write_doc(conn, collection_id, summ, SESSION_CONTENT_TYPE, "leaf", titles[aid],
+                                "classified", f"{titles[aid]} · part {seq + 1}", dom, source_path=source_path)
+            conn.execute(
+                "INSERT INTO meridian_segments (session_key, segment_hash, agent_id, seq, summary, leaf_doc_id) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_key, agent_id, seq) DO UPDATE SET "
+                "segment_hash=excluded.segment_hash, summary=excluded.summary, leaf_doc_id=excluded.leaf_doc_id",
+                (session_key, seg["content_hash"], aid, seq, summ, leaf_id))
+        for key, v in stored.items():
+            if key not in current:
+                _invalidate_doc(conn, v["leaf"])
+                conn.execute("DELETE FROM meridian_segments WHERE session_key=? AND agent_id=? AND seq=?",
+                             (session_key, key[0], key[1]))
+        conn.execute("UPDATE meridian_sessions SET last_revision=?, lifecycle=?, updated_at=CURRENT_TIMESTAMP "
+                     "WHERE session_key=?", (revision, session.get("lifecycle"), session_key))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    print(f"[ingest_meridian] session {session_key} re-derived at rev {revision}: "
+          f"{sum(1 for p in plan if p[2] != 'reuse')} segments changed", flush=True)
+    return "updated"
+
+
 async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fetch,
                            collection_id, item) -> str:
-    """Returns 'ingested' | 'skipped' | 'retry' (empty model output)."""
+    """Returns 'ingested' | 'updated' | 'skipped' | 'retry' (empty model output)."""
     session_key = item.get("session_key")
     if not session_key:
         return "skipped"
     session = get_session(fetch, session_key)
     revision = session.get("revision", item.get("revision"))
-    known = conn.execute("SELECT last_revision FROM meridian_sessions WHERE session_key=?",
+    known = conn.execute("SELECT last_revision, group_doc_id FROM meridian_sessions WHERE session_key=?",
                          (session_key,)).fetchone()
     if known is not None:
-        # Re-derive on a revision bump is the incremental path (not backfill).
-        return "skipped"
+        if revision is None or known[0] is None or revision <= known[0]:
+            return "skipped"  # nothing new: no LLM calls, no writes
+        return await _rederive_session(conn, relay, sum_model, fetch, collection_id, session_key,
+                                       session, revision, known)
 
     agents = get_agents(fetch, session_key)
     records = get_records(fetch, session_key)
@@ -108,10 +301,11 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
     for seg, s in summaries:
         by_agent.setdefault(seg["agent_id"], []).append((seg, s))
     rollup_ctx = f"{ctx}\nStarted: {session.get('started_at')}"
-    session_rollup = await summarize_rollup(relay, sum_model, rollup_ctx, [s for _, s in summaries])
+    rcache: dict = {}
+    session_rollup = await _rollup(relay, sum_model, rollup_ctx, [s for _, s in summaries], rcache)
     agent_rollups = {}
     for aid, items in by_agent.items():
-        r = await summarize_rollup(relay, sum_model, rollup_ctx, [s for _, s in items])
+        r = await _rollup(relay, sum_model, rollup_ctx, [s for _, s in items], rcache)
         if not r:
             return "retry"
         agent_rollups[aid] = r
@@ -150,11 +344,8 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
         group_id = write_doc(
             conn, collection_id, session_rollup, SESSION_CONTENT_TYPE, "group", None, "classified",
             title, dom, source_path=source_path,
-            metadata={"session_key": session_key, "contributor": session.get("contributor"),
-                      "cwd": session.get("cwd"), "git_branch": session.get("git_branch"),
-                      "lifecycle": session.get("lifecycle"), "started_at": session.get("started_at"),
-                      "last_activity_at": session.get("last_activity_at"), "pr_links": pr_links,
-                      "rollup": session.get("rollup")})
+            metadata=_session_meta(session_key, session, pr_links,
+                                   _children_hash([s for _, s in summaries])))
         for aid in sorted(by_agent_or_ancestors(by_agent, parents), key=_depth):
             a = agent_by_id[aid]
             parent_id = parents.get(aid)
@@ -162,7 +353,8 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
             meta = {"agent_id": aid, "agent_type": a.get("agent_type"), "description": a.get("description"),
                     "parent_tool_use_id": a.get("parent_tool_use_id"), "spawn_depth": _depth(aid),
                     "workflow_id": a.get("workflow_id"), "relation": a.get("relation"),
-                    "rollup": a.get("rollup")}
+                    "rollup": a.get("rollup"),
+                    "children_hash": _children_hash([s for _, s in by_agent.get(aid, [])])}
             if unresolved:
                 meta["parent_unresolved"] = True
             parent_title = title if parent_id is None else titles[parent_id]
@@ -214,7 +406,7 @@ async def run_ingest_meridian(job: dict, db_path: str) -> None:
     classify_model = settings.classification_model
 
     conn = get_connection(db_path)
-    counts = {"ingested": 0, "skipped": 0, "retry": 0}
+    counts = {"ingested": 0, "updated": 0, "skipped": 0, "retry": 0}
     try:
         row = conn.execute("SELECT updated_after FROM meridian_cursor WHERE collection_id=?",
                            (collection_id,)).fetchone()
@@ -240,7 +432,7 @@ async def run_ingest_meridian(job: dict, db_path: str) -> None:
             conn.execute("INSERT INTO jobs (id, type, target, status, config) VALUES (?, 'extract_batch', ?, "
                          "'queued', ?)", (str(uuid.uuid4()), collection_id,
                                           json.dumps({"spec_id": spec_id, "scope": SESSION_CONTENT_TYPE})))
-        if counts["ingested"]:
+        if counts["ingested"] or counts["updated"]:
             mark_graph_dirty(conn)
         conn.execute("UPDATE jobs SET result = ? WHERE id = ?", (json.dumps(counts), job["id"]))
         conn.commit()
