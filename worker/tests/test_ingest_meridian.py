@@ -215,9 +215,9 @@ def test_backfill_tags_session_and_agent_docs_with_work_unit(monkeypatch, test_d
     # (the shared fixture's session PR link is a non-github URL, so the session key may be PR-derived;
     # the git remote must still be among the session's keys)
     assert sess_wu and sess_wu["key"] and "github.com/acme/meadow" in sess_wu["keys"]
-    # fixture session carries a PR link, which the main agent inherits (source "pr"); without it git_remote
-    assert agent_wu["main"]["source"] in ("pr", "git_remote")
-    assert agent_wu["main"]["key"] in ("x/pr/1", "github.com/acme/meadow")
+    # the fixture's PR link (https://x/pr/1) is not a valid PR URL, so main falls back to git_remote
+    assert agent_wu["main"]["source"] == "git_remote"
+    assert agent_wu["main"]["key"] == "github.com/acme/meadow"
     assert any(u["key"] == "github.com/acme/meadow" for u in agent_wu["main"]["units"])
     assert agent_wu["a1"]["key"]
     assert all(m is None or "work_unit" not in json.loads(m) for m in leaf_md)

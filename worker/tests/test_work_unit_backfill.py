@@ -96,3 +96,20 @@ def test_backfill_tags_group_docs_only_and_is_idempotent(monkeypatch, test_db):
 
     asyncio.run(mod.run_work_unit_backfill(job, test_db))
     assert _snapshot(test_db) == after
+
+
+def test_fully_failed_backfill_raises_and_counts(monkeypatch, test_db):
+    import pytest
+    _, job = _setup(monkeypatch, test_db)
+
+    def boom(path, params=None):
+        raise ConnectionError("meridian unreachable")
+    monkeypatch.setattr(mod, "make_fetch", lambda url: boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(mod.run_work_unit_backfill(job, test_db))
+    conn = get_connection(test_db)
+    try:
+        res = json.loads(conn.execute("SELECT result FROM jobs WHERE id=?", (job["id"],)).fetchone()[0])
+    finally:
+        conn.close()
+    assert res == {"sessions": 0, "docs_tagged": 0, "failed": 1}

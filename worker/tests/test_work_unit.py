@@ -189,3 +189,47 @@ def test_malformed_git_state_root_is_skipped():
     r["raw"]["serverClassifierContext"] = {"context": {"git_state": {"root": 123}}}
     out = resolve_work_units([agent("main")], session(f"{GH}/meadow"), [r])
     assert out["main"]["key"] == "meadow"
+
+
+def test_null_agent_record_feeds_main():
+    remote = "github.com/o/xrepo"
+    root = f"{GH}/xrepo"
+    recs = [rec(None, f"{root}/sub", root=root, remote=remote) for _ in range(3)]
+    recs += [rec("", f"{root}/sub", root=root, remote=remote) for _ in range(2)]
+    out = resolve_work_units([agent("main")], session(GH), recs)
+    assert out["main"]["key"] == f"{remote} :: sub"
+    assert out["main"]["source"] == "git_remote"
+    assert out["main"]["anchor_dir"] == f"{root}/sub"
+    assert out["main"]["anchor_share"] == 1.0
+
+
+def _pr_main(url, root=f"{GH}/meadow", remote="github.com/acme/meadow"):
+    recs = [rec("main", root, root=root, remote=remote) for _ in range(3)]
+    return resolve_work_units([agent("main", prs=[url])], session(root), recs)["main"]
+
+
+def test_non_pr_github_url_falls_through_to_git_remote():
+    u = _pr_main("https://github.com/orgs/foo/projects/3")
+    assert u["key"] == "github.com/acme/meadow" and u["source"] == "git_remote"
+    assert u["pr_links"] == []
+
+
+def test_foreign_jira_url_falls_through_to_git_remote():
+    u = _pr_main("https://acme.atlassian.net/browse/PROJ-123")
+    assert u["key"] == "github.com/acme/meadow" and u["source"] == "git_remote"
+
+
+def test_valid_github_pr_url_sets_key():
+    u = _pr_main("https://GitHub.com/acme/other/pull/12", remote="github.com/acme/meadow")
+    assert u["key"] == "github.com/acme/other" and u["source"] == "pr"
+    assert u["pr_links"] == ["github.com/acme/other/pull/12"]
+
+
+def test_gitlab_mr_url_sets_key():
+    u = _pr_main("https://gitlab.com/acme/meadow/-/merge_requests/5")
+    assert u["key"] == "gitlab.com/acme/meadow" and u["source"] == "pr"
+
+
+def test_agent_without_id_is_skipped():
+    out = resolve_work_units([{"parent_agent_id": None}, agent("main")], session(GH), [])
+    assert "main" in out and None not in out

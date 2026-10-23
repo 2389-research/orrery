@@ -31,16 +31,25 @@ def normalize_remote(url):
     return f"{host.lower()}/{rest}"
 
 
+_PR_SEG = re.compile(r"/(?:-/)?(pull|pulls|merge_requests)/(\d+)(?=[/?#]|$)")
+
+
 def _norm_pr(url):
-    """PR URL -> (normalized link, repo key host/owner/name) or None."""
+    """PR/MR URL -> (normalized link, repo key host/owner/name) or None.
+
+    Only URLs with a recognized /pull/<n>, /pulls/<n> or /merge_requests/<n> segment
+    count; anything else (project boards, Jira tickets, ...) is not repo evidence.
+    """
     if not url:
         return None
-    s = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", str(url).strip()).strip("/")
-    parts = s.split("/")
-    if len(parts) < 3:
+    s = str(url).strip()
+    m = _PR_SEG.search(s)
+    if not m:
         return None
-    parts[0] = parts[0].lower()
-    return "/".join(parts), "/".join(parts[:3])
+    key = normalize_remote(s[:m.start()])
+    if not key or len(key.split("/")) < 3:
+        return None
+    return f"{key}/{m.group(1)}/{m.group(2)}", key
 
 
 def _inside(path, root):
@@ -155,11 +164,12 @@ def _unit(key, source, remote, root, name, sub, anchor, share, branch, prs, unit
 
 
 def resolve_work_units(agents, session, records):
+    agents = [a for a in agents if a.get("agent_id")]  # one malformed agent can't crash the resolve
     by_agent = {}
     roots = {}
     for r in records:
         raw = r.get("raw") or {}
-        by_agent.setdefault(r.get("agent_id"), []).append(raw)
+        by_agent.setdefault(r.get("agent_id") or "main", []).append(raw)
         root, remote = _git_state(raw)
         if root:
             if root not in roots or (remote and not roots[root]):

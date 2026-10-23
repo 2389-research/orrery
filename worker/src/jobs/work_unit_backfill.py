@@ -68,5 +68,8 @@ async def run_work_unit_backfill(job: dict, db_path: str) -> None:
         conn.execute("UPDATE jobs SET result = ? WHERE id = ?",
                      (json.dumps({"sessions": sessions, "docs_tagged": tagged, "failed": failed}), job["id"]))
         conn.commit()
+        if sessions == 0 and failed > 0:
+            # every session errored (e.g. meridian unreachable): don't let the job look green
+            raise RuntimeError(f"work_unit backfill: all {failed} session(s) failed")
     finally:
         conn.close()
