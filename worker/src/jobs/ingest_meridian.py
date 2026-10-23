@@ -142,7 +142,7 @@ def _invalidate_doc(conn, doc_id):
 
 
 async def _rederive_session(conn, relay, sum_model, fetch, collection_id, session_key, session,
-                            revision, known) -> str:
+                            revision, known, classify_model=None, taxonomy=None) -> str:
     """Memoized incremental update. LLM calls happen first (nothing written until they all
     succeed); then one transaction applies leaf/group changes and bumps last_revision."""
     agents = get_agents(fetch, session_key)
@@ -216,11 +216,27 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
 
     dom_row = conn.execute("SELECT domain_path FROM document_domains WHERE document_id=? AND is_primary=1",
                            (group_id,)).fetchone()
-    dom = dom_row[0] if dom_row else _UNCLASSIFIED_DOMAIN
+    old_dom = dom_row[0] if dom_row else _UNCLASSIFIED_DOMAIN
+    dom = old_dom
     source_path = f"meridian:{session_key}"
+    # Settled: reclassify ONCE on the current rollup (backfill's classification was often early).
+    final_row = conn.execute("SELECT classified_final FROM meridian_sessions WHERE session_key=?",
+                             (session_key,)).fetchone()
+    reclassified = session.get("lifecycle") == "ended" and final_row is not None and not final_row[0]
+    if reclassified:
+        tax = taxonomy if taxonomy is not None else []
+        cls = await classify_document(relay=relay, title=title, excerpt=session_rollup[:4000],
+                                      existing_taxonomy=tax, model=classify_model)
+        dom = cls.get("primary_domain") or old_dom
+        if dom not in tax:
+            tax.append(dom)
     pr_links = ((session.get("rollup") or {}).get("outputs") or {}).get("pr_links") or []
     try:
         upsert_domain(conn, dom)
+        if dom != old_dom:
+            conn.execute(
+                "UPDATE document_domains SET domain_path=? WHERE domain_path=? AND document_id IN "
+                "(SELECT id FROM documents WHERE source_path=?)", (dom, old_dom, source_path))
         _set_doc_content(conn, group_id, session_rollup, _session_meta(session_key, session, pr_links, sess_hash))
         for aid in sorted(agent_content, key=_depth):
             a = agent_by_id[aid]
@@ -258,10 +274,13 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
                      "WHERE session_key=?", (revision, session.get("lifecycle"), session_key))
         # invalidations never decrement; recount from active (invalid_at IS NULL) docs
         _recount_collection(conn, collection_id)
-        conn.execute(
-            "UPDATE domains SET document_count = (SELECT COUNT(*) FROM document_domains dd "
-            "JOIN documents d ON d.id = dd.document_id WHERE dd.domain_path = ? AND d.invalid_at IS NULL) "
-            "WHERE path = ?", (dom, dom))
+        for dp in {dom, old_dom}:
+            conn.execute(
+                "UPDATE domains SET document_count = (SELECT COUNT(*) FROM document_domains dd "
+                "JOIN documents d ON d.id = dd.document_id WHERE dd.domain_path = ? AND d.invalid_at IS NULL) "
+                "WHERE path = ?", (dp, dp))
+        if reclassified:
+            conn.execute("UPDATE meridian_sessions SET classified_final=1 WHERE session_key=?", (session_key,))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -285,7 +304,7 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
         if revision is None or known[0] is None or revision <= known[0]:
             return "skipped"  # nothing new: no LLM calls, no writes
         return await _rederive_session(conn, relay, sum_model, fetch, collection_id, session_key,
-                                       session, revision, known)
+                                       session, revision, known, classify_model, taxonomy)
 
     agents = get_agents(fetch, session_key)
     records = get_records(fetch, session_key)
