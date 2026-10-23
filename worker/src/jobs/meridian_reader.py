@@ -27,16 +27,21 @@ def _sk(session_key: str) -> str:
     return urllib.parse.quote(session_key, safe="")
 
 
-def list_changed_sessions(fetch, cursor: str | None, limit: int = 100):
+def list_changed_sessions(fetch, cursor: str | None, limit: int = 100, max_pages: int = 10000):
     """Page /v1/sessions?updated_after= until has_more is false.
     Returns (items, next_cursor, has_more); next_cursor is the one to persist."""
     items: list[dict] = []
-    while True:
+    for _ in range(max_pages):
         page = fetch("/v1/sessions", {"updated_after": cursor, "limit": limit})
         items.extend(page.get("items") or [])
-        cursor = page.get("next_cursor") or cursor
+        nxt = page.get("next_cursor") or cursor
         if not page.get("has_more"):
-            return items, cursor, False
+            return items, nxt, False
+        if nxt == cursor:
+            # Buggy server: more pages claimed but the cursor never advances. Stop, don't spin.
+            return items, nxt, True
+        cursor = nxt
+    return items, cursor, True
 
 
 def get_session(fetch, session_key: str) -> dict:

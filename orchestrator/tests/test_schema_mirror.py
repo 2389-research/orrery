@@ -64,6 +64,7 @@ _MIRRORED_TABLES = ["graph_snapshot", "domain_edges", "collections",
 # file costs nothing structurally and everything in latency, so it is exactly the kind
 # of drift that goes unnoticed.
 _MIRRORED_INDEXES = ["idx_document_collections_collection",
+                     "idx_meridian_segments_hash",
                      "idx_entity_sources_entity", "idx_entity_sources_document",
                      "idx_document_domains_path",
                      "idx_norm_review_pending",

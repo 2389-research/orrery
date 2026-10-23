@@ -137,7 +137,8 @@ what, where, and how it connects," which a pure trace viewer can't give.
   ccvault into a module both sources call. Per session build the **agent tree** from `/agents`:
   `session group → per-agent groups (main + each subagent, linked by parent_tool_use_id, nested by
   spawn_depth) → per-agent segment leaves`. Summarize each agent's stream recursively; **memoize each
-  segment's summary by content hash** (reuse unchanged); regenerate the per-agent + session group
+  segment's summary by content hash** (reuse unchanged; `meridian_segments` PK is
+  `(session_key, agent_id, seq)`, with a `segment_hash` column + `idx_meridian_segments_hash` index); regenerate the per-agent + session group
   rollups each bump. Carry meridian's rollups as metadata (don't recompute). Keep the active-work
   branch flag-gated OFF. One doc-tree per meridian session; a fork/resume gets its own tree, shared
   history deduped by `uuid`.

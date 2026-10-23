@@ -16,6 +16,6 @@ def test_meridian_flow_kind_is_agent_report():
 
 def test_meridian_request_defaults():
     from src.models import MeridianIngestRequest
-    r = MeridianIngestRequest(workspace_id="w")
+    r = MeridianIngestRequest()
     assert r.server_url == "http://localhost:8080"
     assert r.name == "Code Sessions"

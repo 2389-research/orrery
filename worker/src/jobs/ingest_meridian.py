@@ -420,8 +420,11 @@ def by_agent_or_ancestors(by_agent: dict, parents: dict) -> set:
 
 async def run_ingest_meridian(job: dict, db_path: str) -> None:
     """Pull changed sessions from meridian and write each as an agent_report tree. The poll
-    cursor advances only after the whole drained page set is processed; a session that hit
-    transient empty model output holds the cursor so it is retried on the next pass."""
+    cursor is whole-drain, process-all, commit-once: `list_changed_sessions` drains ALL pages
+    into memory first, every changed session is then processed, and `meridian_cursor.updated_after`
+    is advanced ONCE at the end. If any session returned "retry" (transient empty model output)
+    the cursor is held, so the whole set is re-pulled and retried on the next pass (already-done
+    sessions are cheap no-ops via the revision watermark)."""
     settings = get_settings()
     relay = Relay.from_settings(settings)
     config = json.loads(job["config"]) if job["config"] else {}

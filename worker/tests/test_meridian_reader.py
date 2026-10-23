@@ -72,6 +72,17 @@ def test_list_changed_sessions_pages_until_has_more_false():
     assert len(items) == 3 and more is False and cur == "c2"
 
 
+def test_list_changed_sessions_stops_on_non_advancing_cursor():
+    calls = []
+
+    def f(path, params=None):
+        calls.append(params)
+        return {"items": [{"session_key": "a/1"}], "next_cursor": "c1", "has_more": True}
+
+    items, cur, more = list_changed_sessions(f, "c1")
+    assert len(calls) == 1 and cur == "c1" and more is True
+
+
 def test_session_key_is_percent_encoded_in_paths():
     f = fake_fetch({("/v1/sessions/c1%2Fs1", ""): {"session_key": "c1/s1"},
                     ("/v1/sessions/c1%2Fs1/agents", ""): {"items": AGENTS, "has_more": False}})

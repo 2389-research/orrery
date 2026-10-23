@@ -720,7 +720,9 @@ async def ingest_meridian(request: MeridianIngestRequest, auth: AuthStore = Depe
 
     Two-phase, like /ingest/ccvault: this get-or-creates the ONE persistent meridian
     collection (plus its `meridian_cursor` row) and enqueues the worker job, which does
-    all model work and advances the `updated_after` cursor after each fully-processed page.
+    all model work. The job drains ALL changed-session pages into memory, processes every
+    session, then advances `meridian_cursor.updated_after` ONCE at the end, holding the cursor
+    if any session returned "retry" so the set is re-pulled on the next pass.
     Idempotent: a repeat POST reuses the collection and resumes from the cursor.
 
     The workspace is chosen by the X-Workspace-Id header (like every ingest route);

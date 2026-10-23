@@ -335,7 +335,8 @@ CREATE TABLE IF NOT EXISTS ccvault_processed (
 );
 -- meridian session ingestion (docs/superpowers specs). meridian_sessions = per-session ledger
 -- (last_revision watermark, group doc, lifecycle); meridian_segments = per-segment memo keyed by
--- content hash; meridian_cursor = per-collection updated_after poll cursor.
+-- (session_key, agent_id, seq) with segment_hash as a column (indexed) compared to detect
+-- unchanged segments; meridian_cursor = per-collection updated_after poll cursor.
 CREATE TABLE IF NOT EXISTS meridian_sessions (
     session_key      TEXT PRIMARY KEY,
     collection_id    TEXT,

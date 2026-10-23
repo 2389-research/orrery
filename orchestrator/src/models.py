@@ -133,6 +133,5 @@ class CcvaultIngestRequest(BaseModel):
 
 class MeridianIngestRequest(BaseModel):
     """Ingest Claude Code sessions from a meridian server into a noosphere (workspace)."""
-    workspace_id: str
     server_url: str = "http://localhost:8080"
     name: str = "Code Sessions"
