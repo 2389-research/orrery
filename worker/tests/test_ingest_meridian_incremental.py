@@ -116,3 +116,18 @@ def test_changed_tail_invalidates_old_leaf_not_duplicates(monkeypatch, test_db):
         assert new_leaf != old_leaf
     finally:
         conn.close()
+
+
+def test_rederive_counters_exclude_invalidated_leaves(monkeypatch, test_db):
+    g = _Growable(tail_small=True)
+    job = _go(monkeypatch, test_db, g)
+    g.append("tail grew", "r-more")
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    conn = get_connection(test_db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM documents WHERE invalid_at IS NOT NULL").fetchone()[0] == 1
+        active = conn.execute("SELECT COUNT(*) FROM documents WHERE invalid_at IS NULL").fetchone()[0]
+        assert conn.execute("SELECT document_count FROM collections").fetchone()[0] == active
+        assert conn.execute("SELECT document_count FROM domains WHERE path='software/auth'").fetchone()[0] == active
+    finally:
+        conn.close()

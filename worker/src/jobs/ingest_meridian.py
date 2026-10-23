@@ -15,6 +15,7 @@ from ..db import get_connection, mark_graph_dirty
 from .meridian_reader import (
     make_fetch, list_changed_sessions, get_session, get_agents, get_records, iter_agent_segments,
 )
+from .upsert_document import _recount_collection
 from .session_featurizer import summarize_segment, summarize_rollup, write_doc, upsert_domain
 
 SESSION_CONTENT_TYPE = "session_intent"
@@ -255,6 +256,12 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
                              (session_key, key[0], key[1]))
         conn.execute("UPDATE meridian_sessions SET last_revision=?, lifecycle=?, updated_at=CURRENT_TIMESTAMP "
                      "WHERE session_key=?", (revision, session.get("lifecycle"), session_key))
+        # invalidations never decrement; recount from active (invalid_at IS NULL) docs
+        _recount_collection(conn, collection_id)
+        conn.execute(
+            "UPDATE domains SET document_count = (SELECT COUNT(*) FROM document_domains dd "
+            "JOIN documents d ON d.id = dd.document_id WHERE dd.domain_path = ? AND d.invalid_at IS NULL) "
+            "WHERE path = ?", (dom, dom))
         conn.commit()
     except Exception:
         conn.rollback()
