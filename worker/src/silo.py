@@ -30,6 +30,7 @@ FLOW_DEFAULT_KIND = {
     "codesum": "neutral_summary", "tracksum": "neutral_summary",
     "pdf": "neutral_summary",
     "ccvault": "agent_report",
+    "meridian": "agent_report",
 }
 
 
