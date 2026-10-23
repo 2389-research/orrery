@@ -352,8 +352,9 @@ CREATE TABLE IF NOT EXISTS meridian_segments (
     seq          INTEGER,
     summary      TEXT,
     leaf_doc_id  TEXT,
-    PRIMARY KEY (session_key, segment_hash)
+    PRIMARY KEY (session_key, agent_id, seq)
 );
+CREATE INDEX IF NOT EXISTS idx_meridian_segments_hash ON meridian_segments(session_key, segment_hash);
 CREATE TABLE IF NOT EXISTS meridian_cursor (
     collection_id TEXT PRIMARY KEY,
     updated_after TEXT

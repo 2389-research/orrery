@@ -106,7 +106,12 @@ def test_backfill_writes_session_agent_and_leaf_docs(monkeypatch, test_db):
         sess = conn.execute("SELECT last_revision, lifecycle, group_doc_id FROM meridian_sessions "
                             "WHERE session_key=?", (SK,)).fetchone()
         assert sess[0] == 2 and sess[1] == "inactive" and sess[2]
-        assert conn.execute("SELECT COUNT(*) FROM meridian_segments").fetchone()[0] == 2
+        segs = conn.execute("SELECT segment_hash, agent_id, seq, leaf_doc_id FROM meridian_segments "
+                            "ORDER BY agent_id").fetchall()
+        assert [(r[1], r[2]) for r in segs] == [("a1", 0), ("main", 0)]
+        leaf_ids = {r[0] for r in conn.execute("SELECT document_id FROM document_collections WHERE role='leaf'")}
+        assert {r[3] for r in segs} == leaf_ids
+        assert all(len(r[0]) == 64 for r in segs)
         assert conn.execute("SELECT updated_after FROM meridian_cursor WHERE collection_id=?",
                             (cid,)).fetchone()[0] == "cur-1"
         assert {r[0] for r in conn.execute("SELECT source_path FROM documents")} == {f"meridian:{SK}"}
@@ -147,11 +152,24 @@ def test_missing_parent_link_flags_not_guesses(monkeypatch, test_db):
 
 
 def test_empty_model_output_does_not_watermark(monkeypatch, test_db):
-    _, job = _setup(monkeypatch, test_db, _fake_fetch([MAIN, SUB], RECS), relay=_EmptyRelay)
+    cid, job = _setup(monkeypatch, test_db, _fake_fetch([MAIN, SUB], RECS), relay=_EmptyRelay)
     asyncio.run(mod.run_ingest_meridian(job, test_db))
     conn = get_connection(test_db)
     try:
+        assert conn.execute("SELECT COUNT(*) FROM meridian_cursor WHERE collection_id=?", (cid,)).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM meridian_sessions").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_identical_segment_text_keeps_one_row_per_position(monkeypatch, test_db):
+    _, job = _setup(monkeypatch, test_db, _fake_fetch([MAIN, SUB], [
+        _rec("m1", "main", "same", "2026-10-01T00:00:01Z", tool_use_id="tu9"),
+        _rec("s1", "a1", "same", "2026-10-01T00:00:02Z")]))
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    conn = get_connection(test_db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM meridian_segments").fetchone()[0] == 2
     finally:
         conn.close()

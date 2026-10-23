@@ -27,8 +27,10 @@ def _session_title(session_key: str, session: dict) -> str:
 
 
 def _agent_title(root: str, agent: dict) -> str:
-    kind = agent.get("agent_type") or ("main" if agent["agent_id"] == "main" else "agent")
-    return f"{root} · {kind} {agent['agent_id'][:8]}"
+    # FULL agent_id: titles are the parent_path linkage key, so they must be collision-free.
+    if agent["agent_id"] == "main":
+        return f"{root} · main"
+    return f"{root} · {agent.get('agent_type') or 'agent'} {agent['agent_id']}"
 
 
 def _tool_use_owner(records: list[dict]) -> dict:
@@ -173,7 +175,7 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
                 leaf_id = write_doc(conn, collection_id, s, SESSION_CONTENT_TYPE, "leaf", titles[aid],
                                     "classified", leaf_title, dom, source_path=source_path)
                 conn.execute(
-                    "INSERT OR IGNORE INTO meridian_segments (session_key, segment_hash, agent_id, seq, "
+                    "INSERT INTO meridian_segments (session_key, segment_hash, agent_id, seq, "
                     "summary, leaf_doc_id) VALUES (?, ?, ?, ?, ?, ?)",
                     (session_key, seg["content_hash"], aid, seg["seq"], s, leaf_id))
         conn.execute(
