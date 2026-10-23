@@ -171,3 +171,21 @@ def test_anchor_requires_80_percent():
     out = resolve_work_units([agent("main")], session(), recs)
     assert out["main"]["anchor_dir"] == f"{GH}/meadow"
     assert out["main"]["anchor_share"] == 1.0
+
+
+def test_inherited_session_pr_does_not_override_subagent_own_repo():
+    a, b = f"{GH}/alpha", f"{GH}/beta"
+    recs = [rec("main", a, root=a, remote="github.com/o/alpha") for _ in range(3)]
+    recs += [rec("sub1", b, root=b, remote="github.com/o/beta") for _ in range(3)]
+    sess = session(a, prs=["https://github.com/o/alpha/pull/1"])
+    out = resolve_work_units([agent("main"), agent("sub1", parent="main")], sess, recs)
+    assert out["main"]["key"] == "github.com/o/alpha"
+    assert out["sub1"]["key"] == "github.com/o/beta"
+    assert out["sub1"]["source"] == "git_remote"
+
+
+def test_malformed_git_state_root_is_skipped():
+    r = rec("main", f"{GH}/meadow")
+    r["raw"]["serverClassifierContext"] = {"context": {"git_state": {"root": 123}}}
+    out = resolve_work_units([agent("main")], session(f"{GH}/meadow"), [r])
+    assert out["main"]["key"] == "meadow"

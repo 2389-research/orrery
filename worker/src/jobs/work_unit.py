@@ -60,7 +60,7 @@ def _ancestors(path):
 
 def _git_state(raw):
     gs = (((raw.get("serverClassifierContext") or {}).get("context") or {}).get("git_state"))
-    if not isinstance(gs, dict) or not gs.get("root"):
+    if not isinstance(gs, dict) or not isinstance(gs.get("root"), str) or not gs["root"]:
         return None, None
     origin = ((gs.get("visibility") or {}).get("origin")) or {}
     remote = None
@@ -121,12 +121,16 @@ def _root_for(path, roots):
 
 
 def _pr_info(agent, session):
-    for src in (agent, session):
+    """-> (links, repo key, own). own=False when the PR came from the session fallback."""
+    # Falling back from the agent's pr_links to the session's is intentional: a stub
+    # agent with no evidence of its own inherits the session's PR repo. The caller
+    # only lets an inherited PR set the key when the agent has no conflicting identity.
+    for src, own in ((agent, True), (session, False)):
         links = (((src or {}).get("rollup") or {}).get("outputs") or {}).get("pr_links") or []
         norm = [n for n in (_norm_pr(x) for x in links) if n]
         if norm:
-            return [n[0] for n in norm], norm[0][1]
-    return [], None
+            return [n[0] for n in norm], norm[0][1], own
+    return [], None, True
 
 
 def _ctx(src, field):
@@ -171,7 +175,7 @@ def resolve_work_units(agents, session, records):
         aid = ag["agent_id"]
         raws = by_agent.get(aid, [])
         cwds = [r["cwd"].rstrip("/") or "/" for r in raws if r.get("cwd")]
-        prs, pr_key = _pr_info(ag, session)
+        prs, pr_key, pr_own = _pr_info(ag, session)
         branch = _ctx(ag, "git_branch") or _ctx(session, "git_branch")
         is_main = aid == main_id
 
@@ -205,6 +209,10 @@ def resolve_work_units(agents, session, records):
         else:
             base = posixpath.basename(anchor.rstrip("/")) if anchor else ""
             key, source, remote, repo_root, name = (base or "unresolved"), "folder", None, None, (base or None)
+        # An inherited (session) PR must not override a subagent's own, different repo.
+        # The main agent IS the session, so its fallback counts as its own.
+        if pr_key and not (pr_own or is_main) and primary_root and remote != pr_key:
+            pr_key = None
         if pr_key:
             # A root whose known remote differs from the PR repo is a different repo:
             # PR still names the unit, but the cwd-relative subproject doesn't apply.
