@@ -34,3 +34,18 @@ def test_enqueue_failure_removes_created_collection_and_cursor(test_client, test
     conn = test_store.conn
     assert conn.execute("SELECT COUNT(*) FROM meridian_cursor").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 0
+
+
+def test_work_units_route_enqueues_backfill_job(test_client, test_store):
+    cid = test_client.post("/ingest/meridian", json={"server_url": "http://x"}).json()["collection_id"]
+    r = test_client.post("/ingest/meridian/work-units", json={"server_url": "http://x"})
+    assert r.status_code == 202 and set(r.json()) == {"job_id", "collection_id"}
+    assert r.json()["collection_id"] == cid
+    row = test_store.conn.execute("SELECT config FROM jobs WHERE type='work_unit_backfill'").fetchone()
+    assert row and set(json.loads(row[0])) == {"collection_id", "server_url"}
+
+
+def test_work_units_route_404_without_meridian_collection(test_client, test_store):
+    r = test_client.post("/ingest/meridian/work-units", json={"server_url": "http://x"})
+    assert r.status_code == 404
+    assert test_store.conn.execute("SELECT COUNT(*) FROM jobs WHERE type='work_unit_backfill'").fetchone()[0] == 0

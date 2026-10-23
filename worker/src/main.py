@@ -139,6 +139,9 @@ async def handle_job(job: dict, db_path: str) -> None:
     elif job["type"] == "ingest_meridian":
         from .jobs.ingest_meridian import run_ingest_meridian
         await run_ingest_meridian(job, db_path)
+    elif job["type"] == "work_unit_backfill":
+        from .jobs.work_unit_backfill import run_work_unit_backfill
+        await run_work_unit_backfill(job, db_path)
     elif job["type"] == "ingest_pdf":
         from .jobs.ingest_pdf import run_ingest_pdf
         await run_ingest_pdf(job, db_path)

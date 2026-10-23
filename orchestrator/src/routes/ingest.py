@@ -779,3 +779,28 @@ async def ingest_meridian(request: MeridianIngestRequest, auth: AuthStore = Depe
         store.close()
 
     return {"job_id": job_id, "collection_id": collection_id}
+
+
+@router.post("/ingest/meridian/work-units", status_code=status.HTTP_202_ACCEPTED)
+async def backfill_meridian_work_units(request: MeridianIngestRequest,
+                                       auth: AuthStore = Depends(require_writable)):
+    """Enqueue a metadata-only backfill that tags existing meridian group docs with `work_unit`.
+
+    Runs only over an already-ingested meridian collection (never creates one); the worker
+    re-pulls session records from meridian and does no model work.
+    """
+    store = auth.store
+    try:
+        existing = store.collections.get_by_path(request.name)
+        if not existing or existing.get("kind") != "meridian":
+            raise HTTPException(status_code=404, detail="No meridian collection in this workspace")
+        collection_id = existing["id"]
+        job_id = str(uuid.uuid4())
+        store.jobs.create(job_id, "work_unit_backfill", collection_id, {
+            "collection_id": collection_id,
+            "server_url": request.server_url,
+        })
+    finally:
+        store.close()
+
+    return {"job_id": job_id, "collection_id": collection_id}
