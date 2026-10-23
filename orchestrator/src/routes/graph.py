@@ -134,7 +134,7 @@ def _collection_with_domain(conn, collection_id: str) -> dict:
     Shared by the collection-structure and collection-summary endpoints."""
     from fastapi import HTTPException
     coll = conn.execute(
-        "SELECT id, name, path, document_count, kind FROM collections WHERE id = ?", (collection_id,)
+        "SELECT id, name, path, document_count, kind, remote_url FROM collections WHERE id = ?", (collection_id,)
     ).fetchone()
     if not coll:
         raise HTTPException(status_code=404, detail="collection not found")
@@ -147,7 +147,10 @@ def _collection_with_domain(conn, collection_id: str) -> dict:
     ).fetchone()
     return {"id": coll["id"], "name": coll["name"], "kind": coll["kind"],
             "domain": dom["domain_path"] if dom else None,
-            "document_count": coll["document_count"]}
+            "document_count": coll["document_count"],
+            # RAW git remote (not normalized) — the repo side of the session<->repo
+            # work-unit join; the consumer normalizes it to match work_unit.key.
+            "remote_url": coll["remote_url"]}
 
 
 @router.get("/collections/{collection_id}/structure")

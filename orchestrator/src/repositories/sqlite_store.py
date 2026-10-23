@@ -43,6 +43,20 @@ def _exec_in_slice(conn, in_slice: bool, sql: str):
         raise
 
 
+def _facets_from_metadata(raw) -> dict:
+    """Curated facets from a documents.metadata JSON string. Only `work_unit` is
+    copied out; absent/malformed/non-dict metadata yields {}."""
+    if not raw:
+        return {}
+    try:
+        meta = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if isinstance(meta, dict) and meta.get("work_unit") is not None:
+        return {"work_unit": meta["work_unit"]}
+    return {}
+
+
 class SQLiteDocumentRepository(DocumentRepository):
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
@@ -69,6 +83,7 @@ class SQLiteDocumentRepository(DocumentRepository):
             content_type=row["content_type"] or "text",
             thumbnail_path=row["thumbnail_path"] if "thumbnail_path" in row.keys() else None,
             silo_id=row["silo_id"] if "silo_id" in row.keys() else None,
+            facets=_facets_from_metadata(row["metadata"] if "metadata" in row.keys() else None),
         )
 
     def get_titles(self, ids):
@@ -125,7 +140,8 @@ class SQLiteDocumentRepository(DocumentRepository):
         result = []
         for r in rows:
             doc = Document(id=r["id"], title=r["title"], status=r["status"], created_at=r["created_at"],
-                          content_type=r["content_type"] or "text", source_path=r["source_path"])
+                          content_type=r["content_type"] or "text", source_path=r["source_path"],
+                          facets=_facets_from_metadata(r["metadata"] if "metadata" in r.keys() else None))
             doc.domains = r["domains"].split(",") if r["domains"] else []
             result.append(doc)
         return result

@@ -366,6 +366,9 @@ async def get_document(title: str) -> str:
         lines.append(f"Image URL: /images/{doc['id']}")
     lines.append(f"Entities: {len(reader['entities'])} | Mentions: {reader['total_mentions']}")
     lines.append(f"Domains: {', '.join(doc['domains'])}")
+    wu = (match.get("facets") or {}).get("work_unit")
+    if isinstance(wu, dict) and wu.get("key"):
+        lines.append(f"Work unit: {wu['key']} [{wu.get('source') or 'unknown'}]")
     lines.append("\n--- Content ---")
     text = "".join(seg["text"] for seg in reader["segments"])
     lines.append(text[:2000])

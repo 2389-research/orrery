@@ -35,6 +35,10 @@ class Document:
     # is NOT a field here: it's a property of the SILO, resolved live via the
     # `silo_kind` view at read time, never copied onto the document.
     silo_id: str | None = None
+    # Curated, source-specific DERIVED attributes copied out of documents.metadata
+    # (never the raw blob). `work_unit` is the first key; the key is absent for docs
+    # that don't have one, so facets is {} for vault/pdf/repo docs.
+    facets: dict = field(default_factory=dict)
 
 
 @dataclass
