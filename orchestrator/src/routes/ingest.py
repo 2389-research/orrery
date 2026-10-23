@@ -14,7 +14,7 @@ from ..config import get_settings
 from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..models import (IngestResult, DirectoryIngestRequest, RepoIngestRequest,
                       TrackerRunsIngestRequest, TextIngestRequest, CcvaultIngestRequest,
-                      PdfIngestRequest)
+                      PdfIngestRequest, MeridianIngestRequest)
 from ..pipeline.chunker import chunk_document
 from ..pipeline.excerpt import build_classification_excerpt
 from ..pipeline.classifier import classify_document
@@ -708,6 +708,73 @@ async def ingest_ccvault(request: CcvaultIngestRequest, auth: AuthStore = Depend
             "collection_label": request.label,
             "spec_id": spec_id,
         })
+    finally:
+        store.close()
+
+    return {"job_id": job_id, "collection_id": collection_id}
+
+
+@router.post("/ingest/meridian", status_code=status.HTTP_202_ACCEPTED)
+async def ingest_meridian(request: MeridianIngestRequest, auth: AuthStore = Depends(require_writable)):
+    """Backfill meridian code sessions into the target workspace as agent_report trees.
+
+    Two-phase, like /ingest/ccvault: this get-or-creates the ONE persistent meridian
+    collection (plus its `meridian_cursor` row) and enqueues the worker job, which does
+    all model work. The job drains ALL changed-session pages into memory, processes every
+    session, then advances `meridian_cursor.updated_after` ONCE at the end, holding the cursor
+    if any session returned "retry" so the set is re-pulled on the next pass.
+    Idempotent: a repeat POST reuses the collection and resumes from the cursor.
+
+    The workspace is chosen by the X-Workspace-Id header (like every ingest route);
+    `request.workspace_id` is not used for routing.
+    """
+    store = auth.store
+    try:
+        created = False
+        existing = store.collections.get_by_path(request.name)
+        if existing:
+            collection_id = existing["id"]
+        else:
+            collection_id = str(uuid.uuid4())
+            try:
+                store.collections.create(collection_id, request.name, request.name,
+                                         request.server_url, kind="meridian")
+                created = True
+            except sqlite3.IntegrityError:
+                # get_by_path isn't a lock; a concurrent create wins the UNIQUE(path) race.
+                existing = store.collections.get_by_path(request.name)
+                if not existing:
+                    raise
+                collection_id = existing["id"]
+
+        # Reuse the workspace's general spec if present, else seed the built-in text one.
+        spec = store.specs.get_general()
+        if spec:
+            spec_id = spec.id
+        else:
+            spec_id = str(uuid.uuid4())
+            store.specs.create(spec_id, None, 1, GENERAL_TEXT_SPEC)
+
+        store.conn.execute(
+            "INSERT OR IGNORE INTO meridian_cursor (collection_id, updated_after) VALUES (?, NULL)",
+            (collection_id,))
+        store.conn.commit()
+
+        job_id = str(uuid.uuid4())
+        try:
+            store.jobs.create(job_id, "ingest_meridian", collection_id, {
+                "collection_id": collection_id,
+                "spec_id": spec_id,
+                "server_url": request.server_url,
+            })
+        except Exception:
+            # Only undo what this request created, so the request is retryable.
+            if created:
+                store.conn.execute("DELETE FROM meridian_cursor WHERE collection_id = ?",
+                                   (collection_id,))
+                store.conn.commit()
+                store.collections.delete(collection_id)
+            raise
     finally:
         store.close()
 

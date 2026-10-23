@@ -56,12 +56,15 @@ _MIRRORED_TABLES = ["graph_snapshot", "domain_edges", "collections",
                     # ccvault ingestion ledgers: the worker's ingest_ccvault job WRITES
                     # the dedup watermarks and the orchestrator's /ingest/ccvault route
                     # reads them (get-or-create + no-op re-ingest) — cross-service surface.
-                    "ccvault_sessions_seen", "ccvault_processed"]
+                    "ccvault_sessions_seen", "ccvault_processed",
+                    # meridian session ingestion ledgers (worker writes, orchestrator route reads)
+                    "meridian_sessions", "meridian_segments", "meridian_cursor"]
 
 # Indexes on that surface. Table DDL alone is not enough: an index dropped from one
 # file costs nothing structurally and everything in latency, so it is exactly the kind
 # of drift that goes unnoticed.
 _MIRRORED_INDEXES = ["idx_document_collections_collection",
+                     "idx_meridian_segments_hash",
                      "idx_entity_sources_entity", "idx_entity_sources_document",
                      "idx_document_domains_path",
                      "idx_norm_review_pending",

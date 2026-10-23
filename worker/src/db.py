@@ -333,6 +333,33 @@ CREATE TABLE IF NOT EXISTS ccvault_processed (
     document_id TEXT,
     ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+-- meridian session ingestion (docs/superpowers specs). meridian_sessions = per-session ledger
+-- (last_revision watermark, group doc, lifecycle); meridian_segments = per-segment memo keyed by
+-- (session_key, agent_id, seq) with segment_hash as a column (indexed) compared to detect
+-- unchanged segments; meridian_cursor = per-collection updated_after poll cursor.
+CREATE TABLE IF NOT EXISTS meridian_sessions (
+    session_key      TEXT PRIMARY KEY,
+    collection_id    TEXT,
+    last_revision    INTEGER,
+    group_doc_id     TEXT,
+    lifecycle        TEXT,
+    classified_final INTEGER DEFAULT 0,
+    updated_at       TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS meridian_segments (
+    session_key  TEXT,
+    segment_hash TEXT,
+    agent_id     TEXT,
+    seq          INTEGER,
+    summary      TEXT,
+    leaf_doc_id  TEXT,
+    PRIMARY KEY (session_key, agent_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_meridian_segments_hash ON meridian_segments(session_key, segment_hash);
+CREATE TABLE IF NOT EXISTS meridian_cursor (
+    collection_id TEXT PRIMARY KEY,
+    updated_after TEXT
+);
 """
 
 # Unifies the two silo tables so a consumer resolves a document's provenance kind with

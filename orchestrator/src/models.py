@@ -129,3 +129,9 @@ class CcvaultIngestRequest(BaseModel):
     path: str
     label: str = "ccvault"
     provenance_kind: str | None = None  # override; defaults to agent_report for a ccvault silo
+
+
+class MeridianIngestRequest(BaseModel):
+    """Ingest Claude Code sessions from a meridian server into a noosphere (workspace)."""
+    server_url: str = "http://localhost:8080"
+    name: str = "Code Sessions"

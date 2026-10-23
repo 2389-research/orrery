@@ -136,6 +136,9 @@ async def handle_job(job: dict, db_path: str) -> None:
     elif job["type"] == "ingest_ccvault":
         from .jobs.ingest_ccvault import run_ingest_ccvault
         await run_ingest_ccvault(job, db_path)
+    elif job["type"] == "ingest_meridian":
+        from .jobs.ingest_meridian import run_ingest_meridian
+        await run_ingest_meridian(job, db_path)
     elif job["type"] == "ingest_pdf":
         from .jobs.ingest_pdf import run_ingest_pdf
         await run_ingest_pdf(job, db_path)
