@@ -3,7 +3,6 @@
 # ABOUTME: a 'group' doc (session rollup) over 'leaf' docs (segments). Graph-using segments are
 # ABOUTME: leaves anchored by entity-id links (active_work); neutral segments are extracted.
 
-import hashlib
 import json
 import os
 import uuid
@@ -13,6 +12,7 @@ from ..classifier import classify_document
 from ..config import get_settings
 from ..db import get_connection, mark_graph_dirty
 from .ccvault_reader import open_archive, list_sessions, iter_segments
+from .session_featurizer import summarize_segment, summarize_rollup, write_doc, upsert_domain
 
 # Dedicated content types so extract_batch's session sweep never collides with the
 # repo/tracker `code_intent` sweep. active_work leaves are never extracted (they're linked
@@ -23,26 +23,9 @@ ACTIVE_WORK_CONTENT_TYPE = "active_work"
 # primary_domain, and we must not crash the whole archive or write a null-path domain.
 _UNCLASSIFIED_DOMAIN = "unclassified/needs-review"
 
-_SEGMENT_INSTRUCTIONS = (
-    "You are summarizing ONE SEGMENT of an AI coding-agent session for a knowledge graph. Write a "
-    "NEUTRAL, factual summary of what happened in THIS segment only: what was examined / done, the "
-    "files / systems / topics / entities touched, and any finding. Describe — do not evaluate, "
-    "praise, or criticize. No first person. Do not reference other segments or judge overall "
-    "success. Do not invent detail absent from the segment. Two or three sentences."
-)
-
-_ROLLUP_INSTRUCTIONS = (
-    "You are writing the top-level NEUTRAL summary of an AI coding-agent session for a knowledge "
-    "graph, from the per-segment summaries below. State what the session set out to do, the areas / "
-    "systems / topics it worked across, and its outcome. Describe — do not evaluate or praise. No "
-    "first person. A few short paragraphs."
-)
-
-
-def _parent_of(domain_path):
-    if not domain_path or "/" not in domain_path:
-        return None
-    return domain_path.rsplit("/", 1)[0]
+def _session_context(meta: dict, rollup: bool = False) -> str:
+    ctx = f"Session project: {meta.get('project_path') or '(unknown)'}"
+    return f"{ctx}\nStarted: {meta.get('started_at')}" if rollup else ctx
 
 
 def _session_title(meta: dict) -> str:
@@ -50,55 +33,6 @@ def _session_title(meta: dict) -> str:
     proj = meta.get("project_path") or ""
     base = os.path.basename(proj.rstrip("/")) if proj else ""
     return f"Session {sid[:8]} — {base}" if base else f"Session {sid[:8]}"
-
-
-async def _summarize_segment(relay, model, meta: dict, segment: dict) -> str:
-    prompt = (
-        f"{_SEGMENT_INSTRUCTIONS}\n\n"
-        f"Session project: {meta.get('project_path') or '(unknown)'}\n\n"
-        f"SEGMENT (chronological turns):\n{segment['text'][:8000]}\n\n"
-        "Neutral segment summary:"
-    )
-    resp = await relay.complete(model=model, max_tokens=384,
-                                messages=[{"role": "user", "content": prompt}])
-    return (resp.text or "").strip()
-
-
-async def _summarize_rollup(relay, model, meta: dict, segment_summaries: list[str]) -> str:
-    joined = "\n".join(f"- {s}" for s in segment_summaries)
-    prompt = (
-        f"{_ROLLUP_INSTRUCTIONS}\n\n"
-        f"Session project: {meta.get('project_path') or '(unknown)'}\n"
-        f"Started: {meta.get('started_at')}\n\n"
-        f"PER-SEGMENT SUMMARIES (in order):\n{joined}\n\n"
-        "Neutral session summary:"
-    )
-    resp = await relay.complete(model=model, max_tokens=1024,
-                                messages=[{"role": "user", "content": prompt}])
-    return (resp.text or "").strip()
-
-
-def _write_doc(conn, collection_id, content, content_type, role, parent_path, status, title, dom):
-    """Write one collection doc (group or leaf) + its chunk + collection membership + domain.
-    emits_cooccurrence is always 0 — a ccvault doc is an agent_report account, not neutral
-    co-occurrence evidence (the silo gate also excludes it). Returns the doc id."""
-    doc_id = str(uuid.uuid4())
-    ch = hashlib.sha256(content.encode()).hexdigest()
-    conn.execute(
-        "INSERT INTO documents (id, title, content, content_hash, source_path, content_type, "
-        "status, silo_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, title, content, ch, f"ccvault:{title}", content_type, status, collection_id))
-    conn.execute(
-        "INSERT INTO chunks (id, document_id, chunk_index, text, offset, length) VALUES (?, ?, 0, ?, 0, ?)",
-        (str(uuid.uuid4()), doc_id, content, len(content)))
-    conn.execute(
-        "INSERT INTO document_collections (document_id, collection_id, parent_path, role, "
-        "emits_cooccurrence) VALUES (?, ?, ?, ?, 0)", (doc_id, collection_id, parent_path, role))
-    conn.execute("UPDATE collections SET document_count = document_count + 1 WHERE id = ?", (collection_id,))
-    conn.execute("INSERT INTO document_domains (document_id, domain_path, is_primary, confidence) "
-                 "VALUES (?, ?, 1, 1.0)", (doc_id, dom))
-    conn.execute("UPDATE domains SET document_count = document_count + 1 WHERE path = ?", (dom,))
-    return doc_id
 
 
 def _resolve_entities(conn, entity_ids) -> list[str]:
@@ -117,11 +51,6 @@ def _resolve_entities(conn, entity_ids) -> list[str]:
             f"SELECT id FROM entities WHERE id IN ({ph}) AND invalid_at IS NULL", batch).fetchall()
         out.extend(r[0] for r in rows)
     return out
-
-
-def _upsert_domain(conn, dom):
-    conn.execute("INSERT OR IGNORE INTO domains (id, path, parent_path, document_count) VALUES (?, ?, ?, 0)",
-                 (str(uuid.uuid4()), dom, _parent_of(dom)))
 
 
 async def run_ingest_ccvault(job: dict, db_path: str) -> None:
@@ -170,11 +99,11 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
             # Leaves: summarize each segment node-locally (evidence flows up).
             leaves = []  # (segment, summary)
             for seg in segments:
-                s = await _summarize_segment(relay, sum_model, meta, seg)
+                s = await summarize_segment(relay, sum_model, _session_context(meta), seg["text"])
                 if s:
                     leaves.append((seg, s))
             # Root/group: roll the session up from its segment summaries.
-            rollup = await _summarize_rollup(relay, sum_model, meta, [s for _, s in leaves]) if leaves else ""
+            rollup = await summarize_rollup(relay, sum_model, _session_context(meta, rollup=True), [s for _, s in leaves]) if leaves else ""
             if not leaves or not rollup:
                 # Transient EMPTY MODEL OUTPUT (local models can return empty .text without
                 # raising). Do NOT watermark — retry next pass rather than dropping the session.
@@ -188,10 +117,10 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
             dom = cls.get("primary_domain") or _UNCLASSIFIED_DOMAIN
             if dom not in taxonomy:
                 taxonomy.append(dom)
-            _upsert_domain(conn, dom)
+            upsert_domain(conn, dom)
 
             # group = the session rollup; leaves = its segments (parent_path = the group title).
-            _write_doc(conn, collection_id, rollup, SESSION_CONTENT_TYPE, "group",
+            write_doc(conn, collection_id, rollup, SESSION_CONTENT_TYPE, "group",
                        None, "classified", title, dom)
             for i, (seg, s) in enumerate(leaves):
                 leaf_title = f"{title} · part {i + 1}"
@@ -200,7 +129,7 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
                 if resolved and unseen:
                     # Graph-using segment → active_work leaf: entity-anchored, terminal status
                     # (never re-extracted), still chunked for semantic recall.
-                    leaf_id = _write_doc(conn, collection_id, s, ACTIVE_WORK_CONTENT_TYPE, "leaf",
+                    leaf_id = write_doc(conn, collection_id, s, ACTIVE_WORK_CONTENT_TYPE, "leaf",
                                          title, "extracted", leaf_title, dom)
                     for eid in resolved:
                         conn.execute("INSERT INTO entity_sources (entity_id, document_id, extraction_pass) "
@@ -209,7 +138,7 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
                 else:
                     # Neutral segment (or a graph segment whose ids don't resolve here) → a
                     # session_intent leaf that extract_batch will mine for entities.
-                    leaf_id = _write_doc(conn, collection_id, s, SESSION_CONTENT_TYPE, "leaf",
+                    leaf_id = write_doc(conn, collection_id, s, SESSION_CONTENT_TYPE, "leaf",
                                          title, "classified", leaf_title, dom)
                 # Record every query_id this segment touched (dedup key), pointing at its leaf.
                 for q in seg["query_ids"]:
