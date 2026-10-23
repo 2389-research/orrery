@@ -53,7 +53,7 @@ async def summarize_rollup(relay, model, context: str, segment_summaries: list[s
 
 
 def write_doc(conn, collection_id, content, content_type, role, parent_path, status, title, dom,
-              metadata: dict | None = None):
+              metadata: dict | None = None, source_path: str | None = None):
     """Write one collection doc (group or leaf) + its chunk + collection membership + domain.
     emits_cooccurrence is always 0 — a ccvault doc is an agent_report account, not neutral
     co-occurrence evidence (the silo gate also excludes it). Returns the doc id."""
@@ -62,7 +62,7 @@ def write_doc(conn, collection_id, content, content_type, role, parent_path, sta
     conn.execute(
         "INSERT INTO documents (id, title, content, content_hash, source_path, content_type, "
         "status, silo_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, title, content, ch, f"ccvault:{title}", content_type, status, collection_id,
+        (doc_id, title, content, ch, source_path or f"ccvault:{title}", content_type, status, collection_id,
          json.dumps(metadata) if metadata is not None else None))
     conn.execute(
         "INSERT INTO chunks (id, document_id, chunk_index, text, offset, length) VALUES (?, ?, 0, ?, 0, ?)",
