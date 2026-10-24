@@ -16,6 +16,12 @@ def silo_match(entity_col: str) -> str:
             f"WHERE es.entity_id = {entity_col} AND d.silo_id IS ?)")
 
 
+def kind_match(entity_col: str) -> str:
+    return (f"EXISTS (SELECT 1 FROM entity_sources es JOIN documents d ON d.id = es.document_id "
+            f"JOIN silo_kind sk ON sk.silo_id = d.silo_id "
+            f"WHERE es.entity_id = {entity_col} AND sk.kind IS ?)")
+
+
 # Provenance kind: a property of the SOURCE (the silo), not the document — a user can
 # re-classify a source later, and a per-doc copy would go stale. Resolved by consumers
 # via the silo_kind view (documents.silo_id -> silo_kind.kind), never materialized
