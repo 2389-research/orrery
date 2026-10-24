@@ -218,7 +218,7 @@ def _run_batch_store(store, results):
                 for c in entities:
                     if (c.canonical_name == singular and c.type == e.type
                             and c.id != e.id and c.id not in gone
-                            and (not e.kind_ids or (c.kind_ids and c.kind_ids & e.kind_ids))):
+                            and _kinds_overlap(e.kind_ids, c.kind_ids)):
                         target = c
                         break
             if not target:

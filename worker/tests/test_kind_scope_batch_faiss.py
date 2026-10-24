@@ -132,3 +132,39 @@ def test_within_silo_fuzzy_still_auto_merges(test_db):
     assert _count(conn) == 1
     assert _issues(conn) == []
     conn.close()
+
+
+def test_null_silo_exact_vs_kinded_not_auto_merged(test_db):
+    conn = get_connection(test_db)
+    _silo(conn, "A", "human_vault")
+    _add_entity(conn, "a", "http client", "A", stored_vec=VEC["base"])
+    _add_entity(conn, "b", "http client", None)  # loose-upload pool
+    with patch.object(norm, "embed_entities", _embedder({"http client": VEC["base"]})):
+        res = norm.run_batch_normalization(conn)
+    assert res["embedding_merges"] == 0
+    assert _count(conn) == 2
+    assert _issues(conn) == [("merge", "pending")]
+    conn.close()
+
+
+def test_null_silo_plural_vs_kinded_not_collapsed(test_db):
+    conn = get_connection(test_db)
+    _silo(conn, "A", "human_vault")
+    _add_entity(conn, "sing", "agent", "A", stored_vec=VEC["base"])
+    _add_entity(conn, "plur", "agents", None)
+    with patch.object(norm, "embed_entities", _embedder({"agents": VEC["base"]})):
+        res = norm.run_batch_normalization(conn)
+    assert res["plural_merges"] == 0
+    assert _count(conn) == 2
+    conn.close()
+
+
+def test_two_null_silo_exact_still_merge(test_db):
+    conn = get_connection(test_db)
+    _add_entity(conn, "a", "http client", None, stored_vec=VEC["base"])
+    _add_entity(conn, "b", "http client", None)
+    with patch.object(norm, "embed_entities", _embedder({"http client": VEC["base"]})):
+        res = norm.run_batch_normalization(conn)
+    assert res["embedding_merges"] == 1
+    assert _count(conn) == 1
+    conn.close()

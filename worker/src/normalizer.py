@@ -97,15 +97,21 @@ def _silos_overlap(a: set, b: set) -> bool:
     return bool(a & b)
 
 
+# Sentinel kind for sources in documents with silo_id IS NULL (the loose-upload pool):
+# silo-less data only overlaps other silo-less data, never a real kind.
+NOSILO_KIND = "__nosilo__"
+
+
 def _entity_kind_set(conn: sqlite3.Connection, entity_id: str) -> set:
     """All distinct provenance kinds an entity is sourced under (entity_sources ->
     documents -> silo_kind). Empty when no source resolves to a silo with a kind row."""
     rows = conn.execute(
-        "SELECT DISTINCT sk.kind FROM entity_sources es "
+        "SELECT DISTINCT CASE WHEN d.silo_id IS NULL THEN ? ELSE sk.kind END "
+        "FROM entity_sources es "
         "JOIN documents d ON d.id = es.document_id "
-        "JOIN silo_kind sk ON sk.silo_id = d.silo_id "
+        "LEFT JOIN silo_kind sk ON sk.silo_id = d.silo_id "
         "WHERE es.entity_id = ?",
-        (entity_id,)
+        (NOSILO_KIND, entity_id)
     ).fetchall()
     return {r[0] for r in rows}
 
@@ -248,11 +254,15 @@ def run_batch_normalization(conn: sqlite3.Connection) -> dict:
                 # wildcard (mirrors _kinds_overlap), so fall back to an unscoped lookup.
                 plural_kinds = _entity_kind_set(conn, eid)
                 if plural_kinds:
-                    for k in sorted(plural_kinds):
+                    for k in sorted(plural_kinds, key=str):
+                        # sentinel bucket = null-silo sources, which kind_match's inner
+                        # join on silo_kind can't see; match them via silo_match(None).
+                        frag, arg = (silo_match('e.id'), None) if k == NOSILO_KIND \
+                            else (kind_match('e.id'), k)
                         row = conn.execute(
                             "SELECT e.id FROM entities e WHERE e.canonical_name = ? AND e.type = ? "
-                            f"AND e.invalid_at IS NULL AND e.id != ? AND {kind_match('e.id')}",
-                            (singular, etype, eid, k)
+                            f"AND e.invalid_at IS NULL AND e.id != ? AND {frag}",
+                            (singular, etype, eid, arg)
                         ).fetchone()
                         if row:
                             target = row

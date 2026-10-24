@@ -113,3 +113,33 @@ def test_within_silo_fuzzy_still_auto_merges(test_store):
     assert res["embedding_merges"] == 1
     assert test_store.entities.count() == 1
     assert _issues(test_store) == []
+
+
+def test_null_silo_exact_vs_kinded_not_auto_merged(test_store):
+    _setup(test_store, "human_vault", "human_vault")
+    _make_entity(test_store, "doc-a", "a", "http client", "A")
+    _make_entity(test_store, "doc-b", "b", "http client", None)  # loose-upload pool
+    with patch.object(norm, "embed_entities", _embedder({"http client": VEC["base"]})):
+        res = norm.run_batch_normalization(test_store)
+    assert res["embedding_merges"] == 0
+    assert test_store.entities.count() == 2
+    assert _issues(test_store) == [("merge", "pending")]
+
+
+def test_null_silo_plural_vs_kinded_not_collapsed(test_store):
+    _setup(test_store, "human_vault", "human_vault")
+    _make_entity(test_store, "doc-s", "sing", "agent", "A")
+    _make_entity(test_store, "doc-p", "plur", "agents", None)
+    with patch.object(norm, "embed_entities", _embedder({"agent": VEC["base"], "agents": VEC["base"]})):
+        res = norm.run_batch_normalization(test_store)
+    assert res["plural_merges"] == 0
+    assert test_store.entities.count() == 2
+
+
+def test_two_null_silo_exact_still_merge(test_store):
+    _make_entity(test_store, "doc-a", "a", "http client", None)
+    _make_entity(test_store, "doc-b", "b", "http client", None)
+    with patch.object(norm, "embed_entities", _embedder({"http client": VEC["base"]})):
+        res = norm.run_batch_normalization(test_store)
+    assert res["embedding_merges"] == 1
+    assert test_store.entities.count() == 1

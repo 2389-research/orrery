@@ -491,13 +491,14 @@ class SQLiteEntityRepository(EntityRepository):
         ):
             silo_map.setdefault(r["entity_id"], set()).add(r["silo_id"])
 
-        # Provenance kinds, resolved live via the silo_kind view (inner join: a doc
-        # whose silo has no kind row contributes nothing -> empty set = wildcard).
+        # Provenance kinds, resolved live via the silo_kind view. Null-silo docs get the
+        # '__nosilo__' sentinel so loose-pool data only overlaps other loose-pool data.
         kind_map: dict[str, set] = {}
         for r in self._conn.execute(
-            "SELECT DISTINCT es.entity_id, sk.kind FROM entity_sources es "
-            "JOIN documents d ON d.id = es.document_id "
-            "JOIN silo_kind sk ON sk.silo_id = d.silo_id"
+            "SELECT DISTINCT es.entity_id, "
+            "CASE WHEN d.silo_id IS NULL THEN '__nosilo__' ELSE sk.kind END AS kind "
+            "FROM entity_sources es JOIN documents d ON d.id = es.document_id "
+            "LEFT JOIN silo_kind sk ON sk.silo_id = d.silo_id"
         ):
             kind_map.setdefault(r["entity_id"], set()).add(r["kind"])
 
