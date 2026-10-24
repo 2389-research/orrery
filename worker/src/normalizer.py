@@ -12,7 +12,7 @@ import sqlite3
 import numpy as np
 from collections import defaultdict
 
-from .silo import silo_match
+from .silo import silo_match, kind_match
 
 # Lazy-load the model (heavy import)
 _model = None
@@ -97,6 +97,27 @@ def _silos_overlap(a: set, b: set) -> bool:
     return bool(a & b)
 
 
+def _entity_kind_set(conn: sqlite3.Connection, entity_id: str) -> set:
+    """All distinct provenance kinds an entity is sourced under (entity_sources ->
+    documents -> silo_kind). Empty when no source resolves to a silo with a kind row."""
+    rows = conn.execute(
+        "SELECT DISTINCT sk.kind FROM entity_sources es "
+        "JOIN documents d ON d.id = es.document_id "
+        "JOIN silo_kind sk ON sk.silo_id = d.silo_id "
+        "WHERE es.entity_id = ?",
+        (entity_id,)
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _kinds_overlap(a: set, b: set) -> bool:
+    """Same null-wildcard semantics as _silos_overlap: an EMPTY kind-set carries no
+    kind information and overlaps with anything; otherwise plain set intersection."""
+    if not a or not b:
+        return True
+    return bool(a & b)
+
+
 def _propose_cross_silo_merge(
     conn: sqlite3.Connection,
     a_id: str, a_name: str,
@@ -125,7 +146,8 @@ def _propose_cross_silo_merge(
         "VALUES (?, 'merge', ?, ?, ?, ?, ?, ?, 'pending')",
         (str(uuid.uuid4()), a_id, a_name, b_id, b_name,
          f"cross-silo candidate: {method} similarity {similarity:.3f} — not auto-merged "
-         f"because the two entities have no silo in common",
+         f"because the two entities have no silo in common and are not an exact-name "
+         f"match within a shared kind",
          "worker.normalizer")
     )
 
@@ -219,6 +241,40 @@ def run_batch_normalization(conn: sqlite3.Connection) -> dict:
                     "SELECT id FROM entities WHERE canonical_name = ? AND type = ? AND invalid_at IS NULL",
                     (singular, etype)
                 ).fetchone()
+            if not target:
+                # Different silo, but the EXACT tier (plural<->singular) widens from
+                # silo to kind: a same-name singular sourced under any kind the
+                # plural is also sourced under is the same thing. Empty kind-set =
+                # wildcard (mirrors _kinds_overlap), so fall back to an unscoped lookup.
+                plural_kinds = _entity_kind_set(conn, eid)
+                if plural_kinds:
+                    for k in sorted(plural_kinds):
+                        row = conn.execute(
+                            "SELECT e.id FROM entities e WHERE e.canonical_name = ? AND e.type = ? "
+                            f"AND e.invalid_at IS NULL AND e.id != ? AND {kind_match('e.id')}",
+                            (singular, etype, eid, k)
+                        ).fetchone()
+                        if row:
+                            target = row
+                            break
+                else:
+                    target = conn.execute(
+                        "SELECT id FROM entities WHERE canonical_name = ? AND type = ? "
+                        "AND invalid_at IS NULL AND id != ?",
+                        (singular, etype, eid)
+                    ).fetchone()
+            if not target:
+                # A singular exists but only under a different kind: not ours to
+                # merge — propose to the human-gated queue and leave both distinct.
+                other = conn.execute(
+                    "SELECT id FROM entities WHERE canonical_name = ? AND type = ? "
+                    "AND invalid_at IS NULL AND id != ?",
+                    (singular, etype, eid)
+                ).fetchone()
+                if other:
+                    _propose_cross_silo_merge(conn, eid, name, other[0], singular,
+                                              similarity=1.0, method="plural")
+                    results["cross_silo_proposed"] += 1
             if target and target[0] != eid:
                 _merge_entities(conn, from_id=eid, from_name=name,
                                to_id=target[0], to_name=singular, method="plural", similarity=1.0)
@@ -312,7 +368,13 @@ def run_batch_normalization(conn: sqlite3.Connection) -> dict:
                     # null-vs-non-null) is a REAL near-duplicate but not ours to
                     # merge unilaterally — propose it to the human-gated
                     # graph_issues queue instead and leave both entities distinct.
-                    if not _silos_overlap(_entity_silo_set(conn, qid), _entity_silo_set(conn, tid)):
+                    # EXACT tier exception: an identical canonical_name (same type is
+                    # guaranteed by by_type) auto-merges across silos when the two
+                    # entities share a provenance kind. Fuzzy never widens past silo.
+                    if not _silos_overlap(_entity_silo_set(conn, qid), _entity_silo_set(conn, tid)) \
+                            and not (names_t[qi] == names_t[j]
+                                     and _kinds_overlap(_entity_kind_set(conn, qid),
+                                                        _entity_kind_set(conn, tid))):
                         _propose_cross_silo_merge(
                             conn, qid, names_t[qi], tid, names_t[j],
                             similarity=sim, method="embedding",

@@ -77,6 +77,10 @@ class Entity:
     # None elsewhere means "not computed", not "no silo info" — do not treat
     # a None here as the empty-set wildcard used by the silo-overlap check.
     silo_ids: frozenset | None = None
+    # DISTINCT provenance kinds (documents.silo_id -> silo_kind.kind) over the entity's
+    # sources; same populate-only-in-get_all_for_normalization contract as silo_ids.
+    # Empty = no kind information (wildcard for the exact-tier kind gate).
+    kind_ids: frozenset | None = None
 
 
 @dataclass

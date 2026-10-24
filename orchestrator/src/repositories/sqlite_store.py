@@ -491,9 +491,20 @@ class SQLiteEntityRepository(EntityRepository):
         ):
             silo_map.setdefault(r["entity_id"], set()).add(r["silo_id"])
 
+        # Provenance kinds, resolved live via the silo_kind view (inner join: a doc
+        # whose silo has no kind row contributes nothing -> empty set = wildcard).
+        kind_map: dict[str, set] = {}
+        for r in self._conn.execute(
+            "SELECT DISTINCT es.entity_id, sk.kind FROM entity_sources es "
+            "JOIN documents d ON d.id = es.document_id "
+            "JOIN silo_kind sk ON sk.silo_id = d.silo_id"
+        ):
+            kind_map.setdefault(r["entity_id"], set()).add(r["kind"])
+
         return [
             Entity(id=r["id"], canonical_name=r["canonical_name"], type=r["type"],
-                   silo_ids=frozenset(silo_map.get(r["id"], set())))
+                   silo_ids=frozenset(silo_map.get(r["id"], set())),
+                   kind_ids=frozenset(kind_map.get(r["id"], set())))
             for r in rows
         ]
 
