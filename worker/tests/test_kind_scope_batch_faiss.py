@@ -168,3 +168,14 @@ def test_two_null_silo_exact_still_merge(test_db):
     assert res["embedding_merges"] == 1
     assert _count(conn) == 1
     conn.close()
+
+
+def test_two_null_kind_silos_exact_not_auto_merged(test_db):
+    conn = get_connection(test_db)
+    _setup(conn, None, None)
+    _add_entity(conn, "a", "http client", "A", stored_vec=VEC["base"])
+    _add_entity(conn, "b", "http client", "B")
+    with patch.object(norm, "embed_entities", _embedder({"http client": VEC["base"]})):
+        norm.run_batch_normalization(conn)
+    assert _count(conn) == 2
+    conn.close()

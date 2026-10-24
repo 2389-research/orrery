@@ -118,10 +118,12 @@ def _entity_kind_set(conn: sqlite3.Connection, entity_id: str) -> set:
 
 def _kinds_overlap(a: set, b: set) -> bool:
     """Same null-wildcard semantics as _silos_overlap: an EMPTY kind-set carries no
-    kind information and overlaps with anything; otherwise plain set intersection."""
+    kind information and overlaps with anything; otherwise they overlap only on a
+    shared REAL kind. A None kind (real silo, provenance_kind unset) is unknown, and
+    unknown != unknown, so it never matches: unset-kind silos fall back to silo isolation."""
     if not a or not b:
         return True
-    return bool(a & b)
+    return bool((a & b) - {None})
 
 
 def _propose_cross_silo_merge(

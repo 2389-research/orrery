@@ -1,5 +1,5 @@
 # ABOUTME: backfill connects pre-feature exact-name duplicates within a kind, never across kinds.
-# ABOUTME: reuses the reversible _merge_entities (normalization_log); idempotent. File-backed sqlite.
+# ABOUTME: uses _merge_entities (logged, not snapshot-reversible); idempotent. File-backed sqlite.
 
 import asyncio
 import uuid
@@ -60,6 +60,14 @@ def test_same_kind_duplicates_merge_and_idempotent(tmp_path):
 def test_cross_kind_not_merged(tmp_path):
     db, conn = _conn(tmp_path)
     _silo(conn, "A", "neutral_summary"); _silo(conn, "B", "human_vault")
+    _ent(conn, "A"); _ent(conn, "B")
+    asyncio.run(run_connect_within_kind(_job(conn, db), db))
+    assert len(_active(conn)) == 2
+
+
+def test_null_kind_silos_not_merged(tmp_path):
+    db, conn = _conn(tmp_path)
+    _silo(conn, "A", None); _silo(conn, "B", None)
     _ent(conn, "A"); _ent(conn, "B")
     asyncio.run(run_connect_within_kind(_job(conn, db), db))
     assert len(_active(conn)) == 2

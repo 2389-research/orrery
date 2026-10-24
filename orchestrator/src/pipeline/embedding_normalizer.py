@@ -89,12 +89,14 @@ def _silos_overlap(a: frozenset | None, b: frozenset | None) -> bool:
 
 def _kinds_overlap(a: frozenset | None, b: frozenset | None) -> bool:
     """Mirrors worker/src/normalizer.py::_kinds_overlap: an EMPTY kind-set carries no
-    kind information and is a wildcard; otherwise plain set intersection."""
+    kind information and is a wildcard; otherwise they overlap only on a shared REAL
+    kind. A None kind (real silo, provenance_kind unset) is unknown, and unknown !=
+    unknown, so it never matches: unset-kind silos fall back to silo isolation."""
     a = a or frozenset()
     b = b or frozenset()
     if not a or not b:
         return True
-    return bool(a & b)
+    return bool((a & b) - {None})
 
 
 def _propose_cross_silo_merge(conn, a_id, a_name, b_id, b_name, similarity, method):

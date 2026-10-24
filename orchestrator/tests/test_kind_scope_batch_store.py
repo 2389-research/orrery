@@ -143,3 +143,12 @@ def test_two_null_silo_exact_still_merge(test_store):
         res = norm.run_batch_normalization(test_store)
     assert res["embedding_merges"] == 1
     assert test_store.entities.count() == 1
+
+
+def test_two_null_kind_silos_exact_not_auto_merged(test_store):
+    _setup(test_store, None, None)
+    _make_entity(test_store, "doc-a", "a", "http client", "A")
+    _make_entity(test_store, "doc-b", "b", "http client", "B")
+    with patch.object(norm, "embed_entities", _embedder({"http client": VEC["base"]})):
+        norm.run_batch_normalization(test_store)
+    assert test_store.entities.count() == 2

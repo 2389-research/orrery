@@ -1,5 +1,5 @@
 # ABOUTME: one-time backfill — merge exact-name+type duplicate entities within a provenance kind.
-# ABOUTME: reuses the reversible _merge_entities (normalization_log); exact only, never cross-kind.
+# ABOUTME: uses _merge_entities: logged (normalization_log + merge_map re-attach), not snapshot-reversible.
 
 import json
 from collections import defaultdict
@@ -18,6 +18,8 @@ async def run_connect_within_kind(job: dict, db_path: str) -> None:
             kinds = _entity_kind_set(conn, r["id"])
             if len(kinds) != 1:   # empty (no sources) or multi-kind: leave alone
                 continue
+            if None in kinds:     # real silo with unset kind: unknown != unknown, never group
+                continue
             groups[(r["canonical_name"], r["type"], next(iter(kinds)))].append(r["id"])
 
         groups_merged = entities_merged = 0
@@ -35,7 +37,9 @@ async def run_connect_within_kind(job: dict, db_path: str) -> None:
 
         if survivors:
             recompute_cooccurrence(conn, survivors)
-            mark_graph_dirty(conn)
+        # Always flag dirty: a prior crashed run may have committed merges without the
+        # recompute, and a re-run then finds only singletons and would never self-heal.
+        mark_graph_dirty(conn)
         result = {"groups_merged": groups_merged, "entities_merged": entities_merged}
         conn.execute("UPDATE jobs SET result = ? WHERE id = ?", (json.dumps(result), job["id"]))
         conn.commit()
