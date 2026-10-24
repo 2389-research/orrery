@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, HTTPException, Depends
 from ..db import mark_graph_dirty
 from ..dependencies import get_auth_store, require_writable, AuthStore
@@ -57,3 +58,16 @@ def resolve_review_item(review_id: str, action: str = "merge", auth: AuthStore =
     finally:
         store.close()
     return {"status": "resolved", "action": action}
+
+
+@router.post("/normalize/connect-within-kind", status_code=202)
+def connect_within_kind(auth: AuthStore = Depends(require_writable)):
+    """Enqueue the one-time backfill that merges exact-name+type duplicates within a
+    provenance kind across the whole workspace (pre-feature per-silo fragments)."""
+    store = auth.store
+    try:
+        job_id = str(uuid.uuid4())
+        store.jobs.create(job_id, "connect_within_kind", None, {})
+    finally:
+        store.close()
+    return {"job_id": job_id}
