@@ -8,7 +8,7 @@ from pathlib import Path
 from orrery_relay import Relay
 from ..db import get_connection
 from ..config import get_settings
-from ..silo import silo_match
+from .upsert_document import entity_scope
 
 
 async def run_extract_batch_image(job: dict, db_path: str) -> None:
@@ -109,6 +109,7 @@ async def run_extract_batch_image(job: dict, db_path: str) -> None:
 
         silo_row = conn.execute("SELECT silo_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
         silo = silo_row[0] if silo_row else None
+        scope_fn, scope_bind = entity_scope(conn, silo)
 
         # Store entities
         for entity in result.get("entities", []):
@@ -120,7 +121,7 @@ async def run_extract_batch_image(job: dict, db_path: str) -> None:
             is_new = False
             row = conn.execute(
                 f"SELECT e.id FROM entities e WHERE e.canonical_name = ? AND e.type = ? "
-                f"AND {silo_match('e.id')}", (name, etype, silo)).fetchone()
+                f"AND {scope_fn('e.id')}", (name, etype, scope_bind)).fetchone()
             if row:
                 entity_id = row["id"]
             else:
