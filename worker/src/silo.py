@@ -26,7 +26,7 @@ def kind_match(entity_col: str) -> str:
 # re-classify a source later, and a per-doc copy would go stale. Resolved by consumers
 # via the silo_kind view (documents.silo_id -> silo_kind.kind), never materialized
 # per-document (spec: per-source silos + provenance, task 9).
-KINDS = {"neutral_summary", "human_vault", "agent_report", "human_reviewed"}
+KINDS = {"neutral_summary", "human_vault", "agent_report", "human_reviewed", "horton_transcript"}
 
 # Flow default keyed by featurizer / source type (spec §4.1).
 FLOW_DEFAULT_KIND = {
@@ -37,6 +37,7 @@ FLOW_DEFAULT_KIND = {
     "pdf": "neutral_summary",
     "ccvault": "agent_report",
     "meridian": "agent_report",
+    "horton": "horton_transcript",
 }
 
 
