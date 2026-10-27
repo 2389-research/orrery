@@ -382,6 +382,10 @@ CREATE TABLE IF NOT EXISTS meridian_cursor (
     collection_id TEXT PRIMARY KEY,
     updated_after TEXT
 );
+CREATE TABLE IF NOT EXISTS horton_cursor (
+    server_url TEXT PRIMARY KEY,
+    after TEXT
+);
 """
 
 # Unifies the two silo tables so a consumer resolves a document's provenance kind with
