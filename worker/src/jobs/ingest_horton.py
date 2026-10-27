@@ -34,6 +34,8 @@ def get_or_create_collection(conn, mic_id: str, day: str, server_url: str, cache
             conn.commit()
         except sqlite3.IntegrityError:  # UNIQUE(path) race
             row = conn.execute("SELECT id FROM collections WHERE path = ?", (path,)).fetchone()
+            if row is None:
+                raise  # not the UNIQUE(path) race: surface the real IntegrityError
             cid = row[0]
     else:
         cid = row[0]
@@ -46,6 +48,7 @@ async def run_ingest_horton(job: dict, db_path: str) -> None:
     relay = Relay.from_settings(settings)
     config = json.loads(job["config"]) if job["config"] else {}
     server_url = config["server_url"]
+    # spec_id is accepted for forward-compat but not read here — upsert_document resolves the general spec itself (the route's spec SEEDING is what matters).
     fetch = make_fetch(server_url)
 
     conn = get_connection(db_path)

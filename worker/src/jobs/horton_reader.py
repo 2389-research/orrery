@@ -50,6 +50,7 @@ def chunk_to_doc(chunk: dict) -> dict | None:
     if m:
         hhmm = m.group(1)  # body clock is already office-local
     else:
+        # Title is a cosmetic label; office-local event time lives in `day`/metadata. This fallback uses window.start (UTC) only when the body has no clock prefix.
         start = window.get("start") or ""
         hhmm = start[11:16] if len(start) >= 16 else ""
 
