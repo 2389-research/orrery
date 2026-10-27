@@ -131,6 +131,12 @@ class CcvaultIngestRequest(BaseModel):
     provenance_kind: str | None = None  # override; defaults to agent_report for a ccvault silo
 
 
+class HortonIngestRequest(BaseModel):
+    """Ingest Horton office-mic transcripts; collections are derived per chunk by the worker."""
+    server_url: str = "http://localhost:8080"
+    spec_id: str | None = None
+
+
 class MeridianIngestRequest(BaseModel):
     """Ingest Claude Code sessions from a meridian server into a noosphere (workspace)."""
     server_url: str = "http://localhost:8080"

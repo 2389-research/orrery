@@ -14,7 +14,8 @@ from ..config import get_settings
 from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..models import (IngestResult, DirectoryIngestRequest, RepoIngestRequest,
                       TrackerRunsIngestRequest, TextIngestRequest, CcvaultIngestRequest,
-                      PdfIngestRequest, MeridianIngestRequest)
+                      PdfIngestRequest, MeridianIngestRequest,
+                      HortonIngestRequest)
 from ..pipeline.chunker import chunk_document
 from ..pipeline.excerpt import build_classification_excerpt
 from ..pipeline.classifier import classify_document
@@ -712,6 +713,35 @@ async def ingest_ccvault(request: CcvaultIngestRequest, auth: AuthStore = Depend
         store.close()
 
     return {"job_id": job_id, "collection_id": collection_id}
+
+
+@router.post("/ingest/horton", status_code=status.HTTP_202_ACCEPTED)
+async def ingest_horton(request: HortonIngestRequest, auth: AuthStore = Depends(require_writable)):
+    """Enqueue a Horton transcript pull. Idempotent: the worker resumes from `horton_cursor`.
+
+    No collection is created here; the worker derives per-(mic,day) collections per chunk.
+    The workspace is chosen by the X-Workspace-Id header.
+    """
+    store = auth.store
+    try:
+        spec_id = request.spec_id
+        if not spec_id:
+            spec = store.specs.get_general()
+            if spec:
+                spec_id = spec.id
+            else:
+                spec_id = str(uuid.uuid4())
+                store.specs.create(spec_id, None, 1, GENERAL_TEXT_SPEC)
+
+        job_id = str(uuid.uuid4())
+        store.jobs.create(job_id, "ingest_horton", "horton", {
+            "server_url": request.server_url,
+            "spec_id": spec_id,
+        })
+    finally:
+        store.close()
+
+    return {"job_id": job_id}
 
 
 @router.post("/ingest/meridian", status_code=status.HTTP_202_ACCEPTED)
