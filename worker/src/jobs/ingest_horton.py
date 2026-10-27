@@ -12,7 +12,7 @@ from ..config import get_settings
 from ..db import get_connection, mark_graph_dirty
 from ..silo import resolve_kind, flow_default_kind
 from .horton_reader import make_fetch, drain_chunks, chunk_to_doc
-from .upsert_document import upsert_document
+from .upsert_document import upsert_document, _recount_collection
 
 
 def get_or_create_collection(conn, mic_id: str, day: str, server_url: str, cache: dict) -> str:
@@ -65,6 +65,8 @@ async def run_ingest_horton(job: dict, db_path: str) -> None:
                 if doc is None:
                     counts["empty"] += 1
                     continue
+                if not doc["mic_id"] or not doc["day"]:
+                    raise ValueError(f"chunk missing mic_id/day: {item.get('id')}")
                 cid = get_or_create_collection(conn, doc["mic_id"], doc["day"], server_url, cache)
                 res = await upsert_document(
                     conn, relay, settings, source_path=doc["source_path"], title=doc["title"],
@@ -73,9 +75,15 @@ async def run_ingest_horton(job: dict, db_path: str) -> None:
                     metadata=doc["metadata"], classify=True, emits_cooccurrence=True)
                 counts[res["action"]] += 1
             except Exception:
+                # Discard this chunk's uncommitted partial writes, else the next commit would
+                # persist them and the held-cursor retry would hash-match -> skipped forever.
+                conn.rollback()
                 counts["failed"] += 1
                 print(f"[ingest_horton] chunk failed: {item.get('id') if isinstance(item, dict) else item}\n"
                       f"{traceback.format_exc()}", flush=True)
+
+        for cid in set(cache.values()):
+            _recount_collection(conn, cid)
 
         if counts["failed"] == 0 and next_cursor and next_cursor != after:
             conn.execute("INSERT INTO horton_cursor (server_url, after) VALUES (?, ?) "

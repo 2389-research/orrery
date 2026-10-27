@@ -128,3 +128,50 @@ def test_get_or_create_collection_is_idempotent_and_cached(test_db):
     assert cid1 == cid2 == cid3
     assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 1
     assert cache[(MIC, "2026-10-15")] == cid1
+
+
+class RaisingRelay(FakeRelay):
+    """Extraction (complete) raises when the prompt contains the poison marker."""
+    async def complete(self, model, max_tokens, messages, **kwargs):
+        if "POISON" in json.dumps(messages):
+            raise RuntimeError("extraction boom")
+        return await super().complete(model, max_tokens, messages, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_failed_chunk_is_rolled_back_and_retried_next_pass(test_db, feed, monkeypatch):
+    feed["items"] = [chunk(1), chunk(2, body="[14:02:00] POISON"), chunk(3)]
+    monkeypatch.setattr(ingest_horton, "Relay", RaisingRelay)
+    conn, result = await run(test_db)
+    assert result["failed"] == 1 and result["created"] == 2
+    titles = [r[0] for r in conn.execute("SELECT source_path FROM documents")]
+    assert len(titles) == 2 and not any("19:02:00" in t for t in titles)
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone() is None
+
+    monkeypatch.setattr(ingest_horton, "Relay", FakeRelay)
+    conn, result = await run(test_db)
+    assert result["failed"] == 0 and result["created"] == 1 and result["skipped"] == 2
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 3
+    assert any("19:02:00" in r[0] for r in conn.execute("SELECT source_path FROM documents"))
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone()[0] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_collection_document_count_is_recounted(test_db, feed):
+    feed["items"] = [chunk(1), chunk(2), chunk(3, "2026-10-15")]
+    conn, _ = await run(test_db)
+    rows = conn.execute("SELECT id, document_count FROM collections").fetchall()
+    assert sorted(r[1] for r in rows) == [1, 2]
+    for cid, n in rows:
+        assert n == conn.execute("SELECT COUNT(*) FROM document_collections WHERE collection_id=?", (cid,)).fetchone()[0]
+
+
+@pytest.mark.asyncio
+async def test_chunk_missing_mic_or_day_counts_failed(test_db, feed, monkeypatch):
+    monkeypatch.setattr(ingest_horton, "chunk_to_doc",
+                        lambda item: {"mic_id": None, "day": None, "source_path": "x", "title": "x",
+                                      "content": "x", "parent_path": "x", "metadata": {}})
+    feed["items"] = [chunk(1)]
+    conn, result = await run(test_db)
+    assert result["failed"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 0
