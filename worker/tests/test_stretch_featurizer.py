@@ -61,7 +61,7 @@ async def test_enrich_batch_retry_fills_missing():
     out = await enrich_batch(relay, "gemma", s)
     assert set(out) == {"a", "b"} and len(relay.calls) == 2
     assert "b" in relay.calls[1]["messages"][0]["content"]
-    assert "[a]" not in relay.calls[1]["messages"][0]["content"].split("TRANSCRIPT")[-1]
+    assert "[a]" not in relay.calls[1]["messages"][0]["content"].split("STRETCHES:")[-1]
 
 
 async def test_enrich_batch_missing_twice_omitted_no_raise():

@@ -143,6 +143,7 @@ class EnrichStretchesRequest(BaseModel):
     since: str | None = None
     until: str | None = None
     limit: int | None = None
+    force: bool | None = None  # bypass content_hash skip; re-enrich all in-scope stretches
 
 
 class MeridianIngestRequest(BaseModel):

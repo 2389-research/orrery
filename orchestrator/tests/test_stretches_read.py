@@ -51,3 +51,11 @@ def test_mic_and_collection_filter(test_client, test_store):
     assert [s["stretch_id"] for s in test_client.get("/stretches", params={"mic": "micB"}, headers=H).json()] == ["s3"]
     assert len(test_client.get("/stretches", params={"collection": "silo1"}, headers=H).json()) == 3
     assert test_client.get("/stretches", params={"collection": "nope"}, headers=H).json() == []
+
+
+def test_limit_and_offset_are_clamped(test_client, test_store):
+    _seed(test_store)
+    r = test_client.get("/stretches", params={"limit": 0, "offset": -5}, headers=H)
+    assert r.status_code == 200 and len(r.json()) == 1  # limit floored to 1, offset to 0
+    r = test_client.get("/stretches", params={"limit": 10**9}, headers=H)
+    assert r.status_code == 200 and len(r.json()) == 3

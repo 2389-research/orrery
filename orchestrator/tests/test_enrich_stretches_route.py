@@ -13,3 +13,12 @@ def test_enrich_stretches_enqueues_job(test_client, test_store):
     assert cfg["limit"] == 50
     assert cfg["collection"] is None and cfg["since"] is None and cfg["until"] is None
     assert row[1] == "queued"
+
+
+def test_force_flag_passed_through(test_client, test_store):
+    r = test_client.post("/enrich/stretches", json={"force": True},
+                         headers={"X-Workspace-Id": "default"})
+    assert r.status_code == 202
+    row = test_store.conn.execute(
+        "SELECT config FROM jobs WHERE type='enrich_stretches' ORDER BY rowid DESC").fetchone()
+    assert json.loads(row[0])["force"] is True

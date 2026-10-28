@@ -1,6 +1,16 @@
 import hashlib
 
-from src.jobs.stretch_splitter import split_document
+from src.jobs.stretch_splitter import split_document as _split
+
+DAY = "2026-10-15"
+
+
+def split_document(doc_id, mic_id, content, day=DAY):
+    return _split(doc_id, mic_id, content, day)
+
+
+def D(t):
+    return f"{DAY}T{t}"
 
 
 def _words(n, tag="w"):
@@ -23,7 +33,7 @@ def test_gap_over_two_minutes_starts_new_stretch():
     ])
     out = split_document("d", "m", content)
     assert [(s["start"], s["end"]) for s in out] == [
-        ("10:00:00", "10:00:30"), ("10:03:00", "10:03:20")]
+        (D("10:00:00"), D("10:00:30")), (D("10:03:00"), D("10:03:20"))]
 
 
 def test_gap_of_exactly_two_minutes_does_not_split():
@@ -38,8 +48,8 @@ def test_word_cap_splits_long_run():
     out = split_document("d", "m", content)
     assert len(out) == 2
     # first stretch holds exactly 6 lines (120 words); a 7th would exceed the cap
-    assert out[0]["end"] == "10:00:50"
-    assert out[1]["start"] == "10:01:00"
+    assert out[0]["end"] == D("10:00:50")
+    assert out[1]["start"] == D("10:01:00")
 
 
 def test_time_cap_splits_long_run():
@@ -47,7 +57,7 @@ def test_time_cap_splits_long_run():
     times = ["10:00:00", "10:01:40", "10:03:20", "10:05:00", "10:06:40"]
     out = split_document("d", "m", "\n".join(_line(t) for t in times))
     assert [(s["start"], s["end"]) for s in out] == [
-        ("10:00:00", "10:03:20"), ("10:05:00", "10:06:40")]
+        (D("10:00:00"), D("10:03:20")), (D("10:05:00"), D("10:06:40"))]
 
 
 def test_short_stretch_dropped_and_ids_over_kept():
@@ -58,7 +68,7 @@ def test_short_stretch_dropped_and_ids_over_kept():
     ])
     out = split_document("doc", "mic", content)
     assert [s["stretch_id"] for s in out] == ["doc:0", "doc:1"]
-    assert [s["start"] for s in out] == ["10:00:00", "10:10:00"]
+    assert [s["start"] for s in out] == [D("10:00:00"), D("10:10:00")]
 
 
 def test_fifteen_word_boundary():
@@ -72,7 +82,7 @@ def test_fields_text_and_hash():
     assert len(out) == 1
     s = out[0]
     assert s["doc_id"] == "doc" and s["mic_id"] == "mic1"
-    assert (s["start"], s["end"]) == ("10:00:00", "10:00:20")
+    assert (s["start"], s["end"]) == (D("10:00:00"), D("10:00:20"))
     assert s["text"] == l1 + "\n" + l2
     assert s["content_hash"] == hashlib.sha256(s["text"].encode()).hexdigest()
 

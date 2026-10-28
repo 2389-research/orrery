@@ -1,6 +1,7 @@
 # ABOUTME: Batched LLM featurizer that turns transcript stretches into structured facets.
 # ABOUTME: Pure of DB I/O; the relay is injected. quote_ok is computed by code, not trusted.
 import json
+import logging
 import re
 
 SYSTEM_PROMPT = """You read short stretches of noisy office-microphone transcript (speech-to-text from
@@ -77,13 +78,17 @@ def _parse(text: str) -> list:
     return facets if isinstance(facets, list) else []
 
 
+log = logging.getLogger(__name__)
+
+
 async def _call(relay, model: str, stretches: list[dict]) -> dict[str, dict]:
     try:
         response = await relay.complete(
             model=model, max_tokens=8192, format="json",
             messages=[{"role": "user", "content": build_prompt(stretches)}],
         )
-    except Exception:
+    except Exception as e:
+        log.warning("stretch featurizer relay call failed (%d stretches): %s", len(stretches), e)
         return {}
     by_id = {s["stretch_id"]: s for s in stretches}
     out = {}

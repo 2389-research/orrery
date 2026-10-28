@@ -29,7 +29,9 @@ def _delta(later: int, earlier: int) -> int:
     return d + 86400 if d < 0 else d  # tolerate a midnight wrap
 
 
-def split_document(doc_id: str, mic_id: str, content: str) -> list[dict]:
+def split_document(doc_id: str, mic_id: str, content: str, day: str) -> list[dict]:
+    """`day` is the office-local date (YYYY-MM-DD, from documents.metadata.day); start/end are
+    composed as full local ISO datetimes `{day}THH:MM:SS` so event-time windows work across days."""
     groups: list[list[tuple[str, int, int, str]]] = []
     cur: list[tuple[str, int, int, str]] = []
     words = 0
@@ -55,8 +57,8 @@ def split_document(doc_id: str, mic_id: str, content: str) -> list[dict]:
             "stretch_id": f"{doc_id}:{len(result)}",
             "doc_id": doc_id,
             "mic_id": mic_id,
-            "start": g[0][3],
-            "end": g[-1][3],
+            "start": f"{day}T{g[0][3]}",
+            "end": f"{day}T{g[-1][3]}",
             "text": text,
             "content_hash": hashlib.sha256(text.encode()).hexdigest(),
         })

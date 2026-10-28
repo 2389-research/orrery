@@ -37,7 +37,7 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
     conn = get_connection(db_path)
     try:
         # since/until filter on documents.created_at (simple string compare); collection = silo_id.
-        sql = "SELECT id, content, source_path, silo_id FROM documents WHERE content_type = 'transcript'"
+        sql = "SELECT id, content, source_path, silo_id, metadata FROM documents WHERE content_type = 'transcript'"
         args: list = []
         if config.get("collection"):
             sql += " AND silo_id = ?"; args.append(config["collection"])
@@ -50,32 +50,48 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
             sql += " LIMIT ?"; args.append(int(config["limit"]))
         docs = conn.execute(sql, args).fetchall()
 
-        counts = {"enriched": 0, "skipped": 0, "failed": 0, "docs": len(docs)}
-        for doc_id, content, source_path, silo_id in docs:
-            mic_id = _mic_from_source_path(source_path)
-            todo = []
-            for s in split_document(doc_id, mic_id, content or ""):
-                row = conn.execute("SELECT content_hash FROM stretches WHERE stretch_id = ?",
-                                   (s["stretch_id"],)).fetchone()
-                if row and row[0] == s["content_hash"]:
-                    counts["skipped"] += 1
-                else:
-                    todo.append(s)
-            for i in range(0, len(todo), BATCH_SIZE):
-                batch = todo[i:i + BATCH_SIZE]
-                facets = await enrich_batch(relay, model, batch)
-                for s in batch:
-                    f = facets.get(s["stretch_id"])
-                    if not f:
-                        counts["failed"] += 1
-                        log.warning("enrich_stretches: no facet for %s", s["stretch_id"])
-                        continue
-                    conn.execute(_UPSERT, (
-                        s["stretch_id"], doc_id, mic_id, silo_id, s["start"], s["end"], s["content_hash"],
-                        f.get("summary"), json.dumps(f.get("concepts", [])),
-                        json.dumps(f.get("ideas", [])), json.dumps(f.get("nouns", []))))
-                    counts["enriched"] += 1
-                conn.commit()
+        counts = {"enriched": 0, "skipped": 0, "failed": 0, "doc_errors": 0, "docs": len(docs)}
+        force = bool(config.get("force"))
+        for doc_id, content, source_path, silo_id, metadata in docs:
+            try:
+                day = None
+                try:
+                    day = (json.loads(metadata) if metadata else {}).get("day")
+                except (ValueError, AttributeError):
+                    day = None
+                if not day or not isinstance(day, str):
+                    raise ValueError("document metadata has no office-local `day`")
+                mic_id = _mic_from_source_path(source_path)
+                todo = []
+                for s in split_document(doc_id, mic_id, content or "", day):
+                    row = conn.execute("SELECT content_hash FROM stretches WHERE stretch_id = ?",
+                                       (s["stretch_id"],)).fetchone()
+                    # content_hash covers the stretch TEXT only, so prompt/code improvements don't
+                    # regenerate stored facets; `force` bypasses this skip to re-enrich everything.
+                    if not force and row and row[0] == s["content_hash"]:
+                        counts["skipped"] += 1
+                    else:
+                        todo.append(s)
+                for i in range(0, len(todo), BATCH_SIZE):
+                    batch = todo[i:i + BATCH_SIZE]
+                    facets = await enrich_batch(relay, model, batch)
+                    for s in batch:
+                        f = facets.get(s["stretch_id"])
+                        if not f:
+                            counts["failed"] += 1
+                            log.warning("enrich_stretches: no facet for %s", s["stretch_id"])
+                            continue
+                        conn.execute(_UPSERT, (
+                            s["stretch_id"], doc_id, mic_id, silo_id, s["start"], s["end"], s["content_hash"],
+                            f.get("summary"), json.dumps(f.get("concepts", [])),
+                            json.dumps(f.get("ideas", [])), json.dumps(f.get("nouns", []))))
+                        counts["enriched"] += 1
+                    conn.commit()
+            except Exception as e:
+                conn.rollback()
+                counts["doc_errors"] += 1
+                log.error("enrich_stretches: doc %s failed: %s", doc_id, e)
+                continue
         conn.execute("UPDATE jobs SET result = ? WHERE id = ?", (json.dumps(counts), job["id"]))
         conn.commit()
     finally:

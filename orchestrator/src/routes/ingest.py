@@ -758,6 +758,7 @@ async def enrich_stretches(request: EnrichStretchesRequest, auth: AuthStore = De
             "since": request.since,
             "until": request.until,
             "limit": request.limit,
+            "force": request.force,
         })
     finally:
         store.close()

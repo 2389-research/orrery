@@ -61,10 +61,11 @@ Per stretch:
 
 The meridian ingest is the template: deterministic split → per-unit LLM call → store → backfill + incremental. Reuse its shape.
 
-- **`worker/src/jobs/stretch_splitter.py`** (new, pure, unit-tested): `split_document(doc_id, mic_id, content) -> list[Stretch]` applying the §4 rules to the `[HH:MM:SS]` lines. No I/O. (Analog of `iter_agent_segments`.)
+- **`worker/src/jobs/stretch_splitter.py`** (new, pure, unit-tested): `split_document(doc_id, mic_id, content, day) -> list[Stretch]` applying the §4 rules to the `[HH:MM:SS]` lines. No I/O. (Analog of `iter_agent_segments`.)
 - **`worker/src/jobs/stretch_featurizer.py`** (new): `async enrich_batch(relay, model, stretches) -> list[facet]` — builds the strict-JSON prompt (reference prompt), one relay call per ~10 stretches (`think:false`, ollama JSON), parses `{"facets":[...]}`, maps `topics→concepts`, computes `quote_ok`, retries skipped once. (Analog of `summarize_segment`, but batched + structured.)
 - **`stretches` table** (new, mirrored in both `db.py`): `stretch_id PK, doc_id, mic_id, silo_id, start, end, content_hash, summary, concepts (json), ideas (json), nouns (json), enriched_at`. `content_hash` over the stretch text → idempotent re-enrich (skip unchanged, like `upsert_document`). Kept across days.
 - **`worker/src/jobs/enrich_stretches.py`** (new): the job. Scope by `{workspace, collection(s)|date|limit}`. For each in-scope horton document: split → enrich new/changed stretches (batched) → upsert `stretches` rows. Runs as **backfill** (scoped subset first) and as **enrich-on-arrival** (enqueued after a horton doc is created — hook in `run_ingest_horton`, or a follow-on pass gated on new docs, mirroring meridian's tail).
+- **Event time:** `start`/`end` are full office-local ISO datetimes `{metadata.day}THH:MM:SS` (day from `documents.metadata`, never the UTC `source_path`). **Re-enrich:** `content_hash` covers only the stretch text, so prompt/code improvements do not regenerate stored facets; pass `force: true` on `POST /enrich/stretches` to bypass the skip.
 - **Route `POST /enrich/stretches`** (new, orchestrator): enqueue the job with `{collection?|since?|until?|limit?}`; workspace via `X-Workspace-Id`. Idempotent.
 - **Read `GET /stretches?since=&until=&mic=&collection=&limit=&offset=`** (new): rows ordered by `start`, all facet fields; event-time filter on `start`/`end`. Mirror as an MCP tool (`get_stretches` / extend `list_documents`).
 

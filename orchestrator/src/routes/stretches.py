@@ -12,6 +12,8 @@ def get_stretches(since: str | None = None, until: str | None = None,
                   auth: AuthStore = Depends(get_auth_store)):
     """Enriched transcript stretches ordered by event time (`start`). `since`/`until` are
     ISO-8601 and select stretches overlapping the window (end >= since, start <= until)."""
+    limit = min(max(limit, 1), 1000)
+    offset = max(offset, 0)
     store = auth.store
     try:
         return store.documents.list_stretches(since=since, until=until, mic=mic,

@@ -2,6 +2,7 @@
 # ABOUTME: Verifies upsert, content_hash idempotency, no graph mutation, and config scoping.
 
 import json
+import re
 import uuid
 
 import pytest
@@ -38,15 +39,16 @@ def fake_enrich(monkeypatch):
     return state
 
 
-def seed(conn, n=2, silo="coll1"):
+def seed(conn, n=2, silo="coll1", metadata=True):
     ids = []
     for i in range(n):
         did = str(uuid.uuid4())
         content = f"[10:0{i}:00] {WORDS}\n[10:0{i}:10] {WORDS}"
         conn.execute(
-            "INSERT INTO documents (id, title, content, content_hash, source_path, status, content_type, silo_id) "
-            "VALUES (?, 't', ?, ?, ?, 'pending', 'transcript', ?)",
-            (did, content, f"h{i}", f"horton:chunk/MIC{i}/2026-10-15T10:0{i}:00Z", silo))
+            "INSERT INTO documents (id, title, content, content_hash, source_path, status, content_type, silo_id, metadata) "
+            "VALUES (?, 't', ?, ?, ?, 'pending', 'transcript', ?, ?)",
+            (did, content, f"h{i}", f"horton:chunk/MIC{i}/2026-10-15T10:0{i}:00Z", silo,
+             json.dumps({"day": "2026-10-15", "window_start": "2026-10-15T17:00:00Z"}) if metadata else None))
         ids.append(did)
     conn.commit()
     return ids
@@ -80,8 +82,8 @@ async def test_rows_written_with_facets(test_db, fake_enrich):
     by_doc = {r[0]: r for r in rows}
     assert set(by_doc) == set(ids)
     r = by_doc[ids[0]]
-    assert r[1] == "MIC0" and r[2] == "coll1" and r[3] == "10:00:00" and r[4] == "10:00:10"
-    assert r[5] == "sum 10:00:00" and json.loads(r[6])[0]["tag"] == "t" and json.loads(r[7]) == ["n"]
+    assert r[1] == "MIC0" and r[2] == "coll1" and r[3] == "2026-10-15T10:00:00" and r[4] == "2026-10-15T10:00:10"
+    assert r[5] == "sum 2026-10-15T10:00:00" and json.loads(r[6])[0]["tag"] == "t" and json.loads(r[7]) == ["n"]
 
 
 @pytest.mark.asyncio
@@ -130,3 +132,55 @@ async def test_collection_scopes(test_db, fake_enrich):
     conn, result = await run(test_db, {"collection": "b"})
     assert result["docs"] == 1
     assert conn.execute("SELECT silo_id FROM stretches").fetchone()[0] == "b"
+
+
+@pytest.mark.asyncio
+async def test_stored_start_end_are_full_iso_datetimes(test_db, fake_enrich):
+    conn = get_connection(test_db)
+    seed(conn)
+    conn.close()
+    conn, _ = await run(test_db)
+    iso = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+    rows = conn.execute('SELECT start, "end" FROM stretches').fetchall()
+    assert rows and all(iso.match(a) and iso.match(b) for a, b in rows)
+
+
+@pytest.mark.asyncio
+async def test_doc_without_day_is_doc_error_others_continue(test_db, fake_enrich):
+    conn = get_connection(test_db)
+    seed(conn, n=1, silo="a", metadata=False)
+    seed(conn, n=1, silo="a")
+    conn.close()
+    conn, result = await run(test_db)
+    assert result["doc_errors"] == 1 and result["enriched"] == 1
+
+
+@pytest.mark.asyncio
+async def test_exception_in_one_doc_does_not_abort_job(test_db, monkeypatch):
+    calls = {"n": 0}
+
+    async def flaky(relay, model, stretches):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return {s["stretch_id"]: {"summary": "x", "concepts": [], "ideas": [], "nouns": []} for s in stretches}
+
+    monkeypatch.setattr(enrich_stretches, "Relay", CountingRelay)
+    monkeypatch.setattr(enrich_stretches, "enrich_batch", flaky)
+    conn = get_connection(test_db)
+    seed(conn, n=2)
+    conn.close()
+    conn, result = await run(test_db)
+    assert result["doc_errors"] == 1 and result["enriched"] == 1 and result["docs"] == 2
+
+
+@pytest.mark.asyncio
+async def test_force_bypasses_content_hash_skip(test_db, fake_enrich):
+    conn = get_connection(test_db)
+    seed(conn)
+    conn.close()
+    await run(test_db)
+    first = fake_enrich["calls"]
+    _, result = await run(test_db, {"force": True})
+    assert fake_enrich["calls"] > first
+    assert result["enriched"] == 2 and result["skipped"] == 0
