@@ -175,3 +175,21 @@ async def test_chunk_missing_mic_or_day_counts_failed(test_db, feed, monkeypatch
     conn, result = await run(test_db)
     assert result["failed"] == 1
     assert conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_enrich_job_enqueued_once_after_ingest_creates_docs(test_db, feed):
+    feed["items"] = [chunk(1)]
+    conn, _ = await run(test_db)
+    rows = conn.execute("SELECT status FROM jobs WHERE type='enrich_stretches'").fetchall()
+    assert [r[0] for r in rows] == ["queued"]
+    feed["items"] = [chunk(2)]
+    conn, _ = await run(test_db)  # one already pending -> no pile-up
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='enrich_stretches'").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_no_enrich_job_when_nothing_ingested(test_db, feed):
+    feed["items"] = []
+    conn, _ = await run(test_db)
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='enrich_stretches'").fetchone()[0] == 0

@@ -91,6 +91,14 @@ async def run_ingest_horton(job: dict, db_path: str) -> None:
                          (server_url, next_cursor))
         if counts["created"] or counts["updated"]:
             mark_graph_dirty(conn)
+            # Enrich-on-arrival: idempotent (content_hash), so an unscoped job is safe; skip if one
+            # is already waiting so bursts of ingests don't pile up.
+            pending = conn.execute("SELECT 1 FROM jobs WHERE type = 'enrich_stretches' AND status IN "
+                                   "('queued','running') LIMIT 1").fetchone()
+            if not pending:
+                conn.execute("INSERT INTO jobs (id, type, target, status, config) VALUES (?, "
+                             "'enrich_stretches', 'horton', 'queued', ?)",
+                             (str(uuid.uuid4()), json.dumps({})))
         conn.execute("UPDATE jobs SET result = ? WHERE id = ?", (json.dumps(counts), job["id"]))
         conn.commit()
         print(f"[ingest_horton] done: {counts}", flush=True)

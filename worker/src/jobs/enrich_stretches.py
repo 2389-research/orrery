@@ -63,13 +63,20 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
                     raise ValueError("document metadata has no office-local `day`")
                 mic_id = _mic_from_source_path(source_path)
                 todo = []
-                for s in split_document(doc_id, mic_id, content or "", day):
-                    row = conn.execute("SELECT content_hash FROM stretches WHERE stretch_id = ?",
-                                       (s["stretch_id"],)).fetchone()
+                current = split_document(doc_id, mic_id, content or "", day)
+                for s in current:
+                    row = conn.execute('SELECT content_hash, start, "end", silo_id FROM stretches '
+                                       "WHERE stretch_id = ?", (s["stretch_id"],)).fetchone()
                     # content_hash covers the stretch TEXT only, so prompt/code improvements don't
                     # regenerate stored facets; `force` bypasses this skip to re-enrich everything.
                     if not force and row and row[0] == s["content_hash"]:
                         counts["skipped"] += 1
+                        # Body unchanged, but day/silo may have been corrected: refresh the
+                        # event-time fields cheaply (no model call).
+                        if (row[1], row[2], row[3]) != (s["start"], s["end"], silo_id):
+                            conn.execute('UPDATE stretches SET start = ?, "end" = ?, silo_id = ? '
+                                         "WHERE stretch_id = ?",
+                                         (s["start"], s["end"], silo_id, s["stretch_id"]))
                     else:
                         todo.append(s)
                 for i in range(0, len(todo), BATCH_SIZE):
@@ -87,6 +94,13 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
                             json.dumps(f.get("ideas", [])), json.dumps(f.get("nouns", []))))
                         counts["enriched"] += 1
                     conn.commit()
+                # Reconcile: a revised transcript may split into fewer stretches; drop stale rows.
+                keep = [s["stretch_id"] for s in current]
+                marks = ",".join("?" * len(keep))
+                conn.execute(f"DELETE FROM stretches WHERE doc_id = ?"
+                             + (f" AND stretch_id NOT IN ({marks})" if keep else ""),
+                             [doc_id, *keep])
+                conn.commit()
             except Exception as e:
                 conn.rollback()
                 counts["doc_errors"] += 1

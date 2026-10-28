@@ -257,6 +257,8 @@ def run_batch_normalization(conn: sqlite3.Connection) -> dict:
                 plural_kinds = _entity_kind_set(conn, eid)
                 if plural_kinds:
                     for k in sorted(plural_kinds, key=str):
+                        if k is None:
+                            continue  # real silo with unset kind: never merge on NULL (cf. _kinds_overlap)
                         # sentinel bucket = null-silo sources, which kind_match's inner
                         # join on silo_kind can't see; match them via silo_match(None).
                         frag, arg = (silo_match('e.id'), None) if k == NOSILO_KIND \

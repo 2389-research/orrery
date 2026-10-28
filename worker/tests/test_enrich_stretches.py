@@ -184,3 +184,43 @@ async def test_force_bypasses_content_hash_skip(test_db, fake_enrich):
     _, result = await run(test_db, {"force": True})
     assert fake_enrich["calls"] > first
     assert result["enriched"] == 2 and result["skipped"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resplit_to_fewer_stretches_removes_orphans(test_db, fake_enrich):
+    conn = get_connection(test_db)
+    ids = seed(conn, n=1)
+    conn.close()
+    await run(test_db)
+    conn = get_connection(test_db)
+    conn.execute("INSERT INTO stretches (stretch_id, doc_id, mic_id, silo_id, start, \"end\", content_hash) "
+                 "VALUES ('stale', ?, 'MIC0', 'coll1', 's', 'e', 'x')", (ids[0],))
+    conn.commit()
+    conn.close()
+    conn, _ = await run(test_db)
+    assert conn.execute("SELECT COUNT(*) FROM stretches WHERE stretch_id='stale'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM stretches WHERE doc_id=?", (ids[0],)).fetchone()[0] >= 1
+    # zero-stretch split clears everything for that doc
+    conn.execute("UPDATE documents SET content = '' WHERE id = ?", (ids[0],))
+    conn.commit()
+    conn.close()
+    conn, _ = await run(test_db)
+    assert conn.execute("SELECT COUNT(*) FROM stretches WHERE doc_id=?", (ids[0],)).fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_day_change_same_body_refreshes_event_time_without_model_call(test_db, fake_enrich):
+    conn = get_connection(test_db)
+    ids = seed(conn, n=1)
+    conn.close()
+    await run(test_db)
+    first = fake_enrich["calls"]
+    conn = get_connection(test_db)
+    conn.execute("UPDATE documents SET metadata = ? WHERE id = ?",
+                 (json.dumps({"day": "2026-10-16"}), ids[0]))
+    conn.commit()
+    conn.close()
+    conn, result = await run(test_db)
+    assert fake_enrich["calls"] == first
+    start, end = conn.execute('SELECT start, "end" FROM stretches WHERE doc_id=?', (ids[0],)).fetchone()
+    assert start.startswith("2026-10-16") and end.startswith("2026-10-16")

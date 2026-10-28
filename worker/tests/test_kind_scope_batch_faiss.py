@@ -179,3 +179,15 @@ def test_two_null_kind_silos_exact_not_auto_merged(test_db):
         norm.run_batch_normalization(conn)
     assert _count(conn) == 2
     conn.close()
+
+
+def test_plural_unset_kind_silos_not_collapsed(test_db):
+    conn = get_connection(test_db)
+    _setup(conn, None, None)  # two real silos, both with unset provenance_kind
+    _add_entity(conn, "sing", "agent", "B", stored_vec=VEC["base"])
+    _add_entity(conn, "plur", "agents", "A")
+    with patch.object(norm, "embed_entities", _embedder({"agents": VEC["base"]})):
+        res = norm.run_batch_normalization(conn)
+    assert res["plural_merges"] == 0
+    assert _count(conn) == 2
+    conn.close()

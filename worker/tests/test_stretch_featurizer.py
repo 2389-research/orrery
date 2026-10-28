@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from src.jobs.stretch_featurizer import build_prompt, enrich_batch, normalize_facet
 
 
@@ -75,3 +77,16 @@ def test_build_prompt_contains_ids_and_system_text():
     assert "abc123" in p and "def456" in p
     assert "write a careful facet for EACH stretch" in p
     assert "[abc123] (m1 10:05)" in p
+
+
+@pytest.mark.asyncio
+async def test_non_string_leaf_id_is_skipped_not_raised():
+    from src.jobs.stretch_featurizer import _call
+    st = [{"stretch_id": "s1", "text": "hello there", "start": "a", "end": "b"}]
+    bad = json.dumps([{"leaf_id": [], "summary": "x"}, {"leaf_id": {"a": 1}, "summary": "y"}])
+
+    class R:
+        async def complete(self, **kw):
+            return type("T", (), {"text": bad})()
+
+    assert await _call(R(), "m", st) == {}

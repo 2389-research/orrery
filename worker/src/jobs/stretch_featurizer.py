@@ -96,7 +96,7 @@ async def _call(relay, model: str, stretches: list[dict]) -> dict[str, dict]:
         if not isinstance(raw, dict):
             continue
         sid = raw.get("leaf_id", raw.get("stretch_id"))
-        if sid in by_id and sid not in out and isinstance(raw.get("summary"), str):
+        if isinstance(sid, str) and sid in by_id and sid not in out and isinstance(raw.get("summary"), str):
             out[sid] = normalize_facet(raw, by_id[sid]["text"])
     return out
 
