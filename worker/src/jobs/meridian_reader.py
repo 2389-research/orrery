@@ -10,6 +10,9 @@ from typing import Callable
 
 def make_fetch(base_url: str, timeout: float = 30.0) -> Callable:
     """GET `base_url + path` with query params; returns parsed JSON (dict)."""
+    if urllib.parse.urlparse(base_url).scheme.lower() not in ("http", "https"):
+        # urlopen also serves file:/ftp: — a request-supplied URL must not read local files.
+        raise ValueError(f"meridian server_url must be http or https: {base_url!r}")
     base = base_url.rstrip("/")
 
     def fetch(path: str, params: dict | None = None) -> dict:
@@ -56,7 +59,7 @@ def get_agents(fetch, session_key: str) -> list[dict]:
 def get_records(fetch, session_key: str) -> list[dict]:
     """All records of a session from the start, deduped by uuid, inherited dropped."""
     path = f"/v1/sessions/{_sk(session_key)}/records"
-    out, seen, token = [], set(), None
+    out, seen, token, seen_tokens = [], set(), None, set()
     while True:
         page = fetch(path, {"page_token": token} if token else None)
         for r in page.get("items") or []:
@@ -69,8 +72,10 @@ def get_records(fetch, session_key: str) -> list[dict]:
                 seen.add(u)
             out.append(r)
         token = page.get("next_page_token")
-        if not token:
+        if not token or token in seen_tokens:
+            # Missing token ends the walk; a repeated one is a buggy server — stop, don't spin.
             return out
+        seen_tokens.add(token)
 
 
 def _blocks_text(role: str, content) -> list[str]:

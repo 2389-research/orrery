@@ -96,3 +96,24 @@ def test_spawn_depth_derived_from_parent_chain_when_absent():
               {"agent_id": "a2", "parent_agent_id": "a1", "parent_tool_use_id": "tu10"}]
     recs = [_rec("x", "a2", text="deep")]
     assert iter_agent_segments(recs, agents)[0]["spawn_depth"] == 2
+
+
+def test_make_fetch_rejects_non_http_scheme():
+    import pytest
+    from src.jobs.meridian_reader import make_fetch
+    for bad in ("file:///etc/passwd", "ftp://x/y", "/etc/passwd"):
+        with pytest.raises(ValueError):
+            make_fetch(bad)
+    make_fetch("http://localhost:8080")
+    make_fetch("https://example.com")
+
+
+def test_get_records_stops_on_repeated_page_token():
+    path = "/v1/sessions/s%2F1/records"
+    fetch = fake_fetch({
+        (path, ""): {"items": [_rec("m1")], "next_page_token": "t1"},
+        (path, "t1"): {"items": [_rec("m2")], "next_page_token": "t1"},
+    })
+    recs = get_records(fetch, "s/1")
+    assert [r["uuid"] for r in recs] == ["m1", "m2"]
+    assert len(fetch.calls) == 2

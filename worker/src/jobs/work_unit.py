@@ -169,6 +169,8 @@ def resolve_work_units(agents, session, records):
     roots = {}
     for r in records:
         raw = r.get("raw") or {}
+        if not isinstance(raw, dict):
+            continue  # one malformed (string) record can't fail the whole session
         by_agent.setdefault(r.get("agent_id") or "main", []).append(raw)
         root, remote = _git_state(raw)
         if root:

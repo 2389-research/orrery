@@ -450,8 +450,13 @@ async def run_ingest_meridian(job: dict, db_path: str) -> None:
 
         items, next_cursor, _ = list_changed_sessions(fetch, cursor)
         for item in items:
-            outcome = await _process_session(conn, relay, sum_model, classify_model, taxonomy,
-                                             fetch, collection_id, item)
+            try:
+                outcome = await _process_session(conn, relay, sum_model, classify_model, taxonomy,
+                                                 fetch, collection_id, item)
+            except Exception as e:  # one bad session must not block the cursor for all the rest
+                print(f"[ingest_meridian] session {item.get('session_key')}: {type(e).__name__}: {e}, "
+                      "will retry", flush=True)
+                outcome = "retry"
             counts[outcome] += 1
 
         if counts["retry"] == 0 and next_cursor and next_cursor != cursor:

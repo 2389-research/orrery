@@ -233,3 +233,10 @@ def test_gitlab_mr_url_sets_key():
 def test_agent_without_id_is_skipped():
     out = resolve_work_units([{"parent_agent_id": None}, agent("main")], session(GH), [])
     assert "main" in out and None not in out
+
+
+def test_string_raw_record_is_skipped_not_fatal():
+    good = rec("main", f"{GH}/proj")
+    bad = {"agent_id": "main", "uuid": "bad", "seq": 1, "raw": "not a dict"}
+    out = resolve_work_units([agent("main")], {}, [bad, good])
+    assert "main" in out

@@ -49,3 +49,16 @@ def test_work_units_route_404_without_meridian_collection(test_client, test_stor
     r = test_client.post("/ingest/meridian/work-units", json={"server_url": "http://x"})
     assert r.status_code == 404
     assert test_store.conn.execute("SELECT COUNT(*) FROM jobs WHERE type='work_unit_backfill'").fetchone()[0] == 0
+
+
+def test_route_409_on_existing_non_meridian_collection(test_client, test_store):
+    import uuid
+    test_store.collections.create(str(uuid.uuid4()), "Code Sessions", "Code Sessions", "x", kind="git_repo")
+    r = test_client.post("/ingest/meridian", json={"server_url": "http://x"})
+    assert r.status_code == 409
+    assert test_store.conn.execute("SELECT COUNT(*) FROM jobs WHERE type='ingest_meridian'").fetchone()[0] == 0
+
+
+def test_route_rejects_non_http_server_url(test_client, test_store):
+    r = test_client.post("/ingest/meridian", json={"server_url": "file:///etc/passwd"})
+    assert r.status_code == 422

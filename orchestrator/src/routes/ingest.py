@@ -785,6 +785,9 @@ async def ingest_meridian(request: MeridianIngestRequest, auth: AuthStore = Depe
         created = False
         existing = store.collections.get_by_path(request.name)
         if existing:
+            if existing.get("kind") != "meridian":
+                raise HTTPException(status_code=409,
+                                    detail=f"'{request.name}' is an existing non-meridian collection")
             collection_id = existing["id"]
         else:
             collection_id = str(uuid.uuid4())
@@ -797,6 +800,9 @@ async def ingest_meridian(request: MeridianIngestRequest, auth: AuthStore = Depe
                 existing = store.collections.get_by_path(request.name)
                 if not existing:
                     raise
+                if existing.get("kind") != "meridian":
+                    raise HTTPException(status_code=409,
+                                        detail=f"'{request.name}' is an existing non-meridian collection")
                 collection_id = existing["id"]
 
         # Reuse the workspace's general spec if present, else seed the built-in text one.

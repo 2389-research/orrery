@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, field_validator
 from datetime import datetime
 
 class DocumentSummary(BaseModel):
@@ -131,10 +133,22 @@ class CcvaultIngestRequest(BaseModel):
     provenance_kind: str | None = None  # override; defaults to agent_report for a ccvault silo
 
 
+def _http_url(v: str) -> str:
+    """The worker fetches server_url with urllib, which also opens file:/ftp: — allow http(s) only."""
+    if urlparse(v).scheme.lower() not in ("http", "https"):
+        raise ValueError("server_url must be an http or https URL")
+    return v
+
+
 class HortonIngestRequest(BaseModel):
     """Ingest Horton office-mic transcripts; collections are derived per chunk by the worker."""
     server_url: str = "http://localhost:8080"
     spec_id: str | None = None
+
+    @field_validator("server_url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _http_url(v)
 
 
 class EnrichStretchesRequest(BaseModel):
@@ -150,3 +164,8 @@ class MeridianIngestRequest(BaseModel):
     """Ingest Claude Code sessions from a meridian server into a noosphere (workspace)."""
     server_url: str = "http://localhost:8080"
     name: str = "Code Sessions"
+
+    @field_validator("server_url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _http_url(v)

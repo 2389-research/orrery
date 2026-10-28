@@ -243,3 +243,26 @@ def test_rederive_keeps_work_unit_and_no_duplicate_docs(monkeypatch, test_db):
     assert again[0] and again[0] == first[0]
     assert again[1] == first[1]
     assert again[3] == first[3]
+
+
+def test_raising_session_is_counted_retry_and_loop_continues(monkeypatch, test_db):
+    cid, job = _setup(monkeypatch, test_db, _fake_fetch([MAIN, SUB], RECS))
+    real = mod._process_session
+    seen = []
+
+    async def flaky(conn, relay, sm, cm, tx, fetch, collection_id, item):
+        seen.append(item)
+        if len(seen) == 1:
+            raise RuntimeError("HTTP 500")
+        return await real(conn, relay, sm, cm, tx, fetch, collection_id, item)
+
+    monkeypatch.setattr(mod, "_process_session", flaky)
+    asyncio.run(mod.run_ingest_meridian(job, test_db))
+    conn = get_connection(test_db)
+    try:
+        assert len(seen) >= 1
+        res = json.loads(conn.execute("SELECT result FROM jobs WHERE id=?", (job["id"],)).fetchone()[0])
+        assert res["retry"] == 1
+        assert conn.execute("SELECT COUNT(*) FROM meridian_cursor WHERE collection_id=?", (cid,)).fetchone()[0] == 0
+    finally:
+        conn.close()
