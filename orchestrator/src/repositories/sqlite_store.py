@@ -7,6 +7,7 @@ just organized behind a clean interface.
 """
 
 import json
+import re
 import sqlite3
 from .interfaces import (
     DataStore,
@@ -273,14 +274,18 @@ class SQLiteDocumentRepository(DocumentRepository):
                        limit=100, offset=0, in_slice=False):
         """Stretches ordered by event time (`start` ASC). since/until select stretches that
         OVERLAP the window: "end" >= since AND start <= until. `end` is a reserved word.
+        Stored times are naive office-local ISO; bounds are interpreted as office-local too (a
+        trailing Z / numeric offset is stripped, not converted).
         Only stretches whose source document is active (`invalid_at IS NULL`) are returned.
         in_slice: restrict to documents in TEMP TABLE `_slice_docs` (precondition:
         ensure_slice_doc_temp_table on this connection); it carries the validity rule."""
         where, params = [], []
         if since:
-            where.append('s."end" >= ?'); params.append(since)
+            where.append('s."end" >= ?')
+            params.append(_office_local(since))
         if until:
-            where.append("s.start <= ?"); params.append(until)
+            where.append("s.start <= ?")
+            params.append(_office_local(until))
         if mic:
             where.append("s.mic_id = ?"); params.append(mic)
         if collection:
@@ -306,6 +311,16 @@ class SQLiteDocumentRepository(DocumentRepository):
                     d[k] = []
             out.append(d)
         return out
+
+
+_TZ_SUFFIX = re.compile(r"(Z|z|[+-]\d{2}(:?\d{2})?)$")
+
+
+def _office_local(ts: str) -> str:
+    """Strip a trailing UTC/offset designator from a time bound so it compares against the
+    naive office-local strings stored in stretches. Date-only / naive inputs are unchanged."""
+    ts = ts.strip()
+    return _TZ_SUFFIX.sub("", ts) if "T" in ts else ts
 
 
 class SQLiteChunkRepository(ChunkRepository):

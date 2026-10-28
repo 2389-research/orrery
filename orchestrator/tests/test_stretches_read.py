@@ -53,6 +53,15 @@ def test_overlap_semantics(test_client, test_store):
     assert [s["stretch_id"] for s in r.json()] == ["s1"]
 
 
+def test_offset_bearing_bounds_are_read_as_office_local(test_client, test_store):
+    _seed(test_store)
+    for since, until in (("2026-10-01T00:00:00Z", "2026-10-01T23:59:59+00:00"),
+                         ("2026-10-01T00:00:00-0700", "2026-10-01T23:59:59.5Z")):
+        r = test_client.get("/stretches", params={"since": since, "until": until}, headers=H)
+        assert r.status_code == 200
+        assert [s["stretch_id"] for s in r.json()] == ["s1", "s2"]
+
+
 def test_mic_and_collection_filter(test_client, test_store):
     _seed(test_store)
     assert [s["stretch_id"] for s in test_client.get("/stretches", params={"mic": "micB"}, headers=H).json()] == ["s3"]

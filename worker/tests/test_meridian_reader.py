@@ -1,6 +1,8 @@
 # ABOUTME: Tests for the meridian pull-API reader — fake fetch, no network.
 # ABOUTME: Fixtures are shaped after meridian/fixtures/api (envelopes, agent_id, raw dicts).
 
+import pytest
+
 from src.jobs.meridian_reader import (
     get_agents, get_records, get_session, iter_agent_segments, list_changed_sessions,
 )
@@ -99,7 +101,6 @@ def test_spawn_depth_derived_from_parent_chain_when_absent():
 
 
 def test_make_fetch_rejects_non_http_scheme():
-    import pytest
     from src.jobs.meridian_reader import make_fetch
     for bad in ("file:///etc/passwd", "ftp://x/y", "/etc/passwd"):
         with pytest.raises(ValueError):
@@ -108,12 +109,12 @@ def test_make_fetch_rejects_non_http_scheme():
     make_fetch("https://example.com")
 
 
-def test_get_records_stops_on_repeated_page_token():
+def test_get_records_raises_on_repeated_page_token():
     path = "/v1/sessions/s%2F1/records"
     fetch = fake_fetch({
         (path, ""): {"items": [_rec("m1")], "next_page_token": "t1"},
         (path, "t1"): {"items": [_rec("m2")], "next_page_token": "t1"},
     })
-    recs = get_records(fetch, "s/1")
-    assert [r["uuid"] for r in recs] == ["m1", "m2"]
+    with pytest.raises(RuntimeError, match="page token repeated"):
+        get_records(fetch, "s/1")
     assert len(fetch.calls) == 2

@@ -95,11 +95,20 @@ async def ingest_horton_chunks(conn, relay, settings, *, server_url: str, cursor
                      (cursor_key, next_cursor))
     if actions["created"] or actions["updated"]:
         mark_graph_dirty(conn)
-        # Enrich-on-arrival: idempotent (content_hash), so an unscoped job is safe; skip if one
-        # is already waiting so bursts of ingests don't pile up.
-        pending = conn.execute("SELECT 1 FROM jobs WHERE type = 'enrich_stretches' AND status IN "
-                               "('queued','running') LIMIT 1").fetchone()
-        if not pending:
+        # Enrich-on-arrival: idempotent (content_hash), so an unscoped job is safe. Skip only if
+        # an UNSCOPED one is already waiting (a scoped one may exclude these new docs).
+        scope_keys = ("collection", "since", "until", "limit")
+        covered = False
+        for (cfg,) in conn.execute("SELECT config FROM jobs WHERE type = 'enrich_stretches' "
+                                   "AND status IN ('queued','running')").fetchall():
+            try:
+                c = json.loads(cfg) if cfg else {}
+            except (TypeError, ValueError):
+                c = {"limit": 1}  # unparseable: can't prove it's unscoped
+            if not isinstance(c, dict) or not any(c.get(k) for k in scope_keys):
+                covered = True
+                break
+        if not covered:
             conn.execute("INSERT INTO jobs (id, type, target, status, config) VALUES (?, "
                          "'enrich_stretches', 'horton', 'queued', ?)",
                          (str(uuid.uuid4()), json.dumps({})))

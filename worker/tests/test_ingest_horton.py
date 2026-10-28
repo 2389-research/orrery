@@ -189,6 +189,31 @@ async def test_enrich_job_enqueued_once_after_ingest_creates_docs(test_db, feed)
 
 
 @pytest.mark.asyncio
+async def test_scoped_pending_enrich_does_not_suppress_arrival_job(test_db, feed):
+    conn = get_connection(test_db)
+    conn.execute("INSERT INTO jobs (id, type, target, status, config) VALUES (?, 'enrich_stretches', "
+                 "'horton', 'queued', ?)", (str(uuid.uuid4()), json.dumps({"collection": "other"})))
+    conn.commit()
+    conn.close()
+    feed["items"] = [chunk(1)]
+    conn, _ = await run(test_db)
+    cfgs = [r[0] for r in conn.execute("SELECT config FROM jobs WHERE type='enrich_stretches'")]
+    assert sorted(cfgs) == sorted([json.dumps({"collection": "other"}), "{}"])
+
+
+@pytest.mark.asyncio
+async def test_unscoped_pending_enrich_suppresses_arrival_job(test_db, feed):
+    conn = get_connection(test_db)
+    conn.execute("INSERT INTO jobs (id, type, target, status, config) VALUES (?, 'enrich_stretches', "
+                 "'horton', 'running', ?)", (str(uuid.uuid4()), json.dumps({})))
+    conn.commit()
+    conn.close()
+    feed["items"] = [chunk(1)]
+    conn, _ = await run(test_db)
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='enrich_stretches'").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
 async def test_no_enrich_job_when_nothing_ingested(test_db, feed):
     feed["items"] = []
     conn, _ = await run(test_db)

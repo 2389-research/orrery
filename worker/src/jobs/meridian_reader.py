@@ -72,9 +72,13 @@ def get_records(fetch, session_key: str) -> list[dict]:
                 seen.add(u)
             out.append(r)
         token = page.get("next_page_token")
-        if not token or token in seen_tokens:
-            # Missing token ends the walk; a repeated one is a buggy server — stop, don't spin.
+        if not token:
             return out
+        if token in seen_tokens:
+            # A buggy server. A partial list would be stored, the revision marked processed and
+            # the cursor advanced, silently dropping records — refuse so the session retries.
+            raise RuntimeError(f"meridian get_records: page token repeated for {session_key} "
+                               "— partial result refused")
         seen_tokens.add(token)
 
 
