@@ -15,7 +15,7 @@ from ..dependencies import get_auth_store, require_writable, AuthStore
 from ..models import (IngestResult, DirectoryIngestRequest, RepoIngestRequest,
                       TrackerRunsIngestRequest, TextIngestRequest, CcvaultIngestRequest,
                       PdfIngestRequest, MeridianIngestRequest,
-                      HortonIngestRequest)
+                      HortonIngestRequest, EnrichStretchesRequest)
 from ..pipeline.chunker import chunk_document
 from ..pipeline.excerpt import build_classification_excerpt
 from ..pipeline.classifier import classify_document
@@ -737,6 +737,27 @@ async def ingest_horton(request: HortonIngestRequest, auth: AuthStore = Depends(
         store.jobs.create(job_id, "ingest_horton", "horton", {
             "server_url": request.server_url,
             "spec_id": spec_id,
+        })
+    finally:
+        store.close()
+
+    return {"job_id": job_id}
+
+
+@router.post("/enrich/stretches", status_code=status.HTTP_202_ACCEPTED)
+async def enrich_stretches(request: EnrichStretchesRequest, auth: AuthStore = Depends(require_writable)):
+    """Enqueue the enrich_stretches worker job (scoped backfill; idempotent, no graph mutation).
+
+    No collection is created. The workspace is chosen by the X-Workspace-Id header.
+    """
+    store = auth.store
+    try:
+        job_id = str(uuid.uuid4())
+        store.jobs.create(job_id, "enrich_stretches", "stretches", {
+            "collection": request.collection,
+            "since": request.since,
+            "until": request.until,
+            "limit": request.limit,
         })
     finally:
         store.close()

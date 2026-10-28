@@ -137,6 +137,14 @@ class HortonIngestRequest(BaseModel):
     spec_id: str | None = None
 
 
+class EnrichStretchesRequest(BaseModel):
+    """Enqueue transcript stretch enrichment, optionally scoped by collection / time window."""
+    collection: str | None = None
+    since: str | None = None
+    until: str | None = None
+    limit: int | None = None
+
+
 class MeridianIngestRequest(BaseModel):
     """Ingest Claude Code sessions from a meridian server into a noosphere (workspace)."""
     server_url: str = "http://localhost:8080"
