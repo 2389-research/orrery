@@ -364,6 +364,22 @@ CREATE TABLE IF NOT EXISTS horton_cursor (
     server_url TEXT PRIMARY KEY,
     after TEXT
 );
+CREATE TABLE IF NOT EXISTS stretches (
+    stretch_id TEXT PRIMARY KEY,
+    doc_id TEXT,
+    mic_id TEXT,
+    silo_id TEXT,
+    start TEXT,
+    end TEXT,
+    content_hash TEXT,
+    summary TEXT,
+    concepts TEXT,   -- JSON [{tag,statement}]
+    ideas TEXT,      -- JSON [{kind,text,quote,quote_ok}]
+    nouns TEXT,      -- JSON [str]
+    enriched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_stretches_start ON stretches(start);
+CREATE INDEX IF NOT EXISTS idx_stretches_doc ON stretches(doc_id);
 """
 
 # Unifies the two silo tables so a consumer resolves a document's provenance kind with
