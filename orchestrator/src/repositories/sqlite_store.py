@@ -268,6 +268,36 @@ class SQLiteDocumentRepository(DocumentRepository):
         return {"entities_removed": entities_removed}
 
 
+    def list_stretches(self, since=None, until=None, mic=None, collection=None,
+                       limit=100, offset=0):
+        """Stretches ordered by event time (`start` ASC). since/until select stretches that
+        OVERLAP the window: "end" >= since AND start <= until. `end` is a reserved word."""
+        where, params = [], []
+        if since:
+            where.append('"end" >= ?'); params.append(since)
+        if until:
+            where.append("start <= ?"); params.append(until)
+        if mic:
+            where.append("mic_id = ?"); params.append(mic)
+        if collection:
+            where.append("silo_id = ?"); params.append(collection)
+        sql = ('SELECT stretch_id, doc_id, mic_id, start, "end", summary, concepts, ideas, nouns '
+               "FROM stretches" + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY start ASC, stretch_id ASC LIMIT ? OFFSET ?")
+        rows = self._conn.execute(sql, (*params, limit, offset)).fetchall()
+        out = []
+        for r in rows:
+            d = {"stretch_id": r[0], "doc_id": r[1], "mic_id": r[2], "start": r[3],
+                 "end": r[4], "summary": r[5]}
+            for k, v in zip(("concepts", "ideas", "nouns"), r[6:9]):
+                try:
+                    d[k] = json.loads(v) if v else []
+                except (TypeError, ValueError):
+                    d[k] = []
+            out.append(d)
+        return out
+
+
 class SQLiteChunkRepository(ChunkRepository):
     def __init__(self, conn):
         self._conn = conn

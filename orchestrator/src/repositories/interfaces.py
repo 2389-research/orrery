@@ -213,6 +213,11 @@ class DocumentRepository(ABC):
     @abstractmethod
     def delete(self, doc_id: str) -> dict: ...
 
+    @abstractmethod
+    def list_stretches(self, since: str | None = None, until: str | None = None,
+                       mic: str | None = None, collection: str | None = None,
+                       limit: int = 100, offset: int = 0) -> list[dict]: ...
+
 
 class ChunkRepository(ABC):
     @abstractmethod
