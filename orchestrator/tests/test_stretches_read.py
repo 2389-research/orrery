@@ -3,7 +3,14 @@ import json
 H = {"X-Workspace-Id": "default"}
 
 
+def _seed_doc(store, doc_id="d1", invalid_at=None):
+    store.conn.execute("INSERT OR IGNORE INTO documents (id, title, invalid_at) VALUES (?,?,?)",
+                       (doc_id, doc_id, invalid_at))
+    store.conn.commit()
+
+
 def _seed(store):
+    _seed_doc(store, "d1")
     rows = [
         ("s3", "d1", "micB", "2026-10-02T09:00:00", "2026-10-02T09:10:00"),
         ("s1", "d1", "micA", "2026-10-01T09:00:00", "2026-10-01T09:10:00"),
@@ -59,3 +66,54 @@ def test_limit_and_offset_are_clamped(test_client, test_store):
     assert r.status_code == 200 and len(r.json()) == 1  # limit floored to 1, offset to 0
     r = test_client.get("/stretches", params={"limit": 10**9}, headers=H)
     assert r.status_code == 200 and len(r.json()) == 3
+
+
+def test_excludes_stretch_of_invalid_doc(test_client, test_store):
+    _seed(test_store)
+    test_store.conn.execute("UPDATE documents SET invalid_at = '2026-10-03 00:00:00' WHERE id='d1'")
+    test_store.conn.commit()
+    assert test_client.get("/stretches", headers=H).json() == []
+
+
+def test_excludes_stretch_with_missing_doc(test_client, test_store):
+    _seed(test_store)
+    test_store.conn.execute("DELETE FROM documents WHERE id='d1'")
+    test_store.conn.commit()
+    assert test_client.get("/stretches", headers=H).json() == []
+
+
+def test_document_delete_removes_stretches(test_client, test_store):
+    _seed(test_store)
+    _seed_doc(test_store, "d2")
+    test_store.conn.execute(
+        'INSERT INTO stretches (stretch_id, doc_id, start, "end") VALUES ("x1","d2","2026-10-01","2026-10-01")')
+    test_store.conn.commit()
+    test_store.documents.delete("d1")
+    left = [r[0] for r in test_store.conn.execute("SELECT stretch_id FROM stretches").fetchall()]
+    assert left == ["x1"]
+
+
+def test_virtual_noosphere_slice_limits_stretches(test_client, test_store, tmp_path, monkeypatch):
+    from src.routes import workspace_routes
+    monkeypatch.setattr(workspace_routes, "_registry_path",
+                        lambda create=True: str(tmp_path / "registry.json"))
+    _seed(test_store)  # d1: s1,s2,s3 (created now -> in a 1w window)
+    _seed_doc(test_store, "d_old")
+    test_store.conn.execute("UPDATE documents SET created_at='2020-01-01 00:00:00' WHERE id='d_old'")
+    test_store.conn.execute(
+        'INSERT INTO stretches (stretch_id, doc_id, start, "end") VALUES ("old","d_old","2026-10-01","2026-10-01")')
+    test_store.conn.commit()
+    assert len(test_client.get("/stretches", headers=H).json()) == 4
+    vid = test_client.post("/views", json={"name": "wk", "parent": "default",
+                                           "slice": {"window": "1w"}}).json()["id"]
+    r = test_client.get("/stretches", headers={"X-Workspace-Id": vid}).json()
+    assert set(r) == {"stretches", "scope"}
+    assert sorted(s["stretch_id"] for s in r["stretches"]) == ["s1", "s2", "s3"]
+
+
+def test_strip_userinfo():
+    from src.routes.graph import _strip_userinfo
+    assert _strip_userinfo("https://user:tok@github.com/o/r.git") == "https://github.com/o/r.git"
+    assert _strip_userinfo("https://github.com/o/r.git") == "https://github.com/o/r.git"
+    assert _strip_userinfo("git@github.com:o/r.git") == "git@github.com:o/r.git"
+    assert _strip_userinfo(None) is None

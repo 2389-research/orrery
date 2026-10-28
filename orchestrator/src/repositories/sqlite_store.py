@@ -262,6 +262,7 @@ class SQLiteDocumentRepository(DocumentRepository):
             )
 
         conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM stretches WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         conn.commit()
 
@@ -269,21 +270,30 @@ class SQLiteDocumentRepository(DocumentRepository):
 
 
     def list_stretches(self, since=None, until=None, mic=None, collection=None,
-                       limit=100, offset=0):
+                       limit=100, offset=0, in_slice=False):
         """Stretches ordered by event time (`start` ASC). since/until select stretches that
-        OVERLAP the window: "end" >= since AND start <= until. `end` is a reserved word."""
+        OVERLAP the window: "end" >= since AND start <= until. `end` is a reserved word.
+        Only stretches whose source document is active (`invalid_at IS NULL`) are returned.
+        in_slice: restrict to documents in TEMP TABLE `_slice_docs` (precondition:
+        ensure_slice_doc_temp_table on this connection); it carries the validity rule."""
         where, params = [], []
         if since:
-            where.append('"end" >= ?'); params.append(since)
+            where.append('s."end" >= ?'); params.append(since)
         if until:
-            where.append("start <= ?"); params.append(until)
+            where.append("s.start <= ?"); params.append(until)
         if mic:
-            where.append("mic_id = ?"); params.append(mic)
+            where.append("s.mic_id = ?"); params.append(mic)
         if collection:
-            where.append("silo_id = ?"); params.append(collection)
-        sql = ('SELECT stretch_id, doc_id, mic_id, start, "end", summary, concepts, ideas, nouns '
-               "FROM stretches" + (" WHERE " + " AND ".join(where) if where else "")
-               + " ORDER BY start ASC, stretch_id ASC LIMIT ? OFFSET ?")
+            where.append("s.silo_id = ?"); params.append(collection)
+        if in_slice:
+            join = "JOIN documents d ON d.id = s.doc_id"
+            where.append("s.doc_id IN (SELECT doc_id FROM _slice_docs)")
+        else:
+            join = "JOIN documents d ON d.id = s.doc_id AND d.invalid_at IS NULL"
+        sql = ('SELECT s.stretch_id, s.doc_id, s.mic_id, s.start, s."end", s.summary, '
+               "s.concepts, s.ideas, s.nouns "
+               f"FROM stretches s {join}" + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY s.start ASC, s.stretch_id ASC LIMIT ? OFFSET ?")
         rows = self._conn.execute(sql, (*params, limit, offset)).fetchall()
         out = []
         for r in rows:

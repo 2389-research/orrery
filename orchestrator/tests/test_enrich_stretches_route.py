@@ -22,3 +22,10 @@ def test_force_flag_passed_through(test_client, test_store):
     row = test_store.conn.execute(
         "SELECT config FROM jobs WHERE type='enrich_stretches' ORDER BY rowid DESC").fetchone()
     assert json.loads(row[0])["force"] is True
+
+
+def test_nonpositive_limit_rejected(test_client):
+    for bad in (0, -3):
+        r = test_client.post("/enrich/stretches", json={"limit": bad},
+                             headers={"X-Workspace-Id": "default"})
+        assert r.status_code == 422

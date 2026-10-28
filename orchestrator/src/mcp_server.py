@@ -412,6 +412,8 @@ async def get_stretches(since: str = "", until: str = "", mic: str = "", collect
     params["limit"] = limit
     params["offset"] = offset
     resp = await call_api("/stretches", params=params)
+    if isinstance(resp, dict) and "stretches" in resp:  # sliced (virtual noosphere) shape
+        resp = resp["stretches"]
     if isinstance(resp, dict):
         return f"Error: {resp.get('detail', resp)}"
     lines = [f"Stretches ({len(resp)}):"]
@@ -421,7 +423,10 @@ async def get_stretches(since: str = "", until: str = "", mic: str = "", collect
         for c in st.get("concepts") or []:
             lines.append(f"      concept {c.get('tag')}: {c.get('statement')}")
         for i in st.get("ideas") or []:
-            lines.append(f"      idea ({i.get('kind')}): {i.get('text')}")
+            line = f"      idea ({i.get('kind')}): {i.get('text')}"
+            if i.get("quote"):
+                line += f' — quote: "{i.get("quote")}" (quote_ok={i.get("quote_ok")})'
+            lines.append(line)
         if st.get("nouns"):
             lines.append(f"      nouns: {', '.join(map(str, st['nouns']))}")
     return "\n".join(lines)

@@ -206,3 +206,12 @@ async def test_get_entity_slices_cooccurrences(monkeypatch):
     await mcp_server.get_entity("A", domain="a/b")
     co = [c for c in calls if c["path"].endswith("/cooccurrences")]
     assert co and all(c["params"] == {"domain": "a/b"} for c in co), calls
+
+
+@pytest.mark.asyncio
+async def test_get_stretches_renders_quote_and_quote_ok(monkeypatch):
+    ideas = [{"kind": "decision", "text": "ship it", "quote": "let's ship", "quote_ok": True}]
+    _recorder(monkeypatch, lambda p: [{"start": "a", "end": "b", "mic_id": "m", "summary": "s",
+                                       "doc_id": "d1", "concepts": [], "ideas": ideas, "nouns": []}])
+    out = await mcp_server.get_stretches()
+    assert "let's ship" in out and "quote_ok=True" in out

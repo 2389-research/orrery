@@ -8,6 +8,7 @@ import dataclasses
 import json
 import threading
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException
 from ..dependencies import get_auth_store, AuthStore
@@ -128,6 +129,20 @@ def get_graph_data(silo: str | None = None, kind: str | None = None,
     return payload
 
 
+def _strip_userinfo(url):
+    """Drop `user[:token]@` credentials from an http(s)-style remote URL before exposing it.
+    scp-style (`git@host:org/repo`) has no scheme/netloc and is returned unchanged."""
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+        if parts.scheme and parts.netloc and "@" in parts.netloc:
+            return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+    except ValueError:
+        pass
+    return url
+
+
 def _collection_with_domain(conn, collection_id: str) -> dict:
     """Fetch a collection + its dominant domain (by doc count), as
     {id, name, kind, domain, document_count}. Raises 404 if it does not exist.
@@ -150,7 +165,7 @@ def _collection_with_domain(conn, collection_id: str) -> dict:
             "document_count": coll["document_count"],
             # RAW git remote (not normalized) — the repo side of the session<->repo
             # work-unit join; the consumer normalizes it to match work_unit.key.
-            "remote_url": coll["remote_url"]}
+            "remote_url": _strip_userinfo(coll["remote_url"])}
 
 
 @router.get("/collections/{collection_id}/structure")

@@ -1,6 +1,6 @@
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
 class DocumentSummary(BaseModel):
@@ -156,7 +156,7 @@ class EnrichStretchesRequest(BaseModel):
     collection: str | None = None
     since: str | None = None
     until: str | None = None
-    limit: int | None = None
+    limit: int | None = Field(default=None, ge=1)
     force: bool | None = None  # bypass content_hash skip; re-enrich all in-scope stretches
 
 
