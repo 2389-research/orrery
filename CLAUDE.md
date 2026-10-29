@@ -162,6 +162,8 @@ gemma4:26b      # classification, judging, generation (MoE, 4B active)
 gemma4:e4b      # extraction, clerk (8B dense, good at structured output)
 ```
 
+`SUMMARIZATION_MODEL` (`settings.summarization_model`) is the model for summaries and generation: codesum/tracksum, meridian/ccvault segment + rollup, stretch facets, and commentary. It defaults to `CLASSIFICATION_MODEL` when unset. Entity extraction stays on `EXTRACTION_MODEL`. A source-scan test (`worker/tests/test_summarization_model_routing.py`) enforces the split.
+
 The relay handles translation to Bedrock inference profile IDs when running in bedrock mode. For ollama, model names are passed through as-is. Check `packages/orrery-relay/src/orrery_relay/backends.py` for the current mapping.
 
 ### Two Deployment Tiers

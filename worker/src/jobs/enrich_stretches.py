@@ -32,7 +32,7 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
     config = json.loads(job["config"]) if job.get("config") else {}
     settings = get_settings()
     relay = Relay.from_settings(settings)
-    model = settings.extraction_model
+    model = settings.summarization_model
 
     conn = get_connection(db_path)
     try:

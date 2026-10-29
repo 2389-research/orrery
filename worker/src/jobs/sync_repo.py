@@ -194,7 +194,7 @@ async def sync_repo(conn, relay, settings, ws, source_config, source_id) -> dict
 
     # codesum traversal is synchronous and issues one blocking model call per re-summarized
     # node — run it off the event loop so the poll loop keeps ticking.
-    summarize_fn = make_summarize_fn(relay, settings.extraction_model)
+    summarize_fn = make_summarize_fn(relay, settings.summarization_model)
     artifacts = await asyncio.to_thread(
         summarize_repo_incremental, root_path, summarize_fn, coll_path,
         cache=cache, changed=changed, force_modules=force_modules,

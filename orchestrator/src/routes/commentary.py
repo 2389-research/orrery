@@ -16,7 +16,7 @@ class BackfillRequest(BaseModel):
     node_types: Optional[list[str]] = None                 # subset of {domain,collection}; None → both
     limit: int = Field(default=50, ge=1, le=2000)          # max nodes per type to generate (bounded — see design §3.4)
     only_missing: bool = True                              # skip nodes that already have commentary
-    model: Optional[str] = None                            # None → worker's extraction_model
+    model: Optional[str] = None                            # None → worker's summarization_model
     enroll: bool = True                                    # also opt this noosphere into the ongoing idle commentary sweep
 
 

@@ -363,7 +363,7 @@ async def poll_loop():
         if enrolled_dbs and not did_work:
             try:
                 cr = await run_commentary_sweep(
-                    enrolled_dbs, relay, settings.extraction_model,
+                    enrolled_dbs, relay, settings.summarization_model,
                     batch_size=settings.commentary_sweep_batch)
                 if cr["made"] or cr["failed"]:
                     comm_did = cr["made"] > 0

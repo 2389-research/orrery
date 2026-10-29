@@ -17,6 +17,7 @@ class Settings:
     ollama_url: str = "http://localhost:11434"
     classification_model: str = "claude-sonnet-4-6"
     extraction_model: str = "claude-haiku-4-5"
+    summarization_model: str = ""  # empty -> resolved classification_model
     general_spec_threshold: int = 10
     domain_spec_threshold: int = 20
     simmer_iterations: int = 3
@@ -64,5 +65,7 @@ def get_settings() -> Settings:
             kwargs[f.name] = f.type(val) if f.type in (int, float) else val
         else:
             kwargs[f.name] = default
+
+    kwargs["summarization_model"] = kwargs["summarization_model"] or kwargs["classification_model"]
 
     return Settings(**kwargs)

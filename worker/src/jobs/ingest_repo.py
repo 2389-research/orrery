@@ -165,7 +165,7 @@ def _declared_deps_from_manifests(manifest_files: dict) -> list[str]:
 async def run_ingest_repo(job: dict, db_path: str) -> None:
     settings = get_settings()
     relay = Relay.from_settings(settings)
-    model = settings.extraction_model
+    model = settings.summarization_model
 
     config = json.loads(job["config"]) if job["config"] else {}
     root_path = config["root_path"]

@@ -16,6 +16,7 @@ class Settings:
     aws_region: str = "us-east-1"
     classification_model: str = "claude-sonnet-4-6"
     extraction_model: str = "claude-haiku-4-5"
+    summarization_model: str = ""  # empty -> resolved classification_model
     general_spec_threshold: int = 10
     domain_spec_threshold: int = 20
     simmer_iterations: int = 3
@@ -79,6 +80,7 @@ _ENV_MAP = {
     "aws_region": "AWS_REGION",
     "classification_model": "CLASSIFICATION_MODEL",
     "extraction_model": "EXTRACTION_MODEL",
+    "summarization_model": "SUMMARIZATION_MODEL",
     "general_spec_threshold": "GENERAL_SPEC_THRESHOLD",
     "domain_spec_threshold": "DOMAIN_SPEC_THRESHOLD",
     "simmer_iterations": "SIMMER_ITERATIONS",
@@ -148,6 +150,8 @@ def get_settings() -> Settings:
                 kwargs[f.name] = val
         else:
             kwargs[f.name] = default
+
+    kwargs["summarization_model"] = kwargs["summarization_model"] or kwargs["classification_model"]
 
     return _validated(Settings(**kwargs))
 
