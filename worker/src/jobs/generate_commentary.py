@@ -5,6 +5,7 @@ import json
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 from orrery_relay import Relay
 from ..db import get_connection
@@ -310,6 +311,12 @@ def _select_missing_batch(conn, node_types, batch_size):
     return nodes[:batch_size]
 
 
+# Workspaces whose last sweep batch was all failures, keyed db_path -> monotonic time until
+# which the sweep skips them. Process-local: the worker is one long-lived poll loop.
+FAILED_WORKSPACE_COOLDOWN_SECONDS = 900
+_sweep_cooldown: dict[str, float] = {}
+
+
 async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=None,
                                batch_size,
                                node_types=DEFAULT_SWEEP_NODE_TYPES) -> dict:
@@ -325,11 +332,15 @@ async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=No
     The (relay, model) is resolved PER workspace (`resolve_summarization`): a workspace
     set to `remote` uses `summ_relay`, otherwise `local_relay` + the default model.
 
-    A workspace whose batch produced nothing but failures does not end the pass: failed
-    nodes stay missing, so returning there would re-select the same broken workspace every
-    pass and starve every enrolled workspace after it. Move on to the next one instead."""
-    last_failed = None
+    At most ONE batch per pass, even when it fails: the poll loop awaits this sweep, and a
+    stalled route can hold each call up to the relay timeout. A workspace whose batch was
+    all failures goes on a cooldown instead — its failed nodes stay missing, so without it
+    the sweep would re-pick that workspace every pass and starve every one after it. It is
+    retried once the cooldown lapses, so it self-heals when its route is fixed."""
+    now = time.monotonic()
     for db_path in db_paths:
+        if _sweep_cooldown.get(db_path, 0.0) > now:
+            continue
         conn = get_connection(db_path)
         try:
             nodes = _select_missing_batch(conn, node_types, batch_size)
@@ -338,11 +349,13 @@ async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=No
             relay, model = resolve_summarization(
                 settings, db_path, local_relay=local_relay, summ_relay=summ_relay)
             made, skipped, failed = await _generate_for_nodes(conn, relay, model, nodes)
-            result = {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
             if made == 0 and failed > 0:
-                last_failed = result
-                continue
-            return result
+                _sweep_cooldown[db_path] = time.monotonic() + FAILED_WORKSPACE_COOLDOWN_SECONDS
+                logger.warning("commentary sweep: every node failed in %s; skipping it for %ds",
+                            db_path, FAILED_WORKSPACE_COOLDOWN_SECONDS)
+            else:
+                _sweep_cooldown.pop(db_path, None)
+            return {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
         finally:
             conn.close()
-    return last_failed or {"made": 0, "skipped": 0, "failed": 0, "workspace": None}
+    return {"made": 0, "skipped": 0, "failed": 0, "workspace": None}
