@@ -198,7 +198,7 @@ def _load_bundles(config: dict, relay, settings) -> list[dict]:
     if not raw_root:
         raise RuntimeError("ingest_tracker_runs: neither out_dir nor raw_root given")
 
-    model = settings.extraction_model
+    model = settings.summarization_model
     print(f"[ingest_tracker_runs] summarizing raw runs beneath {raw_root} with {model} ...", flush=True)
     bundles = summarize_runs(
         raw_root,

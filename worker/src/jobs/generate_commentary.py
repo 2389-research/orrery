@@ -252,7 +252,7 @@ async def run_generate_commentary(job: dict, db_path: str) -> None:
     node_types = config.get("node_types") or ["domain", "collection"]
     limit = int(config.get("limit", 50))
     only_missing = config.get("only_missing", True)
-    model = config.get("model") or settings.extraction_model
+    model = config.get("model") or settings.summarization_model
 
     relay = Relay.from_settings(settings)
     conn = get_connection(db_path)

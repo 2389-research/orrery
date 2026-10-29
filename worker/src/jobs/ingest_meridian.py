@@ -437,7 +437,7 @@ async def run_ingest_meridian(job: dict, db_path: str) -> None:
     collection_id = config["collection_id"]
     spec_id = config.get("spec_id")
     fetch = make_fetch(config["server_url"])
-    sum_model = settings.extraction_model
+    sum_model = settings.summarization_model
     classify_model = settings.classification_model
 
     conn = get_connection(db_path)

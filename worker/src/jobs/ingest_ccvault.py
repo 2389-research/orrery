@@ -71,7 +71,7 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
     # Summaries use the EXTRACTION model (haiku-class) — same as codesum/tracksum: this is
     # high-volume clerk work, one call per segment + rollup. Only the single per-session
     # classify uses the CLASSIFICATION model (sonnet-class).
-    sum_model = settings.extraction_model
+    sum_model = settings.summarization_model
     classify_model = settings.classification_model
 
     arc = open_archive(archive_path)
