@@ -19,16 +19,6 @@ from .types import RelayResponse, UsageEvent
 logger = logging.getLogger("orrery_relay")
 
 
-def optional_str(value: Any) -> str | None:
-    """Settings/env convention: an empty string means "unset" (None)."""
-    return value or None
-
-
-def optional_timeout(value: Any) -> float | None:
-    """Settings/env convention: 0 / 0.0 / empty means "unset" (None)."""
-    return float(value) if value else None
-
-
 def _anthropic_to_ollama_messages(messages: list[dict], system: str | None = None) -> tuple[list[dict], str | None]:
     """Translate Anthropic message format to native Ollama /api/chat format.
 
@@ -208,14 +198,26 @@ class Relay:
         timeout: float | None = None,
         http_transport: Any = None,
     ) -> None:
+        """Build a relay.
+
+        `reasoning_effort` and `timeout` follow one convention: empty/0 means unset,
+        i.e. the backend default (there is no "no timeout" value). Both are only used
+        by the `openai` backend.
+        """
         self._backend = backend
         self._ollama_url = ollama_url
         self._max_retries = max_retries
         self._base_delay = base_delay
         self._max_delay = max_delay
         self._on_usage = on_usage
-        self._reasoning_effort = reasoning_effort
-        self._timeout = timeout
+        self._reasoning_effort = reasoning_effort or None
+        if timeout is None or timeout == "" or timeout == 0:
+            self._timeout = None
+        else:
+            try:
+                self._timeout = float(timeout) or None
+            except (TypeError, ValueError):
+                raise ValueError(f"timeout must be a number of seconds, got {timeout!r}") from None
         self._http_transport = http_transport
 
         if backend not in ("ollama", "openai"):
@@ -263,8 +265,8 @@ class Relay:
             "max_retries": int(os.environ.get("RELAY_MAX_RETRIES", "3")),
             "base_delay": float(os.environ.get("RELAY_BASE_DELAY", "1.0")),
             "max_delay": float(os.environ.get("RELAY_MAX_DELAY", "30.0")),
-            "reasoning_effort": optional_str(os.environ.get("REASONING_EFFORT", "")),
-            "timeout": optional_timeout(os.environ.get("RELAY_TIMEOUT_SECONDS", "")),
+            "reasoning_effort": os.environ.get("REASONING_EFFORT", ""),
+            "timeout": os.environ.get("RELAY_TIMEOUT_SECONDS", ""),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -279,8 +281,8 @@ class Relay:
             "aws_secret_key": getattr(settings, "aws_secret_key", ""),
             "aws_region": getattr(settings, "aws_region", "us-east-1"),
             "ollama_url": getattr(settings, "ollama_url", "http://localhost:11434"),
-            "reasoning_effort": optional_str(getattr(settings, "reasoning_effort", "")),
-            "timeout": optional_timeout(getattr(settings, "relay_timeout_seconds", 0.0)),
+            "reasoning_effort": getattr(settings, "reasoning_effort", ""),
+            "timeout": getattr(settings, "relay_timeout_seconds", 0),
         }
         kwargs.update(overrides)
         return cls(**kwargs)

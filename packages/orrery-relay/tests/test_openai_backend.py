@@ -199,7 +199,7 @@ async def test_malformed_200_raises(payload):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("timeout,expected", [(None, 120.0), (7.0, 7.0), (0, 0)])
+@pytest.mark.parametrize("timeout,expected", [(None, 120.0), (7.0, 7.0), (0, 120.0)])
 async def test_timeout_reaches_httpx(timeout, expected):
     seen, handler = _capture()
     await _relay(handler, timeout=timeout).complete("m", MSGS, 5)

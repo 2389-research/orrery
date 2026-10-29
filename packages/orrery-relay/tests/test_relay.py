@@ -219,3 +219,32 @@ def test_from_env_unset_is_none(monkeypatch):
     monkeypatch.delenv("RELAY_TIMEOUT_SECONDS", raising=False)
     r = Relay.from_env()
     assert r._reasoning_effort is None and r._timeout is None
+
+
+def test_ctor_normalizes_unset():
+    from orrery_relay import Relay
+    r = Relay(backend="openai", gateway_url="https://x/v1", reasoning_effort="", timeout=0)
+    assert r._reasoning_effort is None and r._timeout is None
+
+
+def test_ctor_timeout_string_coerced():
+    from orrery_relay import Relay
+    r = Relay(backend="openai", gateway_url="https://x/v1", timeout="30")
+    assert r._timeout == 30.0
+
+
+def test_ctor_timeout_non_numeric_raises():
+    from orrery_relay import Relay
+    with pytest.raises(ValueError, match="timeout must be a number"):
+        Relay(backend="openai", gateway_url="https://x/v1", timeout="abc")
+
+
+@pytest.mark.parametrize("val", ["0", ""])
+def test_from_env_zero_or_empty_unset(monkeypatch, val):
+    from orrery_relay import Relay
+    monkeypatch.setenv("ANTHROPIC_BACKEND", "openai")
+    monkeypatch.setenv("GATEWAY_URL", "https://x/v1")
+    monkeypatch.setenv("RELAY_TIMEOUT_SECONDS", val)
+    monkeypatch.setenv("REASONING_EFFORT", "")
+    r = Relay.from_env()
+    assert r._timeout is None and r._reasoning_effort is None

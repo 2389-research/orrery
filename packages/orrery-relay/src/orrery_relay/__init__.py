@@ -1,5 +1,5 @@
 # ABOUTME: Public API for orrery-relay — shared LLM client SDK.
-# ABOUTME: Supports both direct AWS Bedrock and the Bedrock Gateway proxy.
+# ABOUTME: Supports gateway, bedrock, ollama and openai (OpenAI-compatible) backends.
 
 from .relay import Relay
 from .types import RelayResponse, UsageEvent

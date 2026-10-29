@@ -4,7 +4,6 @@
 import logging
 
 from orrery_relay import Relay
-from orrery_relay.relay import optional_str, optional_timeout
 
 logger = logging.getLogger("summarization_relay")
 
@@ -18,8 +17,8 @@ def build_summarization_relay(settings) -> Relay | None:
             gateway_url=settings.summarization_gateway_url,
             gateway_api_key=settings.summarization_gateway_api_key,
             ollama_url=settings.ollama_url,
-            reasoning_effort=optional_str(settings.summarization_reasoning_effort),
-            timeout=optional_timeout(settings.summarization_timeout_seconds),
+            reasoning_effort=settings.summarization_reasoning_effort,
+            timeout=settings.summarization_timeout_seconds,
         )
     except Exception as e:
         # A typo'd SUMMARIZATION_BACKEND must not crash every summarization job: fall back

@@ -83,11 +83,17 @@ def test_extraction_model_untouched():
     assert s.extraction_model == "e4b-x"
 
 
-def test_relay_knobs_default_and_env():
+def _orch_settings(env):
     from src.config import get_settings
-    with mock.patch.dict(os.environ, {}, clear=True):
-        s = get_settings()
-        assert s.reasoning_effort == "" and s.relay_timeout_seconds == 0.0
-    with mock.patch.dict(os.environ, {"REASONING_EFFORT": "none", "RELAY_TIMEOUT_SECONDS": "60"}, clear=True):
-        s = get_settings()
-        assert s.reasoning_effort == "none" and s.relay_timeout_seconds == 60.0
+    with mock.patch.dict(os.environ, env, clear=True):
+        return get_settings()
+
+
+def test_reasoning_effort_default_and_env():
+    assert _orch_settings({}).reasoning_effort == ""
+    assert _orch_settings({"REASONING_EFFORT": "none"}).reasoning_effort == "none"
+
+
+def test_relay_timeout_default_and_env():
+    assert _orch_settings({}).relay_timeout_seconds == 0.0
+    assert _orch_settings({"RELAY_TIMEOUT_SECONDS": "60"}).relay_timeout_seconds == 60.0

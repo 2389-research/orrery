@@ -1,5 +1,5 @@
 # ABOUTME: Application settings loaded from environment variables.
-# ABOUTME: Supports gateway, bedrock, and ollama backends via ANTHROPIC_BACKEND env var.
+# ABOUTME: Supports gateway, bedrock, ollama, and openai backends via ANTHROPIC_BACKEND env var.
 
 import os
 from dataclasses import dataclass, fields

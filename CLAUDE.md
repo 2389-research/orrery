@@ -145,7 +145,9 @@ The relay supports four backends controlled by `ANTHROPIC_BACKEND` env var:
 - `gateway` (default): Direct Anthropic API or proxy at `GATEWAY_URL`
 - `bedrock`: AWS Bedrock with `AWS_ACCESS_KEY`/`AWS_SECRET_KEY`
 - `ollama`: Local models via Ollama at `OLLAMA_URL` (default `http://localhost:11434`)
-- `openai`: any OpenAI-compatible Chat Completions endpoint (LunaRoute, OpenRouter, vLLM, OpenAI). `GATEWAY_URL` includes `/v1`; the key comes from `GATEWAY_API_KEY`. Optional `REASONING_EFFORT` (e.g. `none`) and `RELAY_TIMEOUT_SECONDS` (empty/0 = unset). The summarization relay has the same set: `SUMMARIZATION_BACKEND`, `SUMMARIZATION_GATEWAY_URL`/`_API_KEY`, `SUMMARIZATION_REASONING_EFFORT`, `SUMMARIZATION_TIMEOUT_SECONDS`.
+- `openai`: any OpenAI-compatible Chat Completions endpoint (LunaRoute, OpenRouter, vLLM, OpenAI). `GATEWAY_URL` includes `/v1`; the key comes from `GATEWAY_API_KEY`.
+  - Main relay knobs: `REASONING_EFFORT` (e.g. `none`), `RELAY_TIMEOUT_SECONDS` (empty/0 = unset = backend default).
+  - Summarization relay: `SUMMARIZATION_BACKEND`, `SUMMARIZATION_GATEWAY_URL`/`_API_KEY`, `SUMMARIZATION_REASONING_EFFORT`, `SUMMARIZATION_TIMEOUT_SECONDS`.
 
 The `orrery-relay` package lives at `packages/orrery-relay/` and is a dependency of both orchestrator and worker via `[tool.uv.sources]` path reference.
 
