@@ -16,16 +16,17 @@ def workspace_summarization_config(base_db_path: str, db_path: str) -> dict:
     try:
         with open(path) as f:
             registry = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return dict(_DEFAULT)
     if not isinstance(registry, list):
         return dict(_DEFAULT)
     ws_id = Path(db_path).parent.name
     for entry in registry:
         if isinstance(entry, dict) and entry.get("id") == ws_id:
+            model = entry.get("summarization_model")
             return {
                 "target": entry.get("summarization_target") or "local",
-                "model": entry.get("summarization_model") or None,
+                "model": model if isinstance(model, str) and model else None,
             }
     return dict(_DEFAULT)
 

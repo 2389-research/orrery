@@ -5,6 +5,8 @@ import logging
 import os
 from unittest import mock
 
+import pytest
+
 WSID = "ws-abc"
 
 
@@ -52,10 +54,43 @@ def test_remote_without_summ_relay_falls_back_with_warning(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         relay, model = resolve_summarization(s, db, local_relay=local, summ_relay=None)
     assert relay is local and model == "global-model"
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert any(r.levelno == logging.WARNING and r.name == "summarization_route"
+               for r in caplog.records)
 
 
 def test_corrupt_registry_defaults_local(tmp_path):
     from src.summarization_route import workspace_summarization_config
     s, db = _setup(tmp_path, raw="{ not json")
     assert workspace_summarization_config(s.db_path, db) == {"target": "local", "model": None}
+
+
+_LOCAL = {"target": "local", "model": None}
+
+
+@pytest.mark.parametrize("registry", [
+    {},
+    "x",
+    [{"id": "other-ws", "summarization_target": "remote", "summarization_model": "m"}],
+    [{"id": WSID}],
+    [{"id": WSID, "summarization_target": "local"}],
+    [{"id": WSID, "summarization_target": ""}],
+    [{"id": WSID, "summarization_target": None}],
+    ["junk", 3, None],
+])
+def test_failsafe_registry_shapes(tmp_path, registry):
+    from src.summarization_route import workspace_summarization_config
+    s, db = _setup(tmp_path, raw=json.dumps(registry))
+    assert workspace_summarization_config(s.db_path, db) == _LOCAL
+
+
+def test_non_string_model_ignored(tmp_path):
+    from src.summarization_route import workspace_summarization_config
+    s, db = _setup(tmp_path, {"id": WSID, "summarization_target": "remote", "summarization_model": 5})
+    assert workspace_summarization_config(s.db_path, db) == {"target": "remote", "model": None}
+
+
+def test_bad_bytes_registry_defaults_local(tmp_path):
+    from src.summarization_route import workspace_summarization_config
+    s, db = _setup(tmp_path, raw="")
+    (tmp_path / "workspaces" / "registry.json").write_bytes(b"\xff\xfe")
+    assert workspace_summarization_config(s.db_path, db) == _LOCAL
