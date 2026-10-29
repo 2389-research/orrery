@@ -43,3 +43,22 @@ def test_relay_knobs_load_from_env():
     })
     assert s.reasoning_effort == "none" and s.relay_timeout_seconds == 60.0
     assert s.summarization_reasoning_effort == "low" and s.summarization_timeout_seconds == 30.0
+
+
+def test_empty_numeric_env_means_default():
+    """CLAUDE.md: RELAY_TIMEOUT_SECONDS empty = unset. It must not crash get_settings()."""
+    s = _settings({"RELAY_TIMEOUT_SECONDS": "", "SUMMARIZATION_TIMEOUT_SECONDS": "  "})
+    assert s.relay_timeout_seconds == 0.0
+    assert s.summarization_timeout_seconds == 0.0
+
+
+def test_empty_int_env_means_default():
+    from src.config import Settings
+    s = _settings({"CHUNK_SIZE": ""})
+    assert s.chunk_size == Settings().chunk_size
+
+
+def test_non_numeric_numeric_env_still_fails_loudly():
+    import pytest
+    with pytest.raises(ValueError):
+        _settings({"RELAY_TIMEOUT_SECONDS": "abc"})

@@ -97,3 +97,20 @@ def test_reasoning_effort_default_and_env():
 def test_relay_timeout_default_and_env():
     assert _orch_settings({}).relay_timeout_seconds == 0.0
     assert _orch_settings({"RELAY_TIMEOUT_SECONDS": "60"}).relay_timeout_seconds == 60.0
+
+
+def test_empty_numeric_env_means_default():
+    """RELAY_TIMEOUT_SECONDS= (empty) means unset; it must not crash get_settings()."""
+    with mock.patch.dict(os.environ, {"RELAY_TIMEOUT_SECONDS": "", "CHUNK_SIZE": " "}, clear=True):
+        from src.config import Settings, get_settings
+        s = get_settings()
+        assert s.relay_timeout_seconds == 0.0
+        assert s.chunk_size == Settings().chunk_size
+
+
+def test_non_numeric_numeric_env_still_fails_loudly():
+    import pytest
+    with mock.patch.dict(os.environ, {"RELAY_TIMEOUT_SECONDS": "abc"}, clear=True):
+        from src.config import get_settings
+        with pytest.raises(ValueError):
+            get_settings()

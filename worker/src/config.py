@@ -1,5 +1,5 @@
 # ABOUTME: Application settings loaded from environment variables.
-# ABOUTME: Supports both gateway and bedrock backends via ANTHROPIC_BACKEND env var.
+# ABOUTME: Supports gateway, bedrock, ollama and openai backends via ANTHROPIC_BACKEND env var.
 
 import os
 from dataclasses import dataclass, fields
@@ -21,14 +21,14 @@ class Settings:
     summarization_gateway_url: str = ""
     summarization_gateway_api_key: str = ""
     summarization_reasoning_effort: str = ""  # empty -> unset (openai backend only)
-    summarization_timeout_seconds: float = 0.0  # 0 -> relay default
+    summarization_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     general_spec_threshold: int = 10
     domain_spec_threshold: int = 20
     simmer_iterations: int = 3
     chunk_size: int = 2000
     ollama_url: str = "http://localhost:11434"
     reasoning_effort: str = ""  # openai backend only; empty -> unset
-    relay_timeout_seconds: float = 0.0  # 0 -> relay default
+    relay_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     worker_poll_interval: int = 5
     judge_sweep_interval_seconds: int = 900  # periodic advisory-judge sweep cadence (~15 min)
     source_scan_interval_seconds: int = 900  # how often the sweep checks watched_sources for due scans
@@ -159,7 +159,9 @@ def get_settings() -> Settings:
             if f.type is bool:
                 kwargs[f.name] = str(val).strip().lower() in ("1", "true", "yes", "on")
             elif f.type in (int, float):
-                kwargs[f.name] = f.type(val)
+                # Empty/whitespace means "unset" -> the dataclass default; a
+                # non-numeric value still raises.
+                kwargs[f.name] = f.type(val) if val.strip() else default
             else:
                 kwargs[f.name] = val
         else:

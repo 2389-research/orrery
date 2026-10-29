@@ -16,7 +16,7 @@ class Settings:
     aws_region: str = "us-east-1"
     ollama_url: str = "http://localhost:11434"
     reasoning_effort: str = ""  # openai backend only; empty -> unset
-    relay_timeout_seconds: float = 0.0  # 0 -> relay default
+    relay_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     classification_model: str = "claude-sonnet-4-6"
     extraction_model: str = "claude-haiku-4-5"
     summarization_model: str = ""  # empty -> resolved classification_model
@@ -64,7 +64,12 @@ def get_settings() -> Settings:
         default = path_defaults.get(f.name, getattr(defaults, f.name))
         val = os.environ.get(env_var)
         if val is not None:
-            kwargs[f.name] = f.type(val) if f.type in (int, float) else val
+            if f.type in (int, float):
+                # Empty/whitespace means "unset" -> the dataclass default; a
+                # non-numeric value still raises.
+                kwargs[f.name] = f.type(val) if val.strip() else default
+            else:
+                kwargs[f.name] = val
         else:
             kwargs[f.name] = default
 
