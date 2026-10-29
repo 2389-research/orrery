@@ -25,10 +25,12 @@ def test_unset_builds_no_relay():
 
 def test_gateway_builds_relay():
     from src.summarization_relay import build_summarization_relay
-    relay = build_summarization_relay(_settings(_ENV))
+    # Main backend differs, so this proves the builder reads summarization_backend.
+    relay = build_summarization_relay(_settings({**_ENV, "ANTHROPIC_BACKEND": "ollama"}))
     assert isinstance(relay, Relay)
     assert relay._backend == "gateway"
     assert relay._gateway_url == "https://gw.lunaroute.com"
+    assert relay._gateway_api_key == "k"
 
 
 def test_config_load_set_and_unset():
