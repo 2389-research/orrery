@@ -250,11 +250,11 @@ def test_raising_session_is_counted_retry_and_loop_continues(monkeypatch, test_d
     real = mod._process_session
     seen = []
 
-    async def flaky(conn, relay, sm, cm, tx, fetch, collection_id, item):
+    async def flaky(conn, relay, sm, cm, tx, fetch, collection_id, item, **kw):
         seen.append(item)
         if len(seen) == 1:
             raise RuntimeError("HTTP 500")
-        return await real(conn, relay, sm, cm, tx, fetch, collection_id, item)
+        return await real(conn, relay, sm, cm, tx, fetch, collection_id, item, **kw)
 
     monkeypatch.setattr(mod, "_process_session", flaky)
     asyncio.run(mod.run_ingest_meridian(job, test_db))

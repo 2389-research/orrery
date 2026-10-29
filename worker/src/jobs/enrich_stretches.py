@@ -7,6 +7,8 @@ import logging
 from orrery_relay import Relay
 from ..config import get_settings
 from ..db import get_connection
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 from .stretch_splitter import split_document
 from .stretch_featurizer import enrich_batch
 
@@ -32,7 +34,9 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
     config = json.loads(job["config"]) if job.get("config") else {}
     settings = get_settings()
     relay = Relay.from_settings(settings)
-    model = settings.summarization_model
+    summ_relay = build_summarization_relay(settings)
+    relay_s, model_s = resolve_summarization(
+        settings, db_path, local_relay=relay, summ_relay=summ_relay)
 
     conn = get_connection(db_path)
     try:
@@ -81,7 +85,7 @@ async def run_enrich_stretches(job: dict, db_path: str) -> None:
                         todo.append(s)
                 for i in range(0, len(todo), BATCH_SIZE):
                     batch = todo[i:i + BATCH_SIZE]
-                    facets = await enrich_batch(relay, model, batch)
+                    facets = await enrich_batch(relay_s, model_s, batch)
                     for s in batch:
                         f = facets.get(s["stretch_id"])
                         if not f:

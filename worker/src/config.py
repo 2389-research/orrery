@@ -17,6 +17,9 @@ class Settings:
     classification_model: str = "claude-sonnet-4-6"
     extraction_model: str = "claude-haiku-4-5"
     summarization_model: str = ""  # empty -> resolved classification_model
+    summarization_backend: str = ""  # empty -> summarization uses the local relay
+    summarization_gateway_url: str = ""
+    summarization_gateway_api_key: str = ""
     general_spec_threshold: int = 10
     domain_spec_threshold: int = 20
     simmer_iterations: int = 3
@@ -81,6 +84,9 @@ _ENV_MAP = {
     "classification_model": "CLASSIFICATION_MODEL",
     "extraction_model": "EXTRACTION_MODEL",
     "summarization_model": "SUMMARIZATION_MODEL",
+    "summarization_backend": "SUMMARIZATION_BACKEND",
+    "summarization_gateway_url": "SUMMARIZATION_GATEWAY_URL",
+    "summarization_gateway_api_key": "SUMMARIZATION_GATEWAY_API_KEY",
     "general_spec_threshold": "GENERAL_SPEC_THRESHOLD",
     "domain_spec_threshold": "DOMAIN_SPEC_THRESHOLD",
     "simmer_iterations": "SIMMER_ITERATIONS",

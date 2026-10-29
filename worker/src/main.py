@@ -180,7 +180,7 @@ def _find_workspace_dbs(base_db_path: str) -> list[str]:
     # Multi-workspace
     ws_dir = os.path.join(base_dir, "workspaces")
     if os.path.isdir(ws_dir):
-        for ws_name in os.listdir(ws_dir):
+        for ws_name in sorted(os.listdir(ws_dir)):  # deterministic sweep order
             ws_db = os.path.join(ws_dir, ws_name, "orrery.db")
             if os.path.isfile(ws_db):
                 db_paths.append(ws_db)
@@ -200,7 +200,11 @@ async def poll_loop():
     from .jobs.graph_repair import run_judge_sweep
     from .jobs.normalization_judge import resolve_judge_relay, run_normalization_judge_sweep
     from .jobs.generate_commentary import run_commentary_sweep, commentary_enrolled_dbs
+    from .summarization_relay import build_summarization_relay
     relay = Relay.from_settings(settings)
+    # Built once: settings are fixed for the process, and building per idle pass would
+    # leak a client per pass (and re-log a bad-backend warning every few seconds).
+    summ_relay = build_summarization_relay(settings)
     last_sweep = 0.0  # 0 → sweep on the first iteration
     last_source_sweep = 0.0  # watched-source scan cadence, same first-iteration behaviour
 
@@ -363,7 +367,8 @@ async def poll_loop():
         if enrolled_dbs and not did_work:
             try:
                 cr = await run_commentary_sweep(
-                    enrolled_dbs, relay, settings.summarization_model,
+                    enrolled_dbs, relay, settings,
+                    summ_relay=summ_relay,
                     batch_size=settings.commentary_sweep_batch)
                 if cr["made"] or cr["failed"]:
                     comm_did = cr["made"] > 0

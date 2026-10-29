@@ -21,6 +21,8 @@ import uuid
 from orrery_codesum import summarize_repo_incremental, make_summarize_fn
 
 from ..classifier import classify_document
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 from ..silo import flow_default_kind, resolve_kind
 from .upsert_document import upsert_document, _recount_collection
 from .scan_source import apply_deletions
@@ -194,7 +196,12 @@ async def sync_repo(conn, relay, settings, ws, source_config, source_id) -> dict
 
     # codesum traversal is synchronous and issues one blocking model call per re-summarized
     # node — run it off the event loop so the poll loop keeps ticking.
-    summarize_fn = make_summarize_fn(relay, settings.summarization_model)
+    # db_path from the live connection (syncers don't receive it) so the per-workspace
+    # summarization target can be resolved. Classification below stays on the local relay.
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    relay_s, model_s = resolve_summarization(
+        settings, db_path, local_relay=relay, summ_relay=build_summarization_relay(settings))
+    summarize_fn = make_summarize_fn(relay_s, model_s)
     artifacts = await asyncio.to_thread(
         summarize_repo_incremental, root_path, summarize_fn, coll_path,
         cache=cache, changed=changed, force_modules=force_modules,

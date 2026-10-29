@@ -5,10 +5,13 @@ import json
 import hashlib
 import logging
 import os
+import time
 from pathlib import Path
 from orrery_relay import Relay
 from ..db import get_connection
 from ..config import get_settings
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 
 logger = logging.getLogger("generate_commentary")
 
@@ -252,9 +255,11 @@ async def run_generate_commentary(job: dict, db_path: str) -> None:
     node_types = config.get("node_types") or ["domain", "collection"]
     limit = int(config.get("limit", 50))
     only_missing = config.get("only_missing", True)
-    model = config.get("model") or settings.summarization_model
-
-    relay = Relay.from_settings(settings)
+    local_relay = Relay.from_settings(settings)
+    relay, model_s = resolve_summarization(
+        settings, db_path, local_relay=local_relay,
+        summ_relay=build_summarization_relay(settings))
+    model = config.get("model") or model_s
     conn = get_connection(db_path)
     made = skipped = failed = 0
 
@@ -306,7 +311,14 @@ def _select_missing_batch(conn, node_types, batch_size):
     return nodes[:batch_size]
 
 
-async def run_commentary_sweep(db_paths, relay, model, *, batch_size,
+# Workspaces whose last sweep batch was all failures, keyed db_path -> monotonic time until
+# which the sweep skips them. Process-local: the worker is one long-lived poll loop.
+FAILED_WORKSPACE_COOLDOWN_SECONDS = 900
+_sweep_cooldown: dict[str, float] = {}
+
+
+async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=None,
+                               batch_size,
                                node_types=DEFAULT_SWEEP_NODE_TYPES) -> dict:
     """One bounded batch of Magos Lex commentary for the FIRST workspace with missing nodes.
 
@@ -315,14 +327,37 @@ async def run_commentary_sweep(db_paths, relay, model, *, batch_size,
     starving real jobs. `only_missing` is implicit, so this is idempotent — a fully
     commented workspace is skipped after one cheap indexed query, and newly-added
     domains/collections are picked up on a later pass. Returns
-    {made, skipped, failed, workspace}; workspace is None when nothing needed work."""
+    {made, skipped, failed, workspace}; workspace is None when nothing needed work.
+
+    The (relay, model) is resolved PER workspace (`resolve_summarization`): a workspace
+    set to `remote` uses `summ_relay`, otherwise `local_relay` + the default model.
+
+    At most ONE batch per pass, even when it fails: the poll loop awaits this sweep, and a
+    stalled route can hold each call up to the relay timeout. A workspace whose batch was
+    all failures goes on a cooldown instead — its failed nodes stay missing, so without it
+    the sweep would re-pick that workspace every pass and starve every one after it. It is
+    retried once the cooldown lapses, so it self-heals when its route is fixed."""
+    now = time.monotonic()
     for db_path in db_paths:
+        if _sweep_cooldown.get(db_path, 0.0) > now:
+            continue
         conn = get_connection(db_path)
         try:
             nodes = _select_missing_batch(conn, node_types, batch_size)
             if not nodes:
                 continue
+            relay, model = resolve_summarization(
+                settings, db_path, local_relay=local_relay, summ_relay=summ_relay)
             made, skipped, failed = await _generate_for_nodes(conn, relay, model, nodes)
+            if made == 0:
+                # All failed OR all skipped (no usable output): either way those nodes stay
+                # missing, so without the cooldown this workspace is re-picked every pass.
+                _sweep_cooldown[db_path] = time.monotonic() + FAILED_WORKSPACE_COOLDOWN_SECONDS
+                logger.warning("commentary sweep: no commentary made in %s "
+                               "(failed=%d skipped=%d); skipping it for %ds",
+                               db_path, failed, skipped, FAILED_WORKSPACE_COOLDOWN_SECONDS)
+            else:
+                _sweep_cooldown.pop(db_path, None)
             return {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
         finally:
             conn.close()

@@ -12,6 +12,8 @@ from orrery_relay import Relay
 from ..classifier import classify_document
 from ..config import get_settings
 from ..db import get_connection, mark_graph_dirty
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 from .meridian_reader import (
     make_fetch, list_changed_sessions, get_session, get_agents, get_records, iter_agent_segments,
 )
@@ -144,7 +146,7 @@ def _invalidate_doc(conn, doc_id):
 
 
 async def _rederive_session(conn, relay, sum_model, fetch, collection_id, session_key, session,
-                            revision, known, classify_model=None, taxonomy=None) -> str:
+                            revision, known, classify_model=None, taxonomy=None, sum_relay=None) -> str:
     """Memoized incremental update. LLM calls happen first (nothing written until they all
     succeed); then one transaction applies leaf/group changes and bumps last_revision."""
     agents = get_agents(fetch, session_key)
@@ -168,7 +170,7 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
             continue
         summ = by_hash.get(seg["content_hash"])  # same text seen elsewhere in this session
         if summ is None:
-            summ = await summarize_segment(relay, sum_model, ctx, seg["text"])
+            summ = await summarize_segment(sum_relay or relay, sum_model, ctx, seg["text"])
             if not summ:
                 print(f"[ingest_meridian] session {session_key}: empty segment summary, will retry", flush=True)
                 return "retry"
@@ -198,7 +200,7 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
                 return existing[1], h
         if not summaries:
             return fallback, h
-        r = await _rollup(relay, sum_model, rollup_ctx, summaries, cache)
+        r = await _rollup(sum_relay or relay, sum_model, rollup_ctx, summaries, cache)
         return r, h
 
     sess_row = conn.execute("SELECT content, metadata FROM documents WHERE id=?", (group_id,)).fetchone()
@@ -295,7 +297,7 @@ async def _rederive_session(conn, relay, sum_model, fetch, collection_id, sessio
 
 
 async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fetch,
-                           collection_id, item) -> str:
+                           collection_id, item, sum_relay=None) -> str:
     """Returns 'ingested' | 'updated' | 'skipped' | 'retry' (empty model output)."""
     session_key = item.get("session_key")
     if not session_key:
@@ -308,7 +310,8 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
         if revision is None or known[0] is None or revision <= known[0]:
             return "skipped"  # nothing new: no LLM calls, no writes
         return await _rederive_session(conn, relay, sum_model, fetch, collection_id, session_key,
-                                       session, revision, known, classify_model, taxonomy)
+                                       session, revision, known, classify_model, taxonomy,
+                                       sum_relay=sum_relay)
 
     agents = get_agents(fetch, session_key)
     records = get_records(fetch, session_key)
@@ -321,7 +324,7 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
 
     summaries = []  # (segment, summary)
     for seg in segments:
-        s = await summarize_segment(relay, sum_model, ctx, seg["text"])
+        s = await summarize_segment(sum_relay or relay, sum_model, ctx, seg["text"])
         if not s:
             print(f"[ingest_meridian] session {session_key}: empty segment summary, will retry", flush=True)
             return "retry"
@@ -332,10 +335,10 @@ async def _process_session(conn, relay, sum_model, classify_model, taxonomy, fet
         by_agent.setdefault(seg["agent_id"], []).append((seg, s))
     rollup_ctx = f"{ctx}\nStarted: {session.get('started_at')}"
     rcache: dict = {}
-    session_rollup = await _rollup(relay, sum_model, rollup_ctx, [s for _, s in summaries], rcache)
+    session_rollup = await _rollup(sum_relay or relay, sum_model, rollup_ctx, [s for _, s in summaries], rcache)
     agent_rollups = {}
     for aid, items in by_agent.items():
-        r = await _rollup(relay, sum_model, rollup_ctx, [s for _, s in items], rcache)
+        r = await _rollup(sum_relay or relay, sum_model, rollup_ctx, [s for _, s in items], rcache)
         if not r:
             return "retry"
         agent_rollups[aid] = r
@@ -437,7 +440,9 @@ async def run_ingest_meridian(job: dict, db_path: str) -> None:
     collection_id = config["collection_id"]
     spec_id = config.get("spec_id")
     fetch = make_fetch(config["server_url"])
-    sum_model = settings.summarization_model
+    summ_relay = build_summarization_relay(settings)
+    sum_relay, sum_model = resolve_summarization(
+        settings, db_path, local_relay=relay, summ_relay=summ_relay)
     classify_model = settings.classification_model
 
     conn = get_connection(db_path)
@@ -452,7 +457,7 @@ async def run_ingest_meridian(job: dict, db_path: str) -> None:
         for item in items:
             try:
                 outcome = await _process_session(conn, relay, sum_model, classify_model, taxonomy,
-                                                 fetch, collection_id, item)
+                                                 fetch, collection_id, item, sum_relay=sum_relay)
             except Exception as e:  # one bad session must not block the cursor for all the rest
                 print(f"[ingest_meridian] session {item.get('session_key')}: {type(e).__name__}: {e}, "
                       "will retry", flush=True)
