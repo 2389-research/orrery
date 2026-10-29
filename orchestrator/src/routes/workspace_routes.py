@@ -11,6 +11,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
 from ..auth import AuthUser, require_role
+from ..dependencies import require_writable
+from ..models import SetSummarizationRequest
 
 router = APIRouter()
 
@@ -156,3 +158,35 @@ async def archive_workspace(
             _save_registry(registry)
             return {"archived": True}
     raise HTTPException(404, "Workspace not found")
+
+
+def _set_summarization(workspace_id: str, target: str, model: str | None) -> dict | None:
+    """Set the per-workspace summarization override the worker reads from the registry.
+    A null model clears it so the global default applies. None if workspace unknown."""
+    registry = _load_registry()
+    for ws in registry:
+        if ws["id"] == workspace_id:
+            ws["summarization_target"] = target
+            if model:
+                ws["summarization_model"] = model
+            else:
+                ws.pop("summarization_model", None)
+            _save_registry(registry)
+            return {"summarization_target": ws["summarization_target"],
+                    "summarization_model": ws.get("summarization_model")}
+    return None
+
+
+@router.put("/workspaces/{workspace_id}/summarization",
+            dependencies=[Depends(require_writable)])
+async def set_workspace_summarization(
+    workspace_id: str,
+    req: SetSummarizationRequest,
+    user: AuthUser = Depends(require_role("admin")),
+):
+    if req.target not in ("local", "remote"):
+        raise HTTPException(400, "target must be 'local' or 'remote'")
+    result = _set_summarization(workspace_id, req.target, req.model)
+    if result is None:
+        raise HTTPException(404, "Workspace not found")
+    return result

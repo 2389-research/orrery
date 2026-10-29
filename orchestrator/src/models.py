@@ -169,3 +169,9 @@ class MeridianIngestRequest(BaseModel):
     @classmethod
     def _check_url(cls, v: str) -> str:
         return _http_url(v)
+
+
+class SetSummarizationRequest(BaseModel):
+    """Per-workspace summarization override. `model` null/omitted clears it."""
+    target: str
+    model: str | None = None
