@@ -72,10 +72,12 @@ def test_map_model_gateway_passes_through():
 
 
 def test_map_model_bedrock_translates():
-    from orrery_relay.backends import map_model_id
-    assert map_model_id("claude-sonnet-4-6", "bedrock") == "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    from orrery_relay.backends import BEDROCK_MODEL_MAP, map_model_id
+    # Literal id catches a wrong map entry; the map cross-check catches drift.
+    assert map_model_id("claude-sonnet-4-6", "bedrock") == "us.anthropic.claude-sonnet-4-6"
+    assert map_model_id("claude-sonnet-4-6", "bedrock") == BEDROCK_MODEL_MAP["claude-sonnet-4-6"]
     assert map_model_id("claude-haiku-4-5", "bedrock") == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-    assert map_model_id("claude-opus-4-6", "bedrock") == "us.anthropic.claude-opus-4-6-v1:0"
+    assert map_model_id("claude-opus-4-6", "bedrock") == "us.anthropic.claude-opus-4-6-v1"
 
 
 def test_map_model_bedrock_passthrough_for_already_bedrock_ids():

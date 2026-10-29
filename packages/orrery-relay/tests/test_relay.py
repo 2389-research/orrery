@@ -50,7 +50,9 @@ async def test_relay_complete_bedrock_maps_model():
             max_tokens=100,
         )
     call_kwargs = mock_client.messages.create.call_args[1]
-    assert call_kwargs["model"] == "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    from orrery_relay.backends import BEDROCK_MODEL_MAP
+    assert call_kwargs["model"] == "us.anthropic.claude-sonnet-4-6"
+    assert call_kwargs["model"] == BEDROCK_MODEL_MAP["claude-sonnet-4-6"]
 
 
 @pytest.mark.asyncio
