@@ -485,3 +485,30 @@ def test_whitespace_reasoning_effort_is_unset():
 def test_http_transport_is_keyword_only():
     with pytest.raises(TypeError):
         Relay("openai", BASE, "k", "", "", "us-east-1", "http://x", 3, 1.0, 30.0, None, None, None, None)
+
+
+def test_relay_rejects_unknown_backend_listing_all_four():
+    # A typo (e.g. SUMMARIZATION_BACKEND=opnai) is caught by the Relay itself, and the
+    # message names every backend the Relay accepts — including openai.
+    with pytest.raises(ValueError) as exc:
+        Relay(backend="opnai", gateway_url="https://h/v1", gateway_api_key="k")
+    msg = str(exc.value)
+    assert "opnai" in msg
+    for b in ("gateway", "bedrock", "ollama", "openai"):
+        assert b in msg
+
+
+def test_factory_message_lists_only_what_it_builds():
+    # The SDK-client factories cannot build openai; their message must not offer it as
+    # a choice (the Relay handles openai before ever calling them).
+    from orrery_relay.backends import create_async_client, create_sync_client
+    for factory in (create_async_client, create_sync_client):
+        with pytest.raises(ValueError) as exc:
+            factory(backend="openai")
+        assert "Use 'gateway', 'bedrock', or 'ollama'" in str(exc.value)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "nan", "inf", "-inf"])
+def test_non_finite_timeout_rejected(bad):
+    with pytest.raises(ValueError, match="finite"):
+        Relay(backend="openai", gateway_url="https://h/v1", gateway_api_key="k", timeout=bad)

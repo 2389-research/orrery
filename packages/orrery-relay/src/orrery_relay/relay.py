@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -13,6 +14,10 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from .backends import create_async_client, create_sync_client, map_model_id
+
+# Every backend a Relay accepts. `openai` and `ollama` speak raw HTTP inside the Relay;
+# the rest go through the Anthropic SDK clients built in `backends.py`.
+RELAY_BACKENDS = ("gateway", "bedrock", "ollama", "openai")
 from .retry import with_retry, with_retry_sync
 from .types import RelayResponse, UsageEvent
 
@@ -246,9 +251,14 @@ class Relay:
         `reasoning_effort` and `timeout` follow one convention: empty/0 means unset,
         i.e. the backend default (there is no "no timeout" value). Both are only used
         by the `openai` backend. `timeout` is seconds; the ctor also accepts a numeric
-        string (as read from env) and rejects negatives. `http_transport` is a test
-        seam (e.g. httpx.MockTransport) for the `openai` backend.
+        string (as read from env) and rejects negative or non-finite values.
+        `http_transport` is a test seam for the `openai` backend. It is handed to BOTH
+        httpx.AsyncClient (complete) and httpx.Client (complete_sync), so it must
+        implement both transport modes, as httpx.MockTransport does.
         """
+        if backend not in RELAY_BACKENDS:
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Use one of: {', '.join(RELAY_BACKENDS)}.")
         self._backend = backend
         self._ollama_url = ollama_url
         self._max_retries = max_retries
@@ -263,8 +273,9 @@ class Relay:
                 self._timeout = float(timeout) or None
             except (TypeError, ValueError):
                 raise ValueError(f"timeout must be a number of seconds, got {timeout!r}") from None
-            if self._timeout is not None and self._timeout < 0:
-                raise ValueError(f"timeout must not be negative, got {timeout!r}")
+            if self._timeout is not None and (self._timeout < 0 or not math.isfinite(self._timeout)):
+                raise ValueError(
+                    f"timeout must be a finite, non-negative number of seconds, got {timeout!r}")
         self._http_transport = http_transport
 
         if backend == "openai" and not (gateway_url or "").strip():

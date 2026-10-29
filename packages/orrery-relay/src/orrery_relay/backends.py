@@ -50,7 +50,7 @@ def create_async_client(
     elif backend == "ollama":
         return AsyncAnthropic(base_url=ollama_url, api_key="ollama")
     else:
-        raise ValueError(f"Unknown backend: {backend!r}. Use 'gateway', 'bedrock', 'ollama', or 'openai'.")
+        raise ValueError(f"Unknown backend: {backend!r}. Use 'gateway', 'bedrock', or 'ollama' (the Relay handles 'openai' itself).")
 
 
 def create_sync_client(
@@ -74,4 +74,4 @@ def create_sync_client(
     elif backend == "ollama":
         return Anthropic(base_url=ollama_url, api_key="ollama")
     else:
-        raise ValueError(f"Unknown backend: {backend!r}. Use 'gateway', 'bedrock', 'ollama', or 'openai'.")
+        raise ValueError(f"Unknown backend: {backend!r}. Use 'gateway', 'bedrock', or 'ollama' (the Relay handles 'openai' itself).")
