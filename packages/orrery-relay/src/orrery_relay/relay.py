@@ -6,15 +6,23 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .backends import create_async_client, create_sync_client, map_model_id
+
+# Every backend a Relay accepts. `openai` and `ollama` speak raw HTTP inside the Relay;
+# the rest go through the Anthropic SDK clients built in `backends.py`.
+RELAY_BACKENDS = ("gateway", "bedrock", "ollama", "openai")
 from .retry import with_retry, with_retry_sync
 from .types import RelayResponse, UsageEvent
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger("orrery_relay")
 
@@ -62,7 +70,143 @@ def _strip_ollama_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in _OLLAMA_ONLY_KWARGS}
 
 
-def _parse_json_from_text(text: str) -> dict | None:
+def _anthropic_to_openai_messages(messages: list[dict], system: str | None = None) -> list[dict]:
+    """Translate Anthropic-format messages to OpenAI Chat Completions format.
+
+    `system` becomes a leading system message. Text blocks and base64 image blocks
+    are kept (images as data-URI `image_url` parts); `cache_control` and any other
+    Anthropic-only block fields are dropped, since strict OpenAI-compatible servers
+    reject unknown keys. Pure: does not mutate its input.
+    """
+    result: list[dict] = []
+    if system:
+        result.append({"role": "system", "content": system})
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            parts: list[dict] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    logger.warning("openai translate: dropped non-dict content block (%s)", type(block).__name__)
+                    continue
+                if block.get("type") == "text":
+                    parts.append({"type": "text", "text": block.get("text", "")})
+                elif block.get("type") == "image":
+                    source = block.get("source", {})
+                    if source.get("type") == "base64":
+                        url = f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
+                        parts.append({"type": "image_url", "image_url": {"url": url}})
+                    else:
+                        logger.warning("openai translate: dropped image block with non-base64 source type=%s", source.get("type"))
+                else:
+                    logger.warning("openai translate: dropped unsupported content block type=%s", block.get("type"))
+            if not parts:
+                raise ValueError(
+                    f"openai backend: every content block of a {msg.get('role')} message was dropped "
+                    "(only text and base64 image blocks are supported); refusing to send empty content")
+            result.append({"role": msg["role"], "content": parts})
+        else:
+            result.append({"role": msg["role"], "content": content if isinstance(content, str) else (str(content) if content else "")})
+    return result
+
+
+def _openai_endpoint(base_url: str) -> str:
+    """Join the base URL (which already carries /v1) with /chat/completions."""
+    return (base_url[:-1] if base_url.endswith("/") else base_url) + "/chat/completions"
+
+
+def _openai_request_body(
+    model: str, messages: list[dict], max_tokens: int, system: str | None = None,
+    temperature: float | None = None, reasoning_effort: str | None = None,
+    response_format: dict | None = None,
+) -> dict[str, Any]:
+    """Build a Chat Completions request body. Optional fields are omitted when unset."""
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": _anthropic_to_openai_messages(messages, system),
+        "max_tokens": max_tokens,
+    }
+    if temperature is not None:
+        body["temperature"] = temperature
+    if reasoning_effort is not None:
+        body["reasoning_effort"] = reasoning_effort
+    if response_format is not None:
+        body["response_format"] = response_format
+    return body
+
+
+def _openai_response_format(response_format: dict | None, fmt: Any) -> dict | None:
+    """Pick the Chat Completions `response_format`.
+
+    An explicit `response_format` always wins. Otherwise translate the Ollama-style
+    `format` callers already pass (e.g. the facet path's `format="json"`) so JSON mode
+    is not silently lost on this backend: "json" -> json_object, a dict -> json_schema
+    (same shape as complete_structured). Anything else is ignored.
+    """
+    if response_format is not None:
+        return response_format
+    if fmt is None:
+        return None
+    if fmt == "json":
+        return {"type": "json_object"}
+    if isinstance(fmt, dict):
+        return {"type": "json_schema", "json_schema": {"name": "structured_output", "strict": False, "schema": fmt}}
+    logger.debug("openai backend: ignoring unsupported format=%r", fmt)
+    return None
+
+
+def _openai_prepare(
+    *, gateway_url: str, api_key: str, reasoning_effort: str | None, model: str,
+    messages: list[dict], max_tokens: int, system: str | None, temperature: float | None,
+    response_format: dict | None, fmt: Any,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Everything the async and sync openai paths share: (url, headers, body)."""
+    body = _openai_request_body(
+        model, messages, max_tokens, system, temperature, reasoning_effort,
+        _openai_response_format(response_format, fmt))
+    return _openai_endpoint(gateway_url), {"Authorization": f"Bearer {api_key}"}, body
+
+
+def _raise_for_openai_status(resp: Any) -> None:
+    """raise_for_status, but log a rejected request's body first so the cause is visible."""
+    if resp.status_code >= 400:
+        logger.warning("openai backend: HTTP %d: %s", resp.status_code, resp.text[:300])
+    resp.raise_for_status()
+
+
+def _openai_relay_response(data: dict, model: str, latency_ms: float, max_tokens: int | None = None) -> RelayResponse:
+    """Map a Chat Completions JSON response to a RelayResponse; warns on truncation."""
+    if not data.get("choices"):
+        logger.error("failed model=%s backend=openai status=malformed (no choices)", model)
+        raise ValueError(f"openai backend: malformed response from model={model} (no choices): {repr(data)[:300]}")
+    choice = data["choices"][0]
+    text = (choice.get("message") or {}).get("content") or ""
+    usage = data.get("usage") or {}
+    if choice.get("finish_reason") == "length":
+        logger.warning("truncated model=%s finish_reason=length max_tokens=%s", model, max_tokens)
+    return RelayResponse(
+        raw=data, text=text,
+        input_tokens=usage.get("prompt_tokens") or 0, output_tokens=usage.get("completion_tokens") or 0,
+        model=model, latency_ms=latency_ms, backend="openai",
+    )
+
+
+_JSON_NUDGE = "\n\nReturn ONLY a JSON value matching the required schema — no prose, no markdown fences."
+
+
+def _with_json_nudge(messages: list[dict]) -> list[dict]:
+    """Append a short JSON-only nudge to the last user message (str or block-list content)."""
+    out = list(messages)
+    if out and out[-1]["role"] == "user":
+        content = out[-1]["content"]
+        if isinstance(content, str):
+            out[-1] = {**out[-1], "content": content + _JSON_NUDGE}
+        elif isinstance(content, list):
+            out[-1] = {**out[-1], "content": content + [{"type": "text", "text": _JSON_NUDGE}]}
+    return out
+
+
+def _parse_json_from_text(text: str) -> Any:
     """Try to extract a JSON object from text that may have markdown fences."""
     text = text.strip()
     if "```" in text:
@@ -82,7 +226,7 @@ def _parse_json_from_text(text: str) -> dict | None:
 
 
 class Relay:
-    """Shared LLM client that supports Bedrock, Gateway, and Ollama backends."""
+    """Shared LLM client that supports Bedrock, Gateway, Ollama, and OpenAI-compatible backends."""
 
     def __init__(
         self,
@@ -97,15 +241,47 @@ class Relay:
         base_delay: float = 1.0,
         max_delay: float = 30.0,
         on_usage: Callable[[UsageEvent], Awaitable[None]] | None = None,
+        reasoning_effort: str | None = None,
+        timeout: float | str | None = None,
+        *,
+        http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        """Build a relay.
+
+        `reasoning_effort` and `timeout` follow one convention: empty/0 means unset,
+        i.e. the backend default (there is no "no timeout" value). Both are only used
+        by the `openai` backend. `timeout` is seconds; the ctor also accepts a numeric
+        string (as read from env) and rejects negative or non-finite values.
+        `http_transport` is a test seam for the `openai` backend. It is handed to BOTH
+        httpx.AsyncClient (complete) and httpx.Client (complete_sync), so it must
+        implement both transport modes, as httpx.MockTransport does.
+        """
+        if backend not in RELAY_BACKENDS:
+            raise ValueError(
+                f"Unknown backend: {backend!r}. Use one of: {', '.join(RELAY_BACKENDS)}.")
         self._backend = backend
         self._ollama_url = ollama_url
         self._max_retries = max_retries
         self._base_delay = base_delay
         self._max_delay = max_delay
         self._on_usage = on_usage
+        self._reasoning_effort = (reasoning_effort or "").strip() or None
+        if timeout is None or timeout == "" or timeout == 0:
+            self._timeout = None
+        else:
+            try:
+                self._timeout = float(timeout) or None
+            except (TypeError, ValueError):
+                raise ValueError(f"timeout must be a number of seconds, got {timeout!r}") from None
+            if self._timeout is not None and (self._timeout < 0 or not math.isfinite(self._timeout)):
+                raise ValueError(
+                    f"timeout must be a finite, non-negative number of seconds, got {timeout!r}")
+        self._http_transport = http_transport
 
-        if backend != "ollama":
+        if backend == "openai" and not (gateway_url or "").strip():
+            raise ValueError("openai backend requires a gateway_url (e.g. https://host/v1)")
+
+        if backend not in ("ollama", "openai"):
             self._async_client = create_async_client(
                 backend=backend, gateway_url=gateway_url, gateway_api_key=gateway_api_key,
                 aws_access_key=aws_access_key, aws_secret_key=aws_secret_key, aws_region=aws_region,
@@ -150,6 +326,8 @@ class Relay:
             "max_retries": int(os.environ.get("RELAY_MAX_RETRIES", "3")),
             "base_delay": float(os.environ.get("RELAY_BASE_DELAY", "1.0")),
             "max_delay": float(os.environ.get("RELAY_MAX_DELAY", "30.0")),
+            "reasoning_effort": os.environ.get("REASONING_EFFORT", ""),
+            "timeout": os.environ.get("RELAY_TIMEOUT_SECONDS", ""),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -164,6 +342,8 @@ class Relay:
             "aws_secret_key": getattr(settings, "aws_secret_key", ""),
             "aws_region": getattr(settings, "aws_region", "us-east-1"),
             "ollama_url": getattr(settings, "ollama_url", "http://localhost:11434"),
+            "reasoning_effort": getattr(settings, "reasoning_effort", ""),
+            "timeout": getattr(settings, "relay_timeout_seconds", 0),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
@@ -247,6 +427,51 @@ class Relay:
 
         return response
 
+    async def _complete_openai(
+        self, model: str, messages: list[dict], max_tokens: int,
+        system: str | None = None, temperature: float | None = None,
+        response_format: dict | None = None,
+        **kwargs: Any,
+    ) -> RelayResponse:
+        """OpenAI-compatible Chat Completions (LunaRoute, OpenRouter, vLLM, OpenAI).
+
+        Thin transport shell: the pure helpers build the body and map the response so
+        the sync path can share them. Ollama-only kwargs are ignored, never sent.
+        """
+        import httpx
+
+        url, headers, body = _openai_prepare(
+            gateway_url=self._gateway_url, api_key=self._gateway_api_key,
+            reasoning_effort=self._reasoning_effort, model=model, messages=messages,
+            max_tokens=max_tokens, system=system, temperature=temperature,
+            response_format=response_format, fmt=kwargs.get("format"))
+
+        start = time.monotonic()
+
+        async def _call() -> Any:
+            async with httpx.AsyncClient(timeout=120.0 if self._timeout is None else self._timeout, transport=self._http_transport) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                _raise_for_openai_status(resp)
+                return resp.json()
+
+        try:
+            data = await with_retry(_call, max_retries=self._max_retries, base_delay=self._base_delay, max_delay=self._max_delay)
+        except Exception:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.error("failed model=%s backend=openai status=error latency=%.0fms", model, elapsed)
+            raise
+        elapsed = (time.monotonic() - start) * 1000
+
+        response = _openai_relay_response(data, model, elapsed, max_tokens)
+        logger.info("complete model=%s backend=openai tokens=%d/%d latency=%.0fms", model, response.input_tokens, response.output_tokens, elapsed)
+
+        if self._on_usage:
+            from datetime import datetime, timezone
+            event = UsageEvent(model=model, backend="openai", input_tokens=response.input_tokens, output_tokens=response.output_tokens, latency_ms=elapsed, timestamp=datetime.now(timezone.utc).isoformat(), retries=0)
+            await self._on_usage(event)
+
+        return response
+
     async def complete(
         self, model: str, messages: list[dict], max_tokens: int,
         system: str | None = None, temperature: float | None = None,
@@ -255,6 +480,12 @@ class Relay:
     ) -> RelayResponse:
         if self._backend == "ollama":
             return await self._complete_ollama(model, messages, max_tokens, system, temperature, **kwargs)
+        if self._backend == "openai":
+            if tools is not None or tool_choice is not None:
+                raise NotImplementedError(
+                    "openai backend does not support raw tools/tool_choice; "
+                    "use complete_structured for structured output")
+            return await self._complete_openai(model, messages, max_tokens, system, temperature, **kwargs)
 
         mapped_model = map_model_id(model, self._backend)
         call_kwargs: dict[str, Any] = {"model": mapped_model, "messages": messages, "max_tokens": max_tokens}
@@ -316,14 +547,7 @@ class Relay:
             # tokens on a context Ollama silently truncates and only *asked* for
             # valid JSON. A short nudge still helps quality (Ollama's own guidance),
             # but `format` is what guarantees parseability.
-            json_instruction = "\n\nReturn ONLY a JSON value matching the required schema — no prose, no markdown fences."
-            augmented = list(messages)
-            if augmented and augmented[-1]["role"] == "user":
-                content = augmented[-1]["content"]
-                if isinstance(content, str):
-                    augmented[-1] = {**augmented[-1], "content": content + json_instruction}
-                elif isinstance(content, list):
-                    augmented[-1] = {**augmented[-1], "content": content + [{"type": "text", "text": json_instruction}]}
+            augmented = _with_json_nudge(messages)
 
             # Drop any caller-supplied `format` so the schema is the only one in play.
             call_kwargs = {k: v for k, v in kwargs.items() if k != "format"}
@@ -331,6 +555,16 @@ class Relay:
                 model, augmented, max_tokens, system, temperature, format=schema, **call_kwargs)
             parsed = _parse_json_from_text(response.text)
             return parsed if parsed is not None else {}
+
+        if self._backend == "openai":
+            augmented = _with_json_nudge(messages)
+            call_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+            response_format = {"type": "json_schema", "json_schema": {
+                "name": tool_name, "description": tool_description, "strict": False, "schema": schema}}
+            response = await self._complete_openai(
+                model, augmented, max_tokens, system, temperature, response_format=response_format, **call_kwargs)
+            parsed = _parse_json_from_text(response.text)
+            return parsed if isinstance(parsed, dict) else {}
 
         # Anthropic/Bedrock: use tool_use
         tools = [{
@@ -418,6 +652,42 @@ class Relay:
                              output_tokens=output_tokens, model=model,
                              latency_ms=elapsed, backend="ollama")
 
+    def _complete_openai_sync(
+        self, model: str, messages: list[dict], max_tokens: int,
+        system: str | None = None, temperature: float | None = None,
+        response_format: dict | None = None,
+        **kwargs: Any,
+    ) -> RelayResponse:
+        """Sync twin of _complete_openai: same helpers, httpx.Client + with_retry_sync.
+
+        Like the other sync paths, on_usage (async) is not invoked.
+        """
+        import httpx
+
+        url, headers, body = _openai_prepare(
+            gateway_url=self._gateway_url, api_key=self._gateway_api_key,
+            reasoning_effort=self._reasoning_effort, model=model, messages=messages,
+            max_tokens=max_tokens, system=system, temperature=temperature,
+            response_format=response_format, fmt=kwargs.get("format"))
+        start = time.monotonic()
+
+        def _call() -> Any:
+            with httpx.Client(timeout=120.0 if self._timeout is None else self._timeout, transport=self._http_transport) as client:
+                resp = client.post(url, json=body, headers=headers)
+                _raise_for_openai_status(resp)
+                return resp.json()
+
+        try:
+            data = with_retry_sync(_call, max_retries=self._max_retries, base_delay=self._base_delay, max_delay=self._max_delay)
+        except Exception:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.error("failed model=%s backend=openai status=error latency=%.0fms", model, elapsed)
+            raise
+        elapsed = (time.monotonic() - start) * 1000
+        response = _openai_relay_response(data, model, elapsed, max_tokens)
+        logger.info("complete_sync model=%s backend=openai tokens=%d/%d latency=%.0fms", model, response.input_tokens, response.output_tokens, elapsed)
+        return response
+
     def complete_sync(
         self, model: str, messages: list[dict], max_tokens: int,
         system: str | None = None, temperature: float | None = None,
@@ -425,6 +695,8 @@ class Relay:
     ) -> RelayResponse:
         if self._backend == "ollama":
             return self._complete_ollama_sync(model, messages, max_tokens, system, temperature, **kwargs)
+        if self._backend == "openai":
+            return self._complete_openai_sync(model, messages, max_tokens, system, temperature, **kwargs)
         if self._sync_client is None:
             self._sync_client = create_sync_client(
                 backend=self._backend, gateway_url=self._gateway_url, gateway_api_key=self._gateway_api_key,

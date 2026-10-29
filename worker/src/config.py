@@ -1,5 +1,5 @@
 # ABOUTME: Application settings loaded from environment variables.
-# ABOUTME: Supports both gateway and bedrock backends via ANTHROPIC_BACKEND env var.
+# ABOUTME: Supports gateway, bedrock, ollama and openai backends via ANTHROPIC_BACKEND env var.
 
 import os
 from dataclasses import dataclass, fields
@@ -20,11 +20,15 @@ class Settings:
     summarization_backend: str = ""  # empty -> summarization uses the local relay
     summarization_gateway_url: str = ""
     summarization_gateway_api_key: str = ""
+    summarization_reasoning_effort: str = ""  # empty -> unset (openai backend only)
+    summarization_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     general_spec_threshold: int = 10
     domain_spec_threshold: int = 20
     simmer_iterations: int = 3
     chunk_size: int = 2000
     ollama_url: str = "http://localhost:11434"
+    reasoning_effort: str = ""  # openai backend only; empty -> unset
+    relay_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     worker_poll_interval: int = 5
     judge_sweep_interval_seconds: int = 900  # periodic advisory-judge sweep cadence (~15 min)
     source_scan_interval_seconds: int = 900  # how often the sweep checks watched_sources for due scans
@@ -87,6 +91,10 @@ _ENV_MAP = {
     "summarization_backend": "SUMMARIZATION_BACKEND",
     "summarization_gateway_url": "SUMMARIZATION_GATEWAY_URL",
     "summarization_gateway_api_key": "SUMMARIZATION_GATEWAY_API_KEY",
+    "summarization_reasoning_effort": "SUMMARIZATION_REASONING_EFFORT",
+    "summarization_timeout_seconds": "SUMMARIZATION_TIMEOUT_SECONDS",
+    "reasoning_effort": "REASONING_EFFORT",
+    "relay_timeout_seconds": "RELAY_TIMEOUT_SECONDS",
     "general_spec_threshold": "GENERAL_SPEC_THRESHOLD",
     "domain_spec_threshold": "DOMAIN_SPEC_THRESHOLD",
     "simmer_iterations": "SIMMER_ITERATIONS",
@@ -151,7 +159,9 @@ def get_settings() -> Settings:
             if f.type is bool:
                 kwargs[f.name] = str(val).strip().lower() in ("1", "true", "yes", "on")
             elif f.type in (int, float):
-                kwargs[f.name] = f.type(val)
+                # Empty/whitespace means "unset" -> the dataclass default; a
+                # non-numeric value still raises.
+                kwargs[f.name] = f.type(val) if val.strip() else default
             else:
                 kwargs[f.name] = val
         else:

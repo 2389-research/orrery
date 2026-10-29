@@ -1,4 +1,4 @@
-# Run the orchestrator pytest suite and the frontend Playwright suite on
+# Run the orchestrator and orrery-relay pytest suites and the frontend Playwright suite on
 # every PR and push to main. Without this, the test investment doesn't
 # compound — regressions sneak in.
 name: tests
@@ -49,6 +49,34 @@ jobs:
           AWS_REGION: us-east-1
         run: |
           python -m pytest tests/ -v
+
+  # The relay package had no CI; stale tests went unnoticed. The live LunaRoute
+  # test skips itself without an API key, so no secret is wired in here.
+  relay-pytest:
+    name: orrery-relay pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install orrery-relay + test deps
+        run: uv pip install --system -e packages/orrery-relay pytest pytest-asyncio
+
+      - name: Run pytest
+        working-directory: packages/orrery-relay
+        run: python -m pytest tests/ -v
 
   desktop:
     name: desktop (signing scripts + supervisor)

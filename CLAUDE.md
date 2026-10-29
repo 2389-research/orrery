@@ -141,10 +141,15 @@ response = await relay.complete(
 text = response.text
 ```
 
-The relay supports three backends controlled by `ANTHROPIC_BACKEND` env var:
+The relay supports four backends controlled by `ANTHROPIC_BACKEND` env var:
 - `gateway` (default): Direct Anthropic API or proxy at `GATEWAY_URL`
 - `bedrock`: AWS Bedrock with `AWS_ACCESS_KEY`/`AWS_SECRET_KEY`
 - `ollama`: Local models via Ollama at `OLLAMA_URL` (default `http://localhost:11434`)
+- `openai`: any OpenAI-compatible Chat Completions endpoint (LunaRoute, OpenRouter, vLLM, OpenAI). `GATEWAY_URL` includes `/v1`; the key comes from `GATEWAY_API_KEY`.
+  - Main relay knobs: `REASONING_EFFORT` (e.g. `none`), `RELAY_TIMEOUT_SECONDS` (empty/0 = unset = backend default).
+  - Summarization relay: `SUMMARIZATION_BACKEND`, `SUMMARIZATION_GATEWAY_URL`/`_API_KEY`, `SUMMARIZATION_REASONING_EFFORT`, `SUMMARIZATION_TIMEOUT_SECONDS`.
+  - Timeouts apply to the `openai` backend only. An empty numeric env var means "use the default".
+  - Caveats: verified against LunaRoute only. api.openai.com's reasoning models need `max_completion_tokens` (not `max_tokens`) and reject `temperature`, so they are not supported as-is. Setting the main backend to `openai` does not cover the dormant simmer-sdk image-simmer path (#132).
 
 The `orrery-relay` package lives at `packages/orrery-relay/` and is a dependency of both orchestrator and worker via `[tool.uv.sources]` path reference.
 
@@ -164,7 +169,7 @@ gemma4:e4b      # extraction, clerk (8B dense, good at structured output)
 
 `SUMMARIZATION_MODEL` (`settings.summarization_model`) is the model for summaries and generation: codesum/tracksum, meridian/ccvault segment + rollup, stretch facets, and commentary. It defaults to `CLASSIFICATION_MODEL` when unset. Entity extraction stays on `EXTRACTION_MODEL`. A source-scan test (`worker/tests/test_summarization_model_routing.py`) enforces the split.
 
-The relay handles translation to Bedrock inference profile IDs when running in bedrock mode. For ollama, model names are passed through as-is. Check `packages/orrery-relay/src/orrery_relay/backends.py` for the current mapping.
+The relay handles translation to Bedrock inference profile IDs when running in bedrock mode. For ollama and openai, model names are passed through as-is. Check `packages/orrery-relay/src/orrery_relay/backends.py` for the current mapping.
 
 ### Two Deployment Tiers
 
@@ -307,6 +312,12 @@ text block**, so `.text` is empty. Blank output, no error. Both relay paths set
 `think: false` for exactly this reason. This is why `complete_sync` has an ollama branch:
 orrery-codesum summarizes a repo through `complete_sync` exclusively (its traversal is
 synchronous), and on the shim every file summary came back empty.
+
+**⚠️ For reasoning models behind LunaRoute, use `backend=openai` with `reasoning_effort`,
+never the `gateway` backend.** LunaRoute's Anthropic-format endpoint cannot disable a
+reasoning model's thinking. Measured: thinking consumed the whole `max_tokens` budget and
+the facet JSON came back truncated, so every facet was lost. The OpenAI-format endpoint
+honors `reasoning_effort`.
 
 ### Entity Normalization
 
