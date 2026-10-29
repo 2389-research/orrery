@@ -154,7 +154,7 @@ def _load_bundles(config: dict, relay, settings) -> list[dict]:
 
     Bundle mode (an `index.json` is present) skips the model entirely — the summaries
     already exist. Raw mode is the codesum-shaped path: summarize each run with the
-    extraction model through the relay, exactly as ingest_repo summarizes a checkout.
+    summarization model through the relay, exactly as ingest_repo summarizes a checkout.
     """
     out_dir = config.get("out_dir")
     index_path = os.path.join(out_dir, "index.json") if out_dir else None
