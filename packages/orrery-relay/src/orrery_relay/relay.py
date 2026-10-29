@@ -61,6 +61,7 @@ _OLLAMA_ONLY_KWARGS = ("ollama_options", "format")
 def _strip_ollama_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in _OLLAMA_ONLY_KWARGS}
 
+
 def _anthropic_to_openai_messages(messages: list[dict], system: str | None = None) -> list[dict]:
     """Translate Anthropic-format messages to OpenAI Chat Completions format.
 
@@ -78,6 +79,7 @@ def _anthropic_to_openai_messages(messages: list[dict], system: str | None = Non
             parts: list[dict] = []
             for block in content:
                 if not isinstance(block, dict):
+                    logger.warning("openai translate: dropped non-dict content block (%s)", type(block).__name__)
                     continue
                 if block.get("type") == "text":
                     parts.append({"type": "text", "text": block.get("text", "")})
@@ -86,6 +88,14 @@ def _anthropic_to_openai_messages(messages: list[dict], system: str | None = Non
                     if source.get("type") == "base64":
                         url = f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
                         parts.append({"type": "image_url", "image_url": {"url": url}})
+                    else:
+                        logger.warning("openai translate: dropped image block with non-base64 source type=%s", source.get("type"))
+                else:
+                    logger.warning("openai translate: dropped unsupported content block type=%s", block.get("type"))
+            if not parts:
+                raise ValueError(
+                    f"openai backend: every content block of a {msg.get('role')} message was dropped "
+                    "(only text and base64 image blocks are supported); refusing to send empty content")
             result.append({"role": msg["role"], "content": parts})
         else:
             result.append({"role": msg["role"], "content": content if isinstance(content, str) else (str(content) if content else "")})
@@ -119,7 +129,9 @@ def _openai_request_body(
 
 def _openai_relay_response(data: dict, model: str, latency_ms: float, max_tokens: int | None = None) -> RelayResponse:
     """Map a Chat Completions JSON response to a RelayResponse; warns on truncation."""
-    choice = (data.get("choices") or [{}])[0]
+    if not data.get("choices"):
+        raise ValueError(f"openai backend: malformed response from model={model} (no choices): {repr(data)[:300]}")
+    choice = data["choices"][0]
     text = (choice.get("message") or {}).get("content") or ""
     usage = data.get("usage") or {}
     if choice.get("finish_reason") == "length":
@@ -341,7 +353,7 @@ class Relay:
         start = time.monotonic()
 
         async def _call() -> Any:
-            async with httpx.AsyncClient(timeout=self._timeout or 120.0, transport=self._http_transport) as client:
+            async with httpx.AsyncClient(timeout=120.0 if self._timeout is None else self._timeout, transport=self._http_transport) as client:
                 resp = await client.post(url, json=body, headers=headers)
                 resp.raise_for_status()
                 return resp.json()

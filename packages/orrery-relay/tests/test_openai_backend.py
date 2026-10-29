@@ -165,6 +165,59 @@ async def test_400_fails_fast():
     assert len(calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_cache_control_on_image_and_message_level_absent():
+    seen, handler = _capture()
+    msgs = [{"role": "user", "cache_control": {"type": "ephemeral"}, "content": [
+        {"type": "image", "cache_control": {"type": "ephemeral"},
+         "source": {"type": "base64", "media_type": "image/jpeg", "data": "QQ=="}},
+    ]}]
+    await _relay(handler).complete("m", msgs, 5)
+    assert "cache_control" not in seen[0].content.decode()
+
+
+@pytest.mark.asyncio
+async def test_503_retried_then_succeeds():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(503, json={"error": "down"})
+        return httpx.Response(200, json=_ok("up"))
+
+    resp = await _relay(handler).complete("m", MSGS, 5)
+    assert len(calls) == 2 and resp.text == "up"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{}, {"choices": []}, {"error": {"message": "quota"}}])
+async def test_malformed_200_raises(payload):
+    seen, handler = _capture(payload)
+    with pytest.raises(ValueError, match="my-model"):
+        await _relay(handler).complete("my-model", MSGS, 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout,expected", [(None, 120.0), (7.0, 7.0), (0, 0)])
+async def test_timeout_reaches_httpx(timeout, expected):
+    seen, handler = _capture()
+    await _relay(handler, timeout=timeout).complete("m", MSGS, 5)
+    assert seen[0].extensions["timeout"]["read"] == expected
+
+
+def test_dropped_block_warns_and_empty_message_raises(caplog):
+    msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "keep"}, {"type": "tool_result", "content": "x"}]}]
+    with caplog.at_level(logging.WARNING, logger="orrery_relay"):
+        out = _anthropic_to_openai_messages(msgs, None)
+    assert out[0]["content"] == [{"type": "text", "text": "keep"}]
+    assert any("tool_result" in r.getMessage() for r in caplog.records)
+    with pytest.raises(ValueError, match="dropped"):
+        _anthropic_to_openai_messages(
+            [{"role": "user", "content": [{"type": "tool_result", "content": "x"}]}], None)
+
+
 def test_no_anthropic_client_built_for_openai():
     relay = Relay(backend="openai", gateway_url=BASE, gateway_api_key="k")
     assert not hasattr(relay, "_async_client")
