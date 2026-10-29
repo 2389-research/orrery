@@ -90,6 +90,21 @@
 - [ ] Run it locally with the key; it must pass. Without the key it must skip.
 - [ ] Commit `test(relay): live LunaRoute smoke test for the openai backend (skipped without key)`.
 
+### Task 5: Fix the 2 stale relay tests + run the relay suite in CI
+*(Added during execution. CI installs `orrery-relay` but never runs its tests, and 2 of them have been failing on `main` unnoticed. A new backend in an untested package isn't well-principled.)*
+
+**Files:** `packages/orrery-relay/tests/test_backends.py`, `packages/orrery-relay/tests/test_relay.py`, `.github/workflows/test.yml`.
+
+- [ ] Fix `test_backends.py::test_map_model_bedrock_translates` and `test_relay.py::test_relay_complete_bedrock_maps_model`. They assert the retired id `us.anthropic.claude-sonnet-4-20250514-v1:0` for `claude-sonnet-4-6`, but `BEDROCK_MODEL_MAP` maps it to `us.anthropic.claude-sonnet-4-6`.
+  - Update the expectations to the current map; the tests are stale, the map is not.
+  - Assert against `BEDROCK_MODEL_MAP["claude-sonnet-4-6"]` where that keeps the test meaningful, so the test can't silently drift again. Keep one literal-id assertion so a wrong map entry is still caught.
+- [ ] Add a `relay-pytest` job to `.github/workflows/test.yml`, mirroring the orchestrator job's setup (Python 3.12, `pip install uv`):
+  - Install with `uv pip install --system -e packages/orrery-relay pytest pytest-asyncio`.
+  - Run `python -m pytest tests/ -v` with `working-directory: packages/orrery-relay`.
+  - Do NOT add a LunaRoute key secret. The live test must skip in CI.
+- [ ] Verify locally: `cd packages/orrery-relay && PYTHONPATH=src python -m pytest tests/ -q`. Expect **0 failures**, with the live tests skipped when no key is set. Validate the workflow YAML parses, e.g. `python -c "import yaml,sys; yaml.safe_load(open('.github/workflows/test.yml'))"`.
+- [ ] Commit `test(relay): fix stale bedrock model-id tests; run orrery-relay suite in CI`.
+
 ---
 
 ## After merge (ops)
