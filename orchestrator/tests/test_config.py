@@ -81,3 +81,13 @@ def test_summarization_model_explicit_set():
 def test_extraction_model_untouched():
     s = _settings({"EXTRACTION_MODEL": "e4b-x"})
     assert s.extraction_model == "e4b-x"
+
+
+def test_relay_knobs_default_and_env():
+    from src.config import get_settings
+    with mock.patch.dict(os.environ, {}, clear=True):
+        s = get_settings()
+        assert s.reasoning_effort == "" and s.relay_timeout_seconds == 0.0
+    with mock.patch.dict(os.environ, {"REASONING_EFFORT": "none", "RELAY_TIMEOUT_SECONDS": "60"}, clear=True):
+        s = get_settings()
+        assert s.reasoning_effort == "none" and s.relay_timeout_seconds == 60.0

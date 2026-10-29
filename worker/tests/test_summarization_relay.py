@@ -51,3 +51,29 @@ def test_unknown_backend_falls_back_to_local_with_warning(caplog):
         relay = build_summarization_relay(_settings({**_ENV, "SUMMARIZATION_BACKEND": "gatway"}))
     assert relay is None
     assert any(r.name == "summarization_relay" and "gatway" in r.getMessage() for r in caplog.records)
+
+
+_OPENAI = {
+    "SUMMARIZATION_BACKEND": "openai",
+    "SUMMARIZATION_GATEWAY_URL": "https://gw.example/v1",
+    "SUMMARIZATION_GATEWAY_API_KEY": "k",
+}
+
+
+def test_openai_backend_with_reasoning_and_timeout():
+    from src.summarization_relay import build_summarization_relay
+    relay = build_summarization_relay(_settings({
+        **_OPENAI,
+        "SUMMARIZATION_REASONING_EFFORT": "none",
+        "SUMMARIZATION_TIMEOUT_SECONDS": "30",
+    }))
+    assert relay._backend == "openai"
+    assert relay._reasoning_effort == "none"
+    assert relay._timeout == 30.0
+
+
+def test_openai_backend_unset_knobs_are_none():
+    from src.summarization_relay import build_summarization_relay
+    relay = build_summarization_relay(_settings(_OPENAI))
+    assert relay._reasoning_effort is None
+    assert relay._timeout is None

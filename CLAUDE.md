@@ -141,10 +141,11 @@ response = await relay.complete(
 text = response.text
 ```
 
-The relay supports three backends controlled by `ANTHROPIC_BACKEND` env var:
+The relay supports four backends controlled by `ANTHROPIC_BACKEND` env var:
 - `gateway` (default): Direct Anthropic API or proxy at `GATEWAY_URL`
 - `bedrock`: AWS Bedrock with `AWS_ACCESS_KEY`/`AWS_SECRET_KEY`
 - `ollama`: Local models via Ollama at `OLLAMA_URL` (default `http://localhost:11434`)
+- `openai`: any OpenAI-compatible Chat Completions endpoint (LunaRoute, OpenRouter, vLLM, OpenAI). `GATEWAY_URL` includes `/v1`; the key comes from `GATEWAY_API_KEY`. Optional `REASONING_EFFORT` (e.g. `none`) and `RELAY_TIMEOUT_SECONDS` (empty/0 = unset). The summarization relay has the same set: `SUMMARIZATION_BACKEND`, `SUMMARIZATION_GATEWAY_URL`/`_API_KEY`, `SUMMARIZATION_REASONING_EFFORT`, `SUMMARIZATION_TIMEOUT_SECONDS`.
 
 The `orrery-relay` package lives at `packages/orrery-relay/` and is a dependency of both orchestrator and worker via `[tool.uv.sources]` path reference.
 
@@ -307,6 +308,12 @@ text block**, so `.text` is empty. Blank output, no error. Both relay paths set
 `think: false` for exactly this reason. This is why `complete_sync` has an ollama branch:
 orrery-codesum summarizes a repo through `complete_sync` exclusively (its traversal is
 synchronous), and on the shim every file summary came back empty.
+
+**⚠️ For reasoning models behind LunaRoute, use `backend=openai` with `reasoning_effort`,
+never the `gateway` backend.** LunaRoute's Anthropic-format endpoint cannot disable a
+reasoning model's thinking. Measured: thinking consumed the whole `max_tokens` budget and
+the facet JSON came back truncated, so every facet was lost. The OpenAI-format endpoint
+honors `reasoning_effort`.
 
 ### Entity Normalization
 

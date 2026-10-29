@@ -155,3 +155,67 @@ async def test_relay_complete_passes_kwargs_through():
         )
     call_kwargs = mock_client.messages.create.call_args[1]
     assert len(call_kwargs["tools"]) == 1
+
+
+# --- reasoning_effort / timeout config plumbing ---
+
+class _S:
+    anthropic_backend = "openai"
+    gateway_url = "https://x/v1"
+    gateway_api_key = "k"
+
+
+def test_from_settings_passes_reasoning_and_timeout():
+    from orrery_relay import Relay
+    s = _S()
+    s.reasoning_effort = "none"
+    s.relay_timeout_seconds = 45.0
+    r = Relay.from_settings(s)
+    assert r._reasoning_effort == "none"
+    assert r._timeout == 45.0
+
+
+def test_from_settings_unset_maps_to_none():
+    from orrery_relay import Relay
+    s = _S()
+    s.reasoning_effort = ""
+    s.relay_timeout_seconds = 0.0
+    r = Relay.from_settings(s)
+    assert r._reasoning_effort is None
+    assert r._timeout is None
+
+
+def test_from_settings_without_new_attrs_still_builds():
+    from orrery_relay import Relay
+    r = Relay.from_settings(_S())
+    assert r._reasoning_effort is None and r._timeout is None
+
+
+def test_from_settings_overrides_win():
+    from orrery_relay import Relay
+    s = _S()
+    s.reasoning_effort = "none"
+    s.relay_timeout_seconds = 45.0
+    r = Relay.from_settings(s, reasoning_effort="high", timeout=5.0)
+    assert r._reasoning_effort == "high" and r._timeout == 5.0
+
+
+def test_from_env_reads_reasoning_and_timeout(monkeypatch):
+    from orrery_relay import Relay
+    monkeypatch.setenv("ANTHROPIC_BACKEND", "openai")
+    monkeypatch.setenv("GATEWAY_URL", "https://x/v1")
+    monkeypatch.setenv("REASONING_EFFORT", "low")
+    monkeypatch.setenv("RELAY_TIMEOUT_SECONDS", "30")
+    r = Relay.from_env()
+    assert r._reasoning_effort == "low" and r._timeout == 30.0
+    assert Relay.from_env(timeout=9.0)._timeout == 9.0
+
+
+def test_from_env_unset_is_none(monkeypatch):
+    from orrery_relay import Relay
+    monkeypatch.setenv("ANTHROPIC_BACKEND", "openai")
+    monkeypatch.setenv("GATEWAY_URL", "https://x/v1")
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("RELAY_TIMEOUT_SECONDS", raising=False)
+    r = Relay.from_env()
+    assert r._reasoning_effort is None and r._timeout is None

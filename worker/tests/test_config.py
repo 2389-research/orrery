@@ -28,3 +28,18 @@ def test_summarization_model_explicit_set():
 def test_extraction_model_untouched():
     s = _settings({"EXTRACTION_MODEL": "e4b-x"})
     assert s.extraction_model == "e4b-x"
+
+
+def test_relay_knobs_default_unset():
+    s = _settings({})
+    assert s.reasoning_effort == "" and s.relay_timeout_seconds == 0.0
+    assert s.summarization_reasoning_effort == "" and s.summarization_timeout_seconds == 0.0
+
+
+def test_relay_knobs_load_from_env():
+    s = _settings({
+        "REASONING_EFFORT": "none", "RELAY_TIMEOUT_SECONDS": "60",
+        "SUMMARIZATION_REASONING_EFFORT": "low", "SUMMARIZATION_TIMEOUT_SECONDS": "30",
+    })
+    assert s.reasoning_effort == "none" and s.relay_timeout_seconds == 60.0
+    assert s.summarization_reasoning_effort == "low" and s.summarization_timeout_seconds == 30.0

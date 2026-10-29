@@ -15,6 +15,8 @@ class Settings:
     aws_secret_key: str = ""
     aws_region: str = "us-east-1"
     ollama_url: str = "http://localhost:11434"
+    reasoning_effort: str = ""  # openai backend only; empty -> unset
+    relay_timeout_seconds: float = 0.0  # 0 -> relay default
     classification_model: str = "claude-sonnet-4-6"
     extraction_model: str = "claude-haiku-4-5"
     summarization_model: str = ""  # empty -> resolved classification_model
