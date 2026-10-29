@@ -10,6 +10,11 @@ from src.jobs.generate_commentary import (
 )
 
 
+def _settings():
+    from types import SimpleNamespace
+    return SimpleNamespace(db_path="/nonexistent/orrery.db", summarization_model="m")
+
+
 class FakeRelay:
     """Records calls and returns a valid 3-comment payload for every node."""
 
@@ -60,16 +65,16 @@ async def test_sweep_drains_in_bounded_batches_and_is_idempotent(test_db):
     relay = FakeRelay()
 
     # Pass 1: one bounded batch of 3.
-    r1 = await run_commentary_sweep([test_db], relay, "m", batch_size=3)
+    r1 = await run_commentary_sweep([test_db], relay, _settings(), batch_size=3)
     assert r1["made"] == 3 and r1["workspace"] == test_db
     assert relay.calls == 3
 
     # Pass 2: the remaining 1 (only_missing skips the 3 already done).
-    r2 = await run_commentary_sweep([test_db], relay, "m", batch_size=3)
+    r2 = await run_commentary_sweep([test_db], relay, _settings(), batch_size=3)
     assert r2["made"] == 1
 
     # Pass 3: caught up — nothing to do, workspace reported as None.
-    r3 = await run_commentary_sweep([test_db], relay, "m", batch_size=3)
+    r3 = await run_commentary_sweep([test_db], relay, _settings(), batch_size=3)
     assert r3["made"] == 0 and r3["workspace"] is None
 
     conn = get_connection(test_db)
@@ -104,5 +109,5 @@ async def test_sweep_picks_first_workspace_with_missing_nodes(tmp_path):
     conn = get_connection(work_db); _seed(conn, n_collections=1, n_domains=0); conn.close()
     relay = FakeRelay()
 
-    r = await run_commentary_sweep([empty_db, work_db], relay, "m", batch_size=5)
+    r = await run_commentary_sweep([empty_db, work_db], relay, _settings(), batch_size=5)
     assert r["workspace"] == work_db and r["made"] == 1

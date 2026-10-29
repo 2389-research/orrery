@@ -200,6 +200,7 @@ async def poll_loop():
     from .jobs.graph_repair import run_judge_sweep
     from .jobs.normalization_judge import resolve_judge_relay, run_normalization_judge_sweep
     from .jobs.generate_commentary import run_commentary_sweep, commentary_enrolled_dbs
+    from .summarization_relay import build_summarization_relay
     relay = Relay.from_settings(settings)
     last_sweep = 0.0  # 0 → sweep on the first iteration
     last_source_sweep = 0.0  # watched-source scan cadence, same first-iteration behaviour
@@ -363,7 +364,8 @@ async def poll_loop():
         if enrolled_dbs and not did_work:
             try:
                 cr = await run_commentary_sweep(
-                    enrolled_dbs, relay, settings.summarization_model,
+                    enrolled_dbs, relay, settings,
+                    summ_relay=build_summarization_relay(settings),
                     batch_size=settings.commentary_sweep_batch)
                 if cr["made"] or cr["failed"]:
                     comm_did = cr["made"] > 0

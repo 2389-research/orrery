@@ -310,7 +310,8 @@ def _select_missing_batch(conn, node_types, batch_size):
     return nodes[:batch_size]
 
 
-async def run_commentary_sweep(db_paths, relay, model, *, batch_size,
+async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=None,
+                               batch_size,
                                node_types=DEFAULT_SWEEP_NODE_TYPES) -> dict:
     """One bounded batch of Magos Lex commentary for the FIRST workspace with missing nodes.
 
@@ -319,13 +320,18 @@ async def run_commentary_sweep(db_paths, relay, model, *, batch_size,
     starving real jobs. `only_missing` is implicit, so this is idempotent — a fully
     commented workspace is skipped after one cheap indexed query, and newly-added
     domains/collections are picked up on a later pass. Returns
-    {made, skipped, failed, workspace}; workspace is None when nothing needed work."""
+    {made, skipped, failed, workspace}; workspace is None when nothing needed work.
+
+    The (relay, model) is resolved PER workspace (`resolve_summarization`): a workspace
+    set to `remote` uses `summ_relay`, otherwise `local_relay` + the default model."""
     for db_path in db_paths:
         conn = get_connection(db_path)
         try:
             nodes = _select_missing_batch(conn, node_types, batch_size)
             if not nodes:
                 continue
+            relay, model = resolve_summarization(
+                settings, db_path, local_relay=local_relay, summ_relay=summ_relay)
             made, skipped, failed = await _generate_for_nodes(conn, relay, model, nodes)
             return {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
         finally:

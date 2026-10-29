@@ -72,3 +72,42 @@ async def test_local_workspace_facets_use_local_relay(spies, monkeypatch, test_d
     _patch_resolve(monkeypatch, spies, "local")
     await _run(test_db)
     assert spies["enrich"] and all(c == (LOCAL, "local-model") for c in spies["enrich"])
+
+
+@pytest.mark.asyncio
+async def test_commentary_sweep_resolves_per_workspace(tmp_path, monkeypatch):
+    import json as _json
+    from types import SimpleNamespace
+    from src.db import init_db
+    from src.jobs import generate_commentary as gc
+
+    base = tmp_path / "orrery.db"
+    ws = tmp_path / "workspaces"
+    dbs = {}
+    for name in ("rem", "loc"):
+        (ws / name).mkdir(parents=True)
+        dbs[name] = str(ws / name / "orrery.db")
+        init_db(dbs[name])
+        c = get_connection(dbs[name])
+        c.execute("INSERT INTO collections (id, name, path, root_path, document_count) "
+                  "VALUES ('c', 'n', 'n', '/x', 1)")
+        c.commit()
+        c.close()
+    (ws / "registry.json").write_text(_json.dumps([
+        {"id": "rem", "summarization_target": "remote", "summarization_model": "remote-model"},
+        {"id": "loc"},
+    ]))
+    local, summ = object(), object()
+    used = []
+
+    async def fake_gen(conn, relay, model, nodes):
+        used.append((relay, model))
+        return (1, 0, 0)
+
+    monkeypatch.setattr(gc, "_generate_for_nodes", fake_gen)
+    settings = SimpleNamespace(db_path=str(base), summarization_model="default-model")
+
+    r1 = await gc.run_commentary_sweep([dbs["rem"]], local, settings, summ_relay=summ, batch_size=5)
+    r2 = await gc.run_commentary_sweep([dbs["loc"]], local, settings, summ_relay=summ, batch_size=5)
+    assert r1["workspace"] == dbs["rem"] and r2["workspace"] == dbs["loc"]
+    assert used == [(summ, "remote-model"), (local, "default-model")]
