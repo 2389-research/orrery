@@ -180,7 +180,7 @@ def _find_workspace_dbs(base_db_path: str) -> list[str]:
     # Multi-workspace
     ws_dir = os.path.join(base_dir, "workspaces")
     if os.path.isdir(ws_dir):
-        for ws_name in os.listdir(ws_dir):
+        for ws_name in sorted(os.listdir(ws_dir)):  # deterministic sweep order
             ws_db = os.path.join(ws_dir, ws_name, "orrery.db")
             if os.path.isfile(ws_db):
                 db_paths.append(ws_db)

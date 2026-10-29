@@ -323,7 +323,12 @@ async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=No
     {made, skipped, failed, workspace}; workspace is None when nothing needed work.
 
     The (relay, model) is resolved PER workspace (`resolve_summarization`): a workspace
-    set to `remote` uses `summ_relay`, otherwise `local_relay` + the default model."""
+    set to `remote` uses `summ_relay`, otherwise `local_relay` + the default model.
+
+    A workspace whose batch produced nothing but failures does not end the pass: failed
+    nodes stay missing, so returning there would re-select the same broken workspace every
+    pass and starve every enrolled workspace after it. Move on to the next one instead."""
+    last_failed = None
     for db_path in db_paths:
         conn = get_connection(db_path)
         try:
@@ -333,7 +338,11 @@ async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=No
             relay, model = resolve_summarization(
                 settings, db_path, local_relay=local_relay, summ_relay=summ_relay)
             made, skipped, failed = await _generate_for_nodes(conn, relay, model, nodes)
-            return {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
+            result = {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}
+            if made == 0 and failed > 0:
+                last_failed = result
+                continue
+            return result
         finally:
             conn.close()
-    return {"made": 0, "skipped": 0, "failed": 0, "workspace": None}
+    return last_failed or {"made": 0, "skipped": 0, "failed": 0, "workspace": None}

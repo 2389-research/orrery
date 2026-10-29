@@ -111,3 +111,27 @@ async def test_sweep_picks_first_workspace_with_missing_nodes(tmp_path):
 
     r = await run_commentary_sweep([empty_db, work_db], relay, _settings(), batch_size=5)
     assert r["workspace"] == work_db and r["made"] == 1
+
+
+class FailFirstRelay(FakeRelay):
+    """Fails the first call (one broken workspace), succeeds afterwards."""
+
+    async def complete_structured(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("remote route down")
+        return await super().complete_structured(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_sweep_moves_past_a_failing_workspace(tmp_path):
+    # A workspace whose whole batch fails must not starve the enrolled workspaces after it:
+    # its nodes stay missing, so returning on it would re-pick it forever.
+    broken_db = str(tmp_path / "broken.db"); init_db(broken_db)
+    healthy_db = str(tmp_path / "healthy.db"); init_db(healthy_db)
+    for p in (broken_db, healthy_db):
+        conn = get_connection(p); _seed(conn, n_collections=1, n_domains=0); conn.close()
+
+    r = await run_commentary_sweep([broken_db, healthy_db], FailFirstRelay(), _settings(),
+                                   batch_size=5)
+    assert r["workspace"] == healthy_db and r["made"] == 1

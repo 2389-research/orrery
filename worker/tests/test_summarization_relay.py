@@ -40,3 +40,14 @@ def test_config_load_set_and_unset():
     assert s.summarization_gateway_api_key == "k"
     s = _settings({})
     assert (s.summarization_backend, s.summarization_gateway_url, s.summarization_gateway_api_key) == ("", "", "")
+
+
+def test_unknown_backend_falls_back_to_local_with_warning(caplog):
+    # A typo'd SUMMARIZATION_BACKEND must not crash summarization jobs: no relay (=> local),
+    # plus a warning naming the bad backend.
+    import logging
+    from src.summarization_relay import build_summarization_relay
+    with caplog.at_level(logging.WARNING, logger="summarization_relay"):
+        relay = build_summarization_relay(_settings({**_ENV, "SUMMARIZATION_BACKEND": "gatway"}))
+    assert relay is None
+    assert any(r.name == "summarization_relay" and "gatway" in r.getMessage() for r in caplog.records)
