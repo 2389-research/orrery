@@ -44,6 +44,7 @@ def list_documents(limit: int = 50, offset: int = 0,
             "id": d.id, "title": d.title, "status": d.status, "created_at": d.created_at,
             "domains": d.domains, "entity_count": entity_count,
             "content_type": d.content_type, "source_path": d.source_path,
+            "facets": d.facets,
         })
     store.close()
     return {"documents": result, "scope": _scope(slc)} if slc is not None else result
@@ -70,6 +71,7 @@ def get_document(document_id: str, auth: AuthStore = Depends(get_auth_store), qi
         "content_type": doc.content_type,
         "git_ref": git_ref,
         "silo_id": doc.silo_id, "kind": kind,
+        "facets": doc.facets,
         "domains": [{"path": d.domain_path, "is_primary": d.is_primary, "confidence": d.confidence} for d in domains],
         "entities": [{"id": e.id, "canonical_name": e.canonical_name, "type": e.type} for e in entities],
         "query_id": qid,

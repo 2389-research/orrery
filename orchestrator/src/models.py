@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
 class DocumentSummary(BaseModel):
@@ -129,3 +131,41 @@ class CcvaultIngestRequest(BaseModel):
     path: str
     label: str = "ccvault"
     provenance_kind: str | None = None  # override; defaults to agent_report for a ccvault silo
+
+
+def _http_url(v: str) -> str:
+    """The worker fetches server_url with urllib, which also opens file:/ftp: — allow http(s) only."""
+    if urlparse(v).scheme.lower() not in ("http", "https"):
+        raise ValueError("server_url must be an http or https URL")
+    return v
+
+
+class HortonIngestRequest(BaseModel):
+    """Ingest Horton office-mic transcripts; collections are derived per chunk by the worker."""
+    server_url: str = "http://localhost:8080"
+    spec_id: str | None = None
+
+    @field_validator("server_url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _http_url(v)
+
+
+class EnrichStretchesRequest(BaseModel):
+    """Enqueue transcript stretch enrichment, optionally scoped by collection / time window."""
+    collection: str | None = None
+    since: str | None = None
+    until: str | None = None
+    limit: int | None = Field(default=None, ge=1)
+    force: bool | None = None  # bypass content_hash skip; re-enrich all in-scope stretches
+
+
+class MeridianIngestRequest(BaseModel):
+    """Ingest Claude Code sessions from a meridian server into a noosphere (workspace)."""
+    server_url: str = "http://localhost:8080"
+    name: str = "Code Sessions"
+
+    @field_validator("server_url")
+    @classmethod
+    def _check_url(cls, v: str) -> str:
+        return _http_url(v)

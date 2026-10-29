@@ -98,7 +98,12 @@ def test_same_silo_high_similarity_still_auto_merges(test_db):
 
 
 def test_cross_silo_plural_pair_not_collapsed(test_db):
+    # Cross-silo AND cross-kind: the exact/plural tier widens to kind (see
+    # test_kind_scope_batch_faiss.py), so the silos must carry DIFFERENT kinds here.
     conn = get_connection(test_db)
+    for sid, kind in (("A", "agent_report"), ("B", "human_vault")):
+        conn.execute("INSERT INTO watched_sources (id, type, uri, provenance_kind) VALUES (?, 'vault', ?, ?)",
+                     (sid, f"/{sid}", kind))
     _add_entity(conn, "sing", "agent", "B", stored_vec=VEC["base"])
     _add_entity(conn, "plur", "agents", "A")  # new plural, DIFFERENT silo than the singular
 

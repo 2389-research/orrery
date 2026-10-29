@@ -95,6 +95,9 @@ def _resolve_syncer(source_type: str):
     if source_type == "repo":
         from .sync_repo import sync_repo
         return sync_repo
+    if source_type == "horton":
+        from .sync_horton import sync_horton
+        return sync_horton
     return _sync_via_featurizer
 
 

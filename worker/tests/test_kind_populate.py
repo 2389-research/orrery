@@ -13,7 +13,8 @@ def test_flow_default_kind_and_resolve_kind():
     assert resolve_kind("neutral_summary", None) == "neutral_summary"
     assert resolve_kind("neutral_summary", "agent_report") == "agent_report"
     assert resolve_kind("neutral_summary", "garbage") == "neutral_summary"
-    assert KINDS == {"neutral_summary", "human_vault", "agent_report", "human_reviewed"}
+    assert KINDS == {"neutral_summary", "human_vault", "agent_report", "human_reviewed",
+                     "horton_transcript"}
 
 
 def test_resolve_collection_stamps_flow_default_for_git_repo(tmp_path):

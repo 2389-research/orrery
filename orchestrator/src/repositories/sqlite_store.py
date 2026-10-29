@@ -7,6 +7,7 @@ just organized behind a clean interface.
 """
 
 import json
+import re
 import sqlite3
 from .interfaces import (
     DataStore,
@@ -43,6 +44,20 @@ def _exec_in_slice(conn, in_slice: bool, sql: str):
         raise
 
 
+def _facets_from_metadata(raw) -> dict:
+    """Curated facets from a documents.metadata JSON string. Only `work_unit` is
+    copied out; absent/malformed/non-dict metadata yields {}."""
+    if not raw:
+        return {}
+    try:
+        meta = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if isinstance(meta, dict) and meta.get("work_unit") is not None:
+        return {"work_unit": meta["work_unit"]}
+    return {}
+
+
 class SQLiteDocumentRepository(DocumentRepository):
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
@@ -69,6 +84,7 @@ class SQLiteDocumentRepository(DocumentRepository):
             content_type=row["content_type"] or "text",
             thumbnail_path=row["thumbnail_path"] if "thumbnail_path" in row.keys() else None,
             silo_id=row["silo_id"] if "silo_id" in row.keys() else None,
+            facets=_facets_from_metadata(row["metadata"] if "metadata" in row.keys() else None),
         )
 
     def get_titles(self, ids):
@@ -125,7 +141,8 @@ class SQLiteDocumentRepository(DocumentRepository):
         result = []
         for r in rows:
             doc = Document(id=r["id"], title=r["title"], status=r["status"], created_at=r["created_at"],
-                          content_type=r["content_type"] or "text", source_path=r["source_path"])
+                          content_type=r["content_type"] or "text", source_path=r["source_path"],
+                          facets=_facets_from_metadata(r["metadata"] if "metadata" in r.keys() else None))
             doc.domains = r["domains"].split(",") if r["domains"] else []
             result.append(doc)
         return result
@@ -246,10 +263,64 @@ class SQLiteDocumentRepository(DocumentRepository):
             )
 
         conn.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
+        conn.execute("DELETE FROM stretches WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         conn.commit()
 
         return {"entities_removed": entities_removed}
+
+
+    def list_stretches(self, since=None, until=None, mic=None, collection=None,
+                       limit=100, offset=0, in_slice=False):
+        """Stretches ordered by event time (`start` ASC). since/until select stretches that
+        OVERLAP the window: "end" >= since AND start <= until. `end` is a reserved word.
+        Stored times are naive office-local ISO; bounds are interpreted as office-local too (a
+        trailing Z / numeric offset is stripped, not converted).
+        Only stretches whose source document is active (`invalid_at IS NULL`) are returned.
+        in_slice: restrict to documents in TEMP TABLE `_slice_docs` (precondition:
+        ensure_slice_doc_temp_table on this connection); it carries the validity rule."""
+        where, params = [], []
+        if since:
+            where.append('s."end" >= ?')
+            params.append(_office_local(since))
+        if until:
+            where.append("s.start <= ?")
+            params.append(_office_local(until))
+        if mic:
+            where.append("s.mic_id = ?"); params.append(mic)
+        if collection:
+            where.append("s.silo_id = ?"); params.append(collection)
+        if in_slice:
+            join = "JOIN documents d ON d.id = s.doc_id"
+            where.append("s.doc_id IN (SELECT doc_id FROM _slice_docs)")
+        else:
+            join = "JOIN documents d ON d.id = s.doc_id AND d.invalid_at IS NULL"
+        sql = ('SELECT s.stretch_id, s.doc_id, s.mic_id, s.start, s."end", s.summary, '
+               "s.concepts, s.ideas, s.nouns "
+               f"FROM stretches s {join}" + (" WHERE " + " AND ".join(where) if where else "")
+               + " ORDER BY s.start ASC, s.stretch_id ASC LIMIT ? OFFSET ?")
+        rows = self._conn.execute(sql, (*params, limit, offset)).fetchall()
+        out = []
+        for r in rows:
+            d = {"stretch_id": r[0], "doc_id": r[1], "mic_id": r[2], "start": r[3],
+                 "end": r[4], "summary": r[5]}
+            for k, v in zip(("concepts", "ideas", "nouns"), r[6:9]):
+                try:
+                    d[k] = json.loads(v) if v else []
+                except (TypeError, ValueError):
+                    d[k] = []
+            out.append(d)
+        return out
+
+
+_TZ_SUFFIX = re.compile(r"(Z|z|[+-]\d{2}(:?\d{2})?)$")
+
+
+def _office_local(ts: str) -> str:
+    """Strip a trailing UTC/offset designator from a time bound so it compares against the
+    naive office-local strings stored in stretches. Date-only / naive inputs are unchanged."""
+    ts = ts.strip()
+    return _TZ_SUFFIX.sub("", ts) if "T" in ts else ts
 
 
 class SQLiteChunkRepository(ChunkRepository):
@@ -475,9 +546,21 @@ class SQLiteEntityRepository(EntityRepository):
         ):
             silo_map.setdefault(r["entity_id"], set()).add(r["silo_id"])
 
+        # Provenance kinds, resolved live via the silo_kind view. Null-silo docs get the
+        # '__nosilo__' sentinel so loose-pool data only overlaps other loose-pool data.
+        kind_map: dict[str, set] = {}
+        for r in self._conn.execute(
+            "SELECT DISTINCT es.entity_id, "
+            "CASE WHEN d.silo_id IS NULL THEN '__nosilo__' ELSE sk.kind END AS kind "
+            "FROM entity_sources es JOIN documents d ON d.id = es.document_id "
+            "LEFT JOIN silo_kind sk ON sk.silo_id = d.silo_id"
+        ):
+            kind_map.setdefault(r["entity_id"], set()).add(r["kind"])
+
         return [
             Entity(id=r["id"], canonical_name=r["canonical_name"], type=r["type"],
-                   silo_ids=frozenset(silo_map.get(r["id"], set())))
+                   silo_ids=frozenset(silo_map.get(r["id"], set())),
+                   kind_ids=frozenset(kind_map.get(r["id"], set())))
             for r in rows
         ]
 

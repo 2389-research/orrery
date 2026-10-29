@@ -79,6 +79,13 @@ def test_same_silo_high_similarity_still_auto_merges(test_store):
 
 
 def test_cross_silo_plural_pair_not_collapsed(test_store):
+    # Cross-silo AND cross-kind: the exact/plural tier widens to kind (see
+    # test_kind_scope_batch_store.py), so the silos must carry DIFFERENT kinds here.
+    for sid, kind in (("A", "agent_report"), ("B", "human_vault")):
+        test_store.conn.execute(
+            "INSERT INTO watched_sources (id, type, uri, provenance_kind) VALUES (?, 'vault', ?, ?)",
+            (sid, f"/{sid}", kind))
+    test_store.conn.commit()
     _make_entity(test_store, "doc-sing", "sing", "agent", "B")
     _make_entity(test_store, "doc-plur", "plur", "agents", "A")
 
@@ -108,6 +115,13 @@ def test_plural_collapses_onto_same_silo_singular_despite_cross_silo_homonym_ins
     first-row lookup would pick it), one in the plural's OWN silo (inserted
     second). The plural must still collapse onto the same-silo singular;
     insertion order must not matter."""
+    # Cross-silo AND cross-kind: the exact/plural tier widens to kind (see
+    # test_kind_scope_batch_store.py), so the silos must carry DIFFERENT kinds here.
+    for sid, kind in (("A", "agent_report"), ("B", "human_vault")):
+        test_store.conn.execute(
+            "INSERT INTO watched_sources (id, type, uri, provenance_kind) VALUES (?, 'vault', ?, ?)",
+            (sid, f"/{sid}", kind))
+    test_store.conn.commit()
     _make_entity(test_store, "doc-b", "b", "agent", "B")   # cross-silo homonym, inserted FIRST
     _make_entity(test_store, "doc-a", "a", "agent", "A")   # same-silo singular
     _make_entity(test_store, "doc-p", "p", "agents", "A")  # plural, silo A

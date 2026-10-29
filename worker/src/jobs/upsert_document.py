@@ -17,7 +17,7 @@ import uuid
 from ..db import mark_graph_dirty, recompute_cooccurrence
 from ..classifier import classify_document
 from ..identity_filter import is_identity_noise
-from ..silo import resolve_silo_id, silo_match
+from ..silo import resolve_silo_id, silo_match, kind_match
 
 # Used only when no simmered general spec exists yet — keeps a fresh workspace's first
 # vault sync from extracting nothing.
@@ -25,6 +25,17 @@ _GENERAL_EXTRACTION_FALLBACK = (
     "Extract the key named entities from the text: concepts, tools, techniques, "
     "people, organizations, products, and materials. Return each with a short type."
 )
+
+
+def entity_scope(conn, silo):
+    """(sql_fragment_factory, bind) for the inline exact-name tier. A doc whose silo has a
+    provenance kind dedups per KIND (same concept across same-kind silos is one entity);
+    a doc with no kind (null silo / unset kind) keeps the per-silo behavior unchanged."""
+    row = conn.execute("SELECT kind FROM silo_kind WHERE silo_id IS ?", (silo,)).fetchone()
+    kind = row[0] if row else None
+    if kind is not None:
+        return kind_match, kind
+    return silo_match, silo
 
 
 def _content_hash(content: str) -> str:
@@ -69,6 +80,7 @@ async def extract_document_entities(conn, relay, settings, *, doc_id, chunks, sp
 
     silo_row = conn.execute("SELECT silo_id FROM documents WHERE id = ?", (doc_id,)).fetchone()
     silo = silo_row[0] if silo_row else None
+    scope_fn, scope_bind = entity_scope(conn, silo)
 
     for chunk_id, chunk_text_ in chunks:
         response = await relay.complete(
@@ -99,13 +111,13 @@ async def extract_document_entities(conn, relay, settings, *, doc_id, chunks, sp
             is_new = False
             row = conn.execute(
                 f"SELECT mm.to_entity_id FROM merge_map mm WHERE mm.from_name = ? "
-                f"AND {silo_match('mm.to_entity_id')}", (name, silo)).fetchone()
+                f"AND {scope_fn('mm.to_entity_id')}", (name, scope_bind)).fetchone()
             if row:
                 entity_id = row[0]
             else:
                 row = conn.execute(
                     f"SELECT e.id FROM entities e WHERE e.canonical_name = ? AND e.type = ? "
-                    f"AND {silo_match('e.id')}", (name, etype, silo)).fetchone()
+                    f"AND {scope_fn('e.id')}", (name, etype, scope_bind)).fetchone()
                 if row:
                     entity_id = row[0]
                 else:

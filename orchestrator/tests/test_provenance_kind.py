@@ -38,7 +38,9 @@ def test_resolve_kind_invalid_override_falls_back_to_default():
 
 
 def test_kinds_vocabulary():
-    assert KINDS == {"neutral_summary", "human_vault", "agent_report", "human_reviewed"}
+    # horton_transcript added for office-mic transcripts (emits co-occurrence; see silo.py).
+    assert KINDS == {"neutral_summary", "human_vault", "agent_report", "human_reviewed",
+                     "horton_transcript"}
 
 
 # ── schema ───────────────────────────────────────────────────────────────────────────

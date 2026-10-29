@@ -87,6 +87,18 @@ def _silos_overlap(a: frozenset | None, b: frozenset | None) -> bool:
     return bool(a & b)
 
 
+def _kinds_overlap(a: frozenset | None, b: frozenset | None) -> bool:
+    """Mirrors worker/src/normalizer.py::_kinds_overlap: an EMPTY kind-set carries no
+    kind information and is a wildcard; otherwise they overlap only on a shared REAL
+    kind. A None kind (real silo, provenance_kind unset) is unknown, and unknown !=
+    unknown, so it never matches: unset-kind silos fall back to silo isolation."""
+    a = a or frozenset()
+    b = b or frozenset()
+    if not a or not b:
+        return True
+    return bool((a & b) - {None})
+
+
 def _propose_cross_silo_merge(conn, a_id, a_name, b_id, b_name, similarity, method):
     """File a pending merge proposal to graph_issues via graph_repair.propose_correction
     (the orchestrator, unlike the worker, can import it). Deduped against any existing
@@ -105,7 +117,8 @@ def _propose_cross_silo_merge(conn, a_id, a_name, b_id, b_name, similarity, meth
         entity=a_id,
         target_b=b_id,
         rationale=f"cross-silo candidate: {method} similarity {similarity:.3f} — not auto-merged "
-                  f"because the two entities have no silo in common",
+                  f"because the two entities have no silo in common and are not an exact-name "
+                  f"match within a shared kind",
         proposer="orchestrator.embedding_normalizer",
     )
 
@@ -174,6 +187,7 @@ def _run_batch_store(store, results):
 
     # Tier 1: Plural collapse
     all_names = {e.canonical_name for e in entities}
+    gone: set[str] = set()  # ids merged away this pass (entities list is a stale snapshot)
     for e in entities:
         singular = collapse_plural(e.canonical_name, all_names)
         if singular:
@@ -199,9 +213,31 @@ def _run_batch_store(store, results):
                 # callers / sourceless test fixtures) — same carve-out as
                 # _silos_overlap's empty-set case.
                 target = store.entities.get_by_name(singular, e.type, include_invalid=True)
+            if not target:
+                # EXACT tier widens from silo to kind: a same-name singular under a
+                # kind the plural is also sourced under is the same thing. Empty
+                # kind-set on e = wildcard (mirrors _kinds_overlap).
+                for c in entities:
+                    if (c.canonical_name == singular and c.type == e.type
+                            and c.id != e.id and c.id not in gone
+                            and _kinds_overlap(e.kind_ids, c.kind_ids)):
+                        target = c
+                        break
+            if not target:
+                # A singular exists, but only under a different kind: propose, don't merge.
+                for c in entities:
+                    if (c.canonical_name == singular and c.type == e.type
+                            and c.id != e.id and c.id not in gone):
+                        _propose_cross_silo_merge(
+                            store.conn, e.id, e.canonical_name, c.id, singular,
+                            similarity=1.0, method="plural",
+                        )
+                        results["cross_silo_proposed"] += 1
+                        break
             if target and target.id != e.id:
                 _merge_entities_store(store, from_id=e.id, from_name=e.canonical_name,
                                       to_id=target.id, to_name=singular, method="plural", similarity=1.0)
+                gone.add(e.id)
                 results["plural_merges"] += 1
 
     # Re-fetch after merges
@@ -214,6 +250,7 @@ def _run_batch_store(store, results):
     ids = [e.id for e in entities]
     types = [e.type for e in entities]
     silos = [e.silo_ids for e in entities]
+    kinds = [e.kind_ids for e in entities]
 
     # Tier 2: Embedding similarity
     embeddings = embed_entities(names)
@@ -250,7 +287,11 @@ def _run_batch_store(store, results):
                     # null-vs-non-null) is a real near-duplicate but not ours to
                     # merge unilaterally — propose it to the human-gated
                     # graph_issues queue instead and leave both entities distinct.
-                    if not _silos_overlap(silos[i], silos[j]):
+                    # EXACT tier exception: identical canonical_name (same type by
+                    # type_groups) auto-merges across silos when kinds overlap. Fuzzy
+                    # never widens past silo.
+                    if not _silos_overlap(silos[i], silos[j]) and not (
+                            names[i] == names[j] and _kinds_overlap(kinds[i], kinds[j])):
                         _propose_cross_silo_merge(
                             store.conn, ids[i], names[i], ids[j], names[j],
                             similarity=sim, method="embedding",

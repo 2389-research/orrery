@@ -35,6 +35,10 @@ class Document:
     # is NOT a field here: it's a property of the SILO, resolved live via the
     # `silo_kind` view at read time, never copied onto the document.
     silo_id: str | None = None
+    # Curated, source-specific DERIVED attributes copied out of documents.metadata
+    # (never the raw blob). `work_unit` is the first key; the key is absent for docs
+    # that don't have one, so facets is {} for vault/pdf/repo docs.
+    facets: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -73,6 +77,10 @@ class Entity:
     # None elsewhere means "not computed", not "no silo info" — do not treat
     # a None here as the empty-set wildcard used by the silo-overlap check.
     silo_ids: frozenset | None = None
+    # DISTINCT provenance kinds (documents.silo_id -> silo_kind.kind) over the entity's
+    # sources; same populate-only-in-get_all_for_normalization contract as silo_ids.
+    # Empty = no kind information (wildcard for the exact-tier kind gate).
+    kind_ids: frozenset | None = None
 
 
 @dataclass
@@ -204,6 +212,12 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     def delete(self, doc_id: str) -> dict: ...
+
+    @abstractmethod
+    def list_stretches(self, since: str | None = None, until: str | None = None,
+                       mic: str | None = None, collection: str | None = None,
+                       limit: int = 100, offset: int = 0,
+                       in_slice: bool = False) -> list[dict]: ...
 
 
 class ChunkRepository(ABC):

@@ -26,6 +26,7 @@ Tools — Search & Read:
 - get_document(title) — read a document with entity highlights (notes content_type for image docs)
 - list_domains() — see the domain taxonomy
 - list_documents(since, until, as_of, order, window, domain, collection, limit) — list documents (id, title, created_at, content_type), optionally sliced
+- get_stretches(since, until, mic, collection, limit, offset) — enriched transcript stretches by event time (summary, concepts, ideas, nouns)
 - list_entities(type, limit, +slice) — browse entities by type
 
 Tools — Graph Traversal:
@@ -366,6 +367,9 @@ async def get_document(title: str) -> str:
         lines.append(f"Image URL: /images/{doc['id']}")
     lines.append(f"Entities: {len(reader['entities'])} | Mentions: {reader['total_mentions']}")
     lines.append(f"Domains: {', '.join(doc['domains'])}")
+    wu = (match.get("facets") or {}).get("work_unit")
+    if isinstance(wu, dict) and wu.get("key"):
+        lines.append(f"Work unit: {wu['key']} [{wu.get('source') or 'unknown'}]")
     lines.append("\n--- Content ---")
     text = "".join(seg["text"] for seg in reader["segments"])
     lines.append(text[:2000])
@@ -395,6 +399,37 @@ async def list_documents(since: str = "", until: str = "", as_of: str = "", orde
         lines.append(f"  • {d.get('title', '?')} ({d.get('content_type') or 'text'}) "
                      f"created {d.get('created_at') or '?'}{_did(d)}")
     return "\n".join(lines) + _slice_line(scope)
+
+
+@mcp.tool()
+async def get_stretches(since: str = "", until: str = "", mic: str = "", collection: str = "",
+                        limit: int = 100, offset: int = 0) -> str:
+    """Enriched transcript stretches ordered by EVENT time (when it was said, not when ingested).
+    since/until are ISO-8601 and select stretches overlapping that window; mic filters by
+    microphone id; collection scopes to one source. Returns summary, concepts, ideas, nouns."""
+    params = {k: v for k, v in (("since", since), ("until", until), ("mic", mic),
+                                ("collection", collection)) if v}
+    params["limit"] = limit
+    params["offset"] = offset
+    resp = await call_api("/stretches", params=params)
+    if isinstance(resp, dict) and "stretches" in resp:  # sliced (virtual noosphere) shape
+        resp = resp["stretches"]
+    if isinstance(resp, dict):
+        return f"Error: {resp.get('detail', resp)}"
+    lines = [f"Stretches ({len(resp)}):"]
+    for st in resp:
+        lines.append(f"  • {st.get('start')} → {st.get('end')} [{st.get('mic_id') or '?'}] "
+                     f"{st.get('summary') or ''}{_did({'id': st.get('doc_id')})}")
+        for c in st.get("concepts") or []:
+            lines.append(f"      concept {c.get('tag')}: {c.get('statement')}")
+        for i in st.get("ideas") or []:
+            line = f"      idea ({i.get('kind')}): {i.get('text')}"
+            if i.get("quote"):
+                line += f' — quote: "{i.get("quote")}" (quote_ok={i.get("quote_ok")})'
+            lines.append(line)
+        if st.get("nouns"):
+            lines.append(f"      nouns: {', '.join(map(str, st['nouns']))}")
+    return "\n".join(lines)
 
 
 @mcp.tool()

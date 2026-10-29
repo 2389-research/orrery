@@ -136,6 +136,21 @@ async def handle_job(job: dict, db_path: str) -> None:
     elif job["type"] == "ingest_ccvault":
         from .jobs.ingest_ccvault import run_ingest_ccvault
         await run_ingest_ccvault(job, db_path)
+    elif job["type"] == "ingest_meridian":
+        from .jobs.ingest_meridian import run_ingest_meridian
+        await run_ingest_meridian(job, db_path)
+    elif job["type"] == "ingest_horton":
+        from .jobs.ingest_horton import run_ingest_horton
+        await run_ingest_horton(job, db_path)
+    elif job["type"] == "enrich_stretches":
+        from .jobs.enrich_stretches import run_enrich_stretches
+        await run_enrich_stretches(job, db_path)
+    elif job["type"] == "work_unit_backfill":
+        from .jobs.work_unit_backfill import run_work_unit_backfill
+        await run_work_unit_backfill(job, db_path)
+    elif job["type"] == "connect_within_kind":
+        from .jobs.connect_within_kind import run_connect_within_kind
+        await run_connect_within_kind(job, db_path)
     elif job["type"] == "ingest_pdf":
         from .jobs.ingest_pdf import run_ingest_pdf
         await run_ingest_pdf(job, db_path)
