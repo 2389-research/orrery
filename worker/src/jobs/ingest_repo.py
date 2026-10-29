@@ -15,6 +15,8 @@ from orrery_relay import Relay
 from ..classifier import classify_document
 from ..config import get_settings
 from ..db import get_connection, mark_graph_dirty
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 
 MANIFEST_FILENAMES = ("pyproject.toml", "setup.py", "package.json", "go.mod")
 
@@ -165,7 +167,9 @@ def _declared_deps_from_manifests(manifest_files: dict) -> list[str]:
 async def run_ingest_repo(job: dict, db_path: str) -> None:
     settings = get_settings()
     relay = Relay.from_settings(settings)
-    model = settings.summarization_model
+    summ_relay = build_summarization_relay(settings)
+    relay_s, model_s = resolve_summarization(
+        settings, db_path, local_relay=relay, summ_relay=summ_relay)
 
     config = json.loads(job["config"]) if job["config"] else {}
     root_path = config["root_path"]
@@ -175,7 +179,7 @@ async def run_ingest_repo(job: dict, db_path: str) -> None:
 
     started = time.monotonic()
     print(f"[ingest_repo] {collection_name}: summarizing {root_path} ...", flush=True)
-    summarize_fn = make_summarize_fn(relay, model)
+    summarize_fn = make_summarize_fn(relay_s, model_s)
     # Off the event loop. codesum's traversal is synchronous and issues one blocking
     # `complete_sync` per file, module and repo — measured at 155s for a 13-file package
     # and proportional to repo size. `poll_loop` awaits `handle_job` inline, so running

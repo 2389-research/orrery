@@ -11,6 +11,8 @@ from orrery_relay import Relay
 from ..classifier import classify_document
 from ..config import get_settings
 from ..db import get_connection, mark_graph_dirty
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 from .ccvault_reader import open_archive, list_sessions, iter_segments
 from .session_featurizer import summarize_segment, summarize_rollup, write_doc, upsert_domain
 
@@ -71,7 +73,9 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
     # Summaries use the SUMMARIZATION model (defaults to the classification model) — same
     # as codesum/tracksum: one call per segment + rollup. Entity extraction stays on the
     # EXTRACTION model; the single per-session classify uses the CLASSIFICATION model.
-    sum_model = settings.summarization_model
+    summ_relay = build_summarization_relay(settings)
+    sum_relay, sum_model = resolve_summarization(
+        settings, db_path, local_relay=relay, summ_relay=summ_relay)
     classify_model = settings.classification_model
 
     arc = open_archive(archive_path)
@@ -99,11 +103,11 @@ async def run_ingest_ccvault(job: dict, db_path: str) -> None:
             # Leaves: summarize each segment node-locally (evidence flows up).
             leaves = []  # (segment, summary)
             for seg in segments:
-                s = await summarize_segment(relay, sum_model, _session_context(meta), seg["text"])
+                s = await summarize_segment(sum_relay, sum_model, _session_context(meta), seg["text"])
                 if s:
                     leaves.append((seg, s))
             # Root/group: roll the session up from its segment summaries.
-            rollup = await summarize_rollup(relay, sum_model, _session_context(meta, rollup=True), [s for _, s in leaves]) if leaves else ""
+            rollup = await summarize_rollup(sum_relay, sum_model, _session_context(meta, rollup=True), [s for _, s in leaves]) if leaves else ""
             if not leaves or not rollup:
                 # Transient EMPTY MODEL OUTPUT (local models can return empty .text without
                 # raising). Do NOT watermark — retry next pass rather than dropping the session.

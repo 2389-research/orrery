@@ -9,6 +9,8 @@ from pathlib import Path
 from orrery_relay import Relay
 from ..db import get_connection
 from ..config import get_settings
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 
 logger = logging.getLogger("generate_commentary")
 
@@ -252,9 +254,11 @@ async def run_generate_commentary(job: dict, db_path: str) -> None:
     node_types = config.get("node_types") or ["domain", "collection"]
     limit = int(config.get("limit", 50))
     only_missing = config.get("only_missing", True)
-    model = config.get("model") or settings.summarization_model
-
-    relay = Relay.from_settings(settings)
+    local_relay = Relay.from_settings(settings)
+    relay, model_s = resolve_summarization(
+        settings, db_path, local_relay=local_relay,
+        summ_relay=build_summarization_relay(settings))
+    model = config.get("model") or model_s
     conn = get_connection(db_path)
     made = skipped = failed = 0
 

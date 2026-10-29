@@ -15,6 +15,8 @@ from orrery_tracksum import distill_reader, gather_spec, make_summarize_fn, summ
 from ..classifier import classify_document
 from ..config import get_settings
 from ..db import get_connection, mark_graph_dirty
+from ..summarization_relay import build_summarization_relay
+from ..summarization_route import resolve_summarization
 from ..silo import flow_default_kind, resolve_kind
 
 # Ground-truth chain order for the spec-degradation ladder. In production a chain
@@ -149,7 +151,7 @@ def _tracksum_reader(settings):
     return distill_reader(distill)
 
 
-def _load_bundles(config: dict, relay, settings) -> list[dict]:
+def _load_bundles(config: dict, relay, settings, db_path: str | None = None) -> list[dict]:
     """Get per-run summary bundles, either pre-made or summarized here and now.
 
     Bundle mode (an `index.json` is present) skips the model entirely — the summaries
@@ -198,11 +200,12 @@ def _load_bundles(config: dict, relay, settings) -> list[dict]:
     if not raw_root:
         raise RuntimeError("ingest_tracker_runs: neither out_dir nor raw_root given")
 
-    model = settings.summarization_model
+    relay_s, model = (relay, settings.summarization_model) if db_path is None else resolve_summarization(
+        settings, db_path, local_relay=relay, summ_relay=build_summarization_relay(settings))
     print(f"[ingest_tracker_runs] summarizing raw runs beneath {raw_root} with {model} ...", flush=True)
     bundles = summarize_runs(
         raw_root,
-        make_summarize_fn(relay, model),
+        make_summarize_fn(relay_s, model),
         _tracksum_reader(settings),
         on_progress=lambda event, **f: print(f"[tracksum] {event} {f}", flush=True),
     )
@@ -229,7 +232,7 @@ async def run_ingest_tracker_runs(job: dict, db_path: str) -> None:
     # freeze job polling and the judge sweep for the entire summarization. Bundle mode is
     # only file reads and would not need this, but the call site is shared and paying a
     # thread hand-off for a few reads is not worth branching over.
-    runs = await asyncio.to_thread(_load_bundles, config, relay, settings)
+    runs = await asyncio.to_thread(_load_bundles, config, relay, settings, db_path)
     # A label reaches the filesystem (staged artifacts) and `collections.path`; drop any run
     # whose label isn't a single safe segment rather than trusting bundle data.
     skipped = [r.get("run_label") for r in runs if not _safe_label(r.get("run_label"))]
