@@ -202,6 +202,9 @@ async def poll_loop():
     from .jobs.generate_commentary import run_commentary_sweep, commentary_enrolled_dbs
     from .summarization_relay import build_summarization_relay
     relay = Relay.from_settings(settings)
+    # Built once: settings are fixed for the process, and building per idle pass would
+    # leak a client per pass (and re-log a bad-backend warning every few seconds).
+    summ_relay = build_summarization_relay(settings)
     last_sweep = 0.0  # 0 → sweep on the first iteration
     last_source_sweep = 0.0  # watched-source scan cadence, same first-iteration behaviour
 
@@ -365,7 +368,7 @@ async def poll_loop():
             try:
                 cr = await run_commentary_sweep(
                     enrolled_dbs, relay, settings,
-                    summ_relay=build_summarization_relay(settings),
+                    summ_relay=summ_relay,
                     batch_size=settings.commentary_sweep_batch)
                 if cr["made"] or cr["failed"]:
                     comm_did = cr["made"] > 0

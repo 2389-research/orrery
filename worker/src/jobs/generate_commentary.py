@@ -349,10 +349,13 @@ async def run_commentary_sweep(db_paths, local_relay, settings, *, summ_relay=No
             relay, model = resolve_summarization(
                 settings, db_path, local_relay=local_relay, summ_relay=summ_relay)
             made, skipped, failed = await _generate_for_nodes(conn, relay, model, nodes)
-            if made == 0 and failed > 0:
+            if made == 0:
+                # All failed OR all skipped (no usable output): either way those nodes stay
+                # missing, so without the cooldown this workspace is re-picked every pass.
                 _sweep_cooldown[db_path] = time.monotonic() + FAILED_WORKSPACE_COOLDOWN_SECONDS
-                logger.warning("commentary sweep: every node failed in %s; skipping it for %ds",
-                            db_path, FAILED_WORKSPACE_COOLDOWN_SECONDS)
+                logger.warning("commentary sweep: no commentary made in %s "
+                               "(failed=%d skipped=%d); skipping it for %ds",
+                               db_path, failed, skipped, FAILED_WORKSPACE_COOLDOWN_SECONDS)
             else:
                 _sweep_cooldown.pop(db_path, None)
             return {"made": made, "skipped": skipped, "failed": failed, "workspace": db_path}

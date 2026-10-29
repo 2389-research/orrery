@@ -58,6 +58,27 @@ def test_remote_without_summ_relay_falls_back_with_warning(tmp_path, caplog):
                for r in caplog.records)
 
 
+def test_fallback_uses_default_model_not_remote_override(tmp_path):
+    # Opted remote WITH a remote model, but no summarization relay (typo'd backend, or the
+    # backend unset as a rollback): falling back to local must not send the remote model
+    # name (which local Ollama 404s) — it uses the default summarization model.
+    from src.summarization_route import resolve_summarization
+    s, db = _setup(tmp_path, {"id": WSID, "summarization_target": "remote",
+                              "summarization_model": "deepseek-4.1-flash"})
+    local = object()
+    relay, model = resolve_summarization(s, db, local_relay=local, summ_relay=None)
+    assert relay is local and model == "global-model"
+
+
+def test_local_target_keeps_model_override(tmp_path):
+    from src.summarization_route import resolve_summarization
+    s, db = _setup(tmp_path, {"id": WSID, "summarization_target": "local",
+                              "summarization_model": "gemma4:e4b"})
+    local = object()
+    relay, model = resolve_summarization(s, db, local_relay=local, summ_relay=object())
+    assert relay is local and model == "gemma4:e4b"
+
+
 def test_corrupt_registry_defaults_local(tmp_path):
     from src.summarization_route import workspace_summarization_config
     s, db = _setup(tmp_path, raw="{ not json")

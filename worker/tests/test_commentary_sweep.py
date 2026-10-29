@@ -165,3 +165,26 @@ async def test_cooled_down_workspace_is_retried_after_cooldown(tmp_path):
     r = await run_commentary_sweep([broken_db], FakeRelay(), _settings(), batch_size=5)
     assert r["workspace"] == broken_db and r["made"] == 1
     assert broken_db not in gc._sweep_cooldown
+
+
+class EmptyRelay(FakeRelay):
+    """Answers, but with nothing usable (e.g. the model ignored the forced tool call)."""
+
+    async def complete_structured(self, **kwargs):
+        self.calls += 1
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_all_skipped_workspace_also_cools_down(tmp_path):
+    # No usable output leaves the nodes missing just like a failure does, so an all-skipped
+    # batch must cool down too — otherwise it re-picks (and re-pays for) the same nodes.
+    broken_db, healthy_db = _two_seeded(tmp_path)
+    r1 = await run_commentary_sweep([broken_db, healthy_db], EmptyRelay(), _settings(),
+                                    batch_size=5)
+    assert r1["workspace"] == broken_db and r1["made"] == 0 and r1["skipped"] == 1
+    assert broken_db in gc._sweep_cooldown
+
+    r2 = await run_commentary_sweep([broken_db, healthy_db], FakeRelay(), _settings(),
+                                    batch_size=5)
+    assert r2["workspace"] == healthy_db and r2["made"] == 1

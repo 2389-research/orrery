@@ -33,12 +33,14 @@ def workspace_summarization_config(base_db_path: str, db_path: str) -> dict:
 
 def resolve_summarization(settings, db_path: str, *, local_relay, summ_relay):
     cfg = workspace_summarization_config(settings.db_path, db_path)
-    relay = local_relay
     if cfg["target"] == "remote":
         if summ_relay is not None:
-            relay = summ_relay
-        else:
-            logger.warning(
-                "workspace %s wants remote summarization but no summarization relay is "
-                "configured; falling back to local", Path(db_path).parent.name)
-    return relay, cfg["model"] or settings.summarization_model
+            return summ_relay, cfg["model"] or settings.summarization_model
+        # Fall back with the DEFAULT model: the workspace's override names a remote model
+        # (e.g. deepseek-4.1-flash) that the local relay cannot serve.
+        logger.warning(
+            "workspace %s wants remote summarization but no summarization relay is "
+            "configured; falling back to local on %s",
+            Path(db_path).parent.name, settings.summarization_model)
+        return local_relay, settings.summarization_model
+    return local_relay, cfg["model"] or settings.summarization_model
