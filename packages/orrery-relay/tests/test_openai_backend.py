@@ -320,3 +320,55 @@ async def test_complete_with_tools_raises():
     _, handler = _capture()
     with pytest.raises(NotImplementedError):
         await _relay(handler).complete("m", MSGS, 5, tools=[{"name": "x"}])
+
+
+# ---- Task 2 fix round ------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_structured_list_json_returns_empty():
+    assert (await _structured("[1]"))[0] == {}
+
+
+@pytest.mark.asyncio
+async def test_structured_null_content_returns_empty():
+    seen, handler = _capture({"choices": [{"message": {"role": "assistant", "content": None}, "finish_reason": "stop"}], "usage": {}})
+    assert await _relay(handler).complete_structured("m", MSGS, 5, SCHEMA) == {}
+
+
+@pytest.mark.asyncio
+async def test_structured_4xx_raises():
+    _, handler = _capture({"error": "bad"}, status=400)
+    with pytest.raises(httpx.HTTPStatusError):
+        await _relay(handler).complete_structured("m", MSGS, 5, SCHEMA)
+
+
+@pytest.mark.asyncio
+async def test_structured_caller_response_format_ignored():
+    seen, handler = _capture(_ok('{"a": 1}'))
+    out = await _relay(handler).complete_structured("m", MSGS, 5, SCHEMA, response_format={"type": "text"})
+    assert out == {"a": 1}
+    assert json.loads(seen[0].content)["response_format"]["type"] == "json_schema"
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tool_choice_raises():
+    _, handler = _capture()
+    with pytest.raises(NotImplementedError):
+        await _relay(handler).complete("m", MSGS, 5, tool_choice={"type": "tool", "name": "x"})
+
+
+def test_json_nudge_does_not_mutate_input():
+    from orrery_relay.relay import _with_json_nudge
+    s_msgs = [{"role": "user", "content": "Hi"}]
+    l_msgs = [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}]
+    _with_json_nudge(s_msgs)
+    _with_json_nudge(l_msgs)
+    assert s_msgs == [{"role": "user", "content": "Hi"}]
+    assert l_msgs == [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}]
+
+
+def test_sync_truncation_warning_names_max_tokens(caplog):
+    _, handler = _capture(_ok("cut", finish="length"))
+    with caplog.at_level(logging.WARNING):
+        _relay(handler).complete_sync("m", MSGS, 77)
+    assert any("truncated" in r.message and "77" in r.message for r in caplog.records)

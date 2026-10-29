@@ -143,9 +143,12 @@ def _openai_relay_response(data: dict, model: str, latency_ms: float, max_tokens
     )
 
 
+_JSON_NUDGE = "\n\nReturn ONLY a JSON value matching the required schema — no prose, no markdown fences."
+
+
 def _with_json_nudge(messages: list[dict]) -> list[dict]:
     """Append a short JSON-only nudge to the last user message (str or block-list content)."""
-    nudge = "\n\nReturn ONLY a JSON value matching the required schema — no prose, no markdown fences."
+    nudge = _JSON_NUDGE
     out = list(messages)
     if out and out[-1]["role"] == "user":
         content = out[-1]["content"]
@@ -156,7 +159,7 @@ def _with_json_nudge(messages: list[dict]) -> list[dict]:
     return out
 
 
-def _parse_json_from_text(text: str) -> dict | None:
+def _parse_json_from_text(text: str) -> Any:
     """Try to extract a JSON object from text that may have markdown fences."""
     text = text.strip()
     if "```" in text:
@@ -465,14 +468,7 @@ class Relay:
             # tokens on a context Ollama silently truncates and only *asked* for
             # valid JSON. A short nudge still helps quality (Ollama's own guidance),
             # but `format` is what guarantees parseability.
-            json_instruction = "\n\nReturn ONLY a JSON value matching the required schema — no prose, no markdown fences."
-            augmented = list(messages)
-            if augmented and augmented[-1]["role"] == "user":
-                content = augmented[-1]["content"]
-                if isinstance(content, str):
-                    augmented[-1] = {**augmented[-1], "content": content + json_instruction}
-                elif isinstance(content, list):
-                    augmented[-1] = {**augmented[-1], "content": content + [{"type": "text", "text": json_instruction}]}
+            augmented = _with_json_nudge(messages)
 
             # Drop any caller-supplied `format` so the schema is the only one in play.
             call_kwargs = {k: v for k, v in kwargs.items() if k != "format"}
@@ -483,9 +479,10 @@ class Relay:
 
         if self._backend == "openai":
             augmented = _with_json_nudge(messages)
+            call_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
             response_format = {"type": "json_schema", "json_schema": {"name": tool_name, "strict": False, "schema": schema}}
             response = await self._complete_openai(
-                model, augmented, max_tokens, system, temperature, response_format=response_format, **kwargs)
+                model, augmented, max_tokens, system, temperature, response_format=response_format, **call_kwargs)
             parsed = _parse_json_from_text(response.text)
             return parsed if isinstance(parsed, dict) else {}
 
