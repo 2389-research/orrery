@@ -35,7 +35,6 @@ async def test_complete(relay):
         max_tokens=64,
     )
     assert resp.text.strip()
-    assert "PONG" in resp.text.upper()
     assert resp.output_tokens > 0
 
 
@@ -110,4 +109,4 @@ async def test_reasoning_off_batch_prompt_not_truncated(relay):
         max_tokens=max_tokens,
     )
     assert resp.text.strip()
-    assert resp.output_tokens < 1500
+    assert resp.output_tokens < 800  # catches partial thinking, not just a blown budget

@@ -77,3 +77,12 @@ def test_openai_backend_unset_knobs_are_none():
     relay = build_summarization_relay(_settings(_OPENAI))
     assert relay._reasoning_effort is None
     assert relay._timeout is None
+
+
+def test_openai_backend_without_url_degrades_to_local(caplog):
+    import logging
+    from src.summarization_relay import build_summarization_relay
+    with caplog.at_level(logging.WARNING, logger="summarization_relay"):
+        relay = build_summarization_relay(_settings({"SUMMARIZATION_BACKEND": "openai"}))
+    assert relay is None
+    assert any(r.name == "summarization_relay" and "gateway_url" in r.getMessage() for r in caplog.records)

@@ -296,7 +296,8 @@ async def _structured(content, msgs=MSGS):
 async def test_structured_sends_response_format():
     _, body = await _structured('{"a": 1}')
     assert body["response_format"] == {
-        "type": "json_schema", "json_schema": {"name": "my_tool", "strict": False, "schema": SCHEMA}}
+        "type": "json_schema", "json_schema": {
+            "name": "my_tool", "description": "Return structured data", "strict": False, "schema": SCHEMA}}
     assert "tools" not in body
 
 
@@ -372,3 +373,115 @@ def test_sync_truncation_warning_names_max_tokens(caplog):
     with caplog.at_level(logging.WARNING):
         _relay(handler).complete_sync("m", MSGS, 77)
     assert any("truncated" in r.message and "77" in r.message for r in caplog.records)
+
+
+# --- format -> response_format translation (the facet path passes format="json") ---
+
+@pytest.mark.asyncio
+async def test_format_json_becomes_json_object():
+    seen, handler = _capture()
+    await _relay(handler).complete("m", MSGS, 5, format="json")
+    body = json.loads(seen[0].content)
+    assert body["response_format"] == {"type": "json_object"}
+    assert "format" not in body
+
+
+@pytest.mark.asyncio
+async def test_format_dict_schema_becomes_json_schema():
+    seen, handler = _capture()
+    await _relay(handler).complete("m", MSGS, 5, format=SCHEMA)
+    assert json.loads(seen[0].content)["response_format"] == {
+        "type": "json_schema", "json_schema": {"name": "structured_output", "strict": False, "schema": SCHEMA}}
+
+
+@pytest.mark.asyncio
+async def test_no_format_no_response_format():
+    seen, handler = _capture()
+    await _relay(handler).complete("m", MSGS, 5)
+    assert "response_format" not in json.loads(seen[0].content)
+
+
+@pytest.mark.asyncio
+async def test_unsupported_format_ignored(caplog):
+    seen, handler = _capture()
+    with caplog.at_level(logging.DEBUG, logger="orrery_relay"):
+        await _relay(handler).complete("m", MSGS, 5, format="yaml")
+    assert "response_format" not in json.loads(seen[0].content)
+    assert any("format" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_explicit_response_format_beats_format():
+    seen, handler = _capture()
+    await _relay(handler).complete("m", MSGS, 5, format="json", response_format={"type": "text"})
+    assert json.loads(seen[0].content)["response_format"] == {"type": "text"}
+
+
+def test_sync_format_json_becomes_json_object():
+    seen, handler = _capture()
+    _relay(handler).complete_sync("m", MSGS, 5, format="json")
+    assert json.loads(seen[0].content)["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_structured_unaffected_by_caller_format():
+    seen, handler = _capture(_ok('{"a": 1}'))
+    await _relay(handler).complete_structured("m", MSGS, 5, SCHEMA, tool_name="t", format="json")
+    assert json.loads(seen[0].content)["response_format"]["type"] == "json_schema"
+
+
+@pytest.mark.asyncio
+async def test_structured_custom_description():
+    seen, handler = _capture(_ok('{"a": 1}'))
+    await _relay(handler).complete_structured("m", MSGS, 5, SCHEMA, tool_name="t", tool_description="Do the thing")
+    assert json.loads(seen[0].content)["response_format"]["json_schema"]["description"] == "Do the thing"
+
+
+# --- 4xx body is logged; ctor validation ---
+
+@pytest.mark.asyncio
+async def test_http_error_body_logged(caplog):
+    _, handler = _capture({"error": "unknown parameter reasoning_effort"}, status=400)
+    with caplog.at_level(logging.WARNING, logger="orrery_relay"):
+        with pytest.raises(httpx.HTTPStatusError):
+            await _relay(handler).complete("m", MSGS, 5)
+    assert any("400" in r.getMessage() and "reasoning_effort" in r.getMessage() for r in caplog.records)
+
+
+def test_sync_http_error_body_logged(caplog):
+    _, handler = _capture({"error": "unknown parameter reasoning_effort"}, status=400)
+    with caplog.at_level(logging.WARNING, logger="orrery_relay"):
+        with pytest.raises(httpx.HTTPStatusError):
+            _relay(handler).complete_sync("m", MSGS, 5)
+    assert any("reasoning_effort" in r.getMessage() for r in caplog.records)
+
+
+def test_malformed_200_logs_failure(caplog):
+    _, handler = _capture({"choices": []})
+    with caplog.at_level(logging.ERROR, logger="orrery_relay"):
+        with pytest.raises(ValueError):
+            _relay(handler).complete_sync("m", MSGS, 5)
+    assert any("failed" in r.getMessage() and "backend=openai" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("url", ["", None])
+def test_openai_requires_url(url):
+    with pytest.raises(ValueError, match="gateway_url"):
+        Relay(backend="openai", gateway_url=url)
+
+
+def test_negative_timeout_rejected():
+    with pytest.raises(ValueError, match="timeout"):
+        Relay(backend="openai", gateway_url=BASE, timeout=-1)
+    with pytest.raises(ValueError, match="timeout"):
+        Relay(backend="openai", gateway_url=BASE, timeout="-5")
+
+
+def test_whitespace_reasoning_effort_is_unset():
+    assert Relay(backend="openai", gateway_url=BASE, reasoning_effort="  ")._reasoning_effort is None
+    assert Relay(backend="openai", gateway_url=BASE, reasoning_effort=" low ")._reasoning_effort == "low"
+
+
+def test_http_transport_is_keyword_only():
+    with pytest.raises(TypeError):
+        Relay("openai", BASE, "k", "", "", "us-east-1", "http://x", 3, 1.0, 30.0, None, None, None, None)

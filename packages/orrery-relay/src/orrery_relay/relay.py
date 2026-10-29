@@ -10,11 +10,14 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .backends import create_async_client, create_sync_client, map_model_id
 from .retry import with_retry, with_retry_sync
 from .types import RelayResponse, UsageEvent
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = logging.getLogger("orrery_relay")
 
@@ -127,9 +130,49 @@ def _openai_request_body(
     return body
 
 
+def _openai_response_format(response_format: dict | None, fmt: Any) -> dict | None:
+    """Pick the Chat Completions `response_format`.
+
+    An explicit `response_format` always wins. Otherwise translate the Ollama-style
+    `format` callers already pass (e.g. the facet path's `format="json"`) so JSON mode
+    is not silently lost on this backend: "json" -> json_object, a dict -> json_schema
+    (same shape as complete_structured). Anything else is ignored.
+    """
+    if response_format is not None:
+        return response_format
+    if fmt is None:
+        return None
+    if fmt == "json":
+        return {"type": "json_object"}
+    if isinstance(fmt, dict):
+        return {"type": "json_schema", "json_schema": {"name": "structured_output", "strict": False, "schema": fmt}}
+    logger.debug("openai backend: ignoring unsupported format=%r", fmt)
+    return None
+
+
+def _openai_prepare(
+    *, gateway_url: str, api_key: str, reasoning_effort: str | None, model: str,
+    messages: list[dict], max_tokens: int, system: str | None, temperature: float | None,
+    response_format: dict | None, fmt: Any,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Everything the async and sync openai paths share: (url, headers, body)."""
+    body = _openai_request_body(
+        model, messages, max_tokens, system, temperature, reasoning_effort,
+        _openai_response_format(response_format, fmt))
+    return _openai_endpoint(gateway_url), {"Authorization": f"Bearer {api_key}"}, body
+
+
+def _raise_for_openai_status(resp: Any) -> None:
+    """raise_for_status, but log a rejected request's body first so the cause is visible."""
+    if resp.status_code >= 400:
+        logger.warning("openai backend: HTTP %d: %s", resp.status_code, resp.text[:300])
+    resp.raise_for_status()
+
+
 def _openai_relay_response(data: dict, model: str, latency_ms: float, max_tokens: int | None = None) -> RelayResponse:
     """Map a Chat Completions JSON response to a RelayResponse; warns on truncation."""
     if not data.get("choices"):
+        logger.error("failed model=%s backend=openai status=malformed (no choices)", model)
         raise ValueError(f"openai backend: malformed response from model={model} (no choices): {repr(data)[:300]}")
     choice = data["choices"][0]
     text = (choice.get("message") or {}).get("content") or ""
@@ -148,14 +191,13 @@ _JSON_NUDGE = "\n\nReturn ONLY a JSON value matching the required schema — no 
 
 def _with_json_nudge(messages: list[dict]) -> list[dict]:
     """Append a short JSON-only nudge to the last user message (str or block-list content)."""
-    nudge = _JSON_NUDGE
     out = list(messages)
     if out and out[-1]["role"] == "user":
         content = out[-1]["content"]
         if isinstance(content, str):
-            out[-1] = {**out[-1], "content": content + nudge}
+            out[-1] = {**out[-1], "content": content + _JSON_NUDGE}
         elif isinstance(content, list):
-            out[-1] = {**out[-1], "content": content + [{"type": "text", "text": nudge}]}
+            out[-1] = {**out[-1], "content": content + [{"type": "text", "text": _JSON_NUDGE}]}
     return out
 
 
@@ -179,7 +221,7 @@ def _parse_json_from_text(text: str) -> Any:
 
 
 class Relay:
-    """Shared LLM client that supports Bedrock, Gateway, and Ollama backends."""
+    """Shared LLM client that supports Bedrock, Gateway, Ollama, and OpenAI-compatible backends."""
 
     def __init__(
         self,
@@ -195,14 +237,17 @@ class Relay:
         max_delay: float = 30.0,
         on_usage: Callable[[UsageEvent], Awaitable[None]] | None = None,
         reasoning_effort: str | None = None,
-        timeout: float | None = None,
-        http_transport: Any = None,
+        timeout: float | str | None = None,
+        *,
+        http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """Build a relay.
 
         `reasoning_effort` and `timeout` follow one convention: empty/0 means unset,
         i.e. the backend default (there is no "no timeout" value). Both are only used
-        by the `openai` backend.
+        by the `openai` backend. `timeout` is seconds; the ctor also accepts a numeric
+        string (as read from env) and rejects negatives. `http_transport` is a test
+        seam (e.g. httpx.MockTransport) for the `openai` backend.
         """
         self._backend = backend
         self._ollama_url = ollama_url
@@ -210,7 +255,7 @@ class Relay:
         self._base_delay = base_delay
         self._max_delay = max_delay
         self._on_usage = on_usage
-        self._reasoning_effort = reasoning_effort or None
+        self._reasoning_effort = (reasoning_effort or "").strip() or None
         if timeout is None or timeout == "" or timeout == 0:
             self._timeout = None
         else:
@@ -218,7 +263,12 @@ class Relay:
                 self._timeout = float(timeout) or None
             except (TypeError, ValueError):
                 raise ValueError(f"timeout must be a number of seconds, got {timeout!r}") from None
+            if self._timeout is not None and self._timeout < 0:
+                raise ValueError(f"timeout must not be negative, got {timeout!r}")
         self._http_transport = http_transport
+
+        if backend == "openai" and not (gateway_url or "").strip():
+            raise ValueError("openai backend requires a gateway_url (e.g. https://host/v1)")
 
         if backend not in ("ollama", "openai"):
             self._async_client = create_async_client(
@@ -379,16 +429,18 @@ class Relay:
         """
         import httpx
 
-        body = _openai_request_body(model, messages, max_tokens, system, temperature, self._reasoning_effort, response_format)
-        url = _openai_endpoint(self._gateway_url)
-        headers = {"Authorization": f"Bearer {self._gateway_api_key}"}
+        url, headers, body = _openai_prepare(
+            gateway_url=self._gateway_url, api_key=self._gateway_api_key,
+            reasoning_effort=self._reasoning_effort, model=model, messages=messages,
+            max_tokens=max_tokens, system=system, temperature=temperature,
+            response_format=response_format, fmt=kwargs.get("format"))
 
         start = time.monotonic()
 
         async def _call() -> Any:
             async with httpx.AsyncClient(timeout=120.0 if self._timeout is None else self._timeout, transport=self._http_transport) as client:
                 resp = await client.post(url, json=body, headers=headers)
-                resp.raise_for_status()
+                _raise_for_openai_status(resp)
                 return resp.json()
 
         try:
@@ -496,7 +548,8 @@ class Relay:
         if self._backend == "openai":
             augmented = _with_json_nudge(messages)
             call_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
-            response_format = {"type": "json_schema", "json_schema": {"name": tool_name, "strict": False, "schema": schema}}
+            response_format = {"type": "json_schema", "json_schema": {
+                "name": tool_name, "description": tool_description, "strict": False, "schema": schema}}
             response = await self._complete_openai(
                 model, augmented, max_tokens, system, temperature, response_format=response_format, **call_kwargs)
             parsed = _parse_json_from_text(response.text)
@@ -591,6 +644,7 @@ class Relay:
     def _complete_openai_sync(
         self, model: str, messages: list[dict], max_tokens: int,
         system: str | None = None, temperature: float | None = None,
+        response_format: dict | None = None,
         **kwargs: Any,
     ) -> RelayResponse:
         """Sync twin of _complete_openai: same helpers, httpx.Client + with_retry_sync.
@@ -599,15 +653,17 @@ class Relay:
         """
         import httpx
 
-        body = _openai_request_body(model, messages, max_tokens, system, temperature, self._reasoning_effort)
-        url = _openai_endpoint(self._gateway_url)
-        headers = {"Authorization": f"Bearer {self._gateway_api_key}"}
+        url, headers, body = _openai_prepare(
+            gateway_url=self._gateway_url, api_key=self._gateway_api_key,
+            reasoning_effort=self._reasoning_effort, model=model, messages=messages,
+            max_tokens=max_tokens, system=system, temperature=temperature,
+            response_format=response_format, fmt=kwargs.get("format"))
         start = time.monotonic()
 
         def _call() -> Any:
             with httpx.Client(timeout=120.0 if self._timeout is None else self._timeout, transport=self._http_transport) as client:
                 resp = client.post(url, json=body, headers=headers)
-                resp.raise_for_status()
+                _raise_for_openai_status(resp)
                 return resp.json()
 
         try:

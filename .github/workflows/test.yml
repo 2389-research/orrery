@@ -1,4 +1,4 @@
-# Run the orchestrator pytest suite and the frontend Playwright suite on
+# Run the orchestrator and orrery-relay pytest suites and the frontend Playwright suite on
 # every PR and push to main. Without this, the test investment doesn't
 # compound — regressions sneak in.
 name: tests
@@ -55,6 +55,7 @@ jobs:
   relay-pytest:
     name: orrery-relay pytest
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
