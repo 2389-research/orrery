@@ -143,6 +143,19 @@ def _openai_relay_response(data: dict, model: str, latency_ms: float, max_tokens
     )
 
 
+def _with_json_nudge(messages: list[dict]) -> list[dict]:
+    """Append a short JSON-only nudge to the last user message (str or block-list content)."""
+    nudge = "\n\nReturn ONLY a JSON value matching the required schema — no prose, no markdown fences."
+    out = list(messages)
+    if out and out[-1]["role"] == "user":
+        content = out[-1]["content"]
+        if isinstance(content, str):
+            out[-1] = {**out[-1], "content": content + nudge}
+        elif isinstance(content, list):
+            out[-1] = {**out[-1], "content": content + [{"type": "text", "text": nudge}]}
+    return out
+
+
 def _parse_json_from_text(text: str) -> dict | None:
     """Try to extract a JSON object from text that may have markdown fences."""
     text = text.strip()
@@ -337,6 +350,7 @@ class Relay:
     async def _complete_openai(
         self, model: str, messages: list[dict], max_tokens: int,
         system: str | None = None, temperature: float | None = None,
+        response_format: dict | None = None,
         **kwargs: Any,
     ) -> RelayResponse:
         """OpenAI-compatible Chat Completions (LunaRoute, OpenRouter, vLLM, OpenAI).
@@ -346,7 +360,7 @@ class Relay:
         """
         import httpx
 
-        body = _openai_request_body(model, messages, max_tokens, system, temperature, self._reasoning_effort)
+        body = _openai_request_body(model, messages, max_tokens, system, temperature, self._reasoning_effort, response_format)
         url = _openai_endpoint(self._gateway_url)
         headers = {"Authorization": f"Bearer {self._gateway_api_key}"}
 
@@ -385,6 +399,10 @@ class Relay:
         if self._backend == "ollama":
             return await self._complete_ollama(model, messages, max_tokens, system, temperature, **kwargs)
         if self._backend == "openai":
+            if tools is not None or tool_choice is not None:
+                raise NotImplementedError(
+                    "openai backend does not support raw tools/tool_choice; "
+                    "use complete_structured for structured output")
             return await self._complete_openai(model, messages, max_tokens, system, temperature, **kwargs)
 
         mapped_model = map_model_id(model, self._backend)
@@ -462,6 +480,14 @@ class Relay:
                 model, augmented, max_tokens, system, temperature, format=schema, **call_kwargs)
             parsed = _parse_json_from_text(response.text)
             return parsed if parsed is not None else {}
+
+        if self._backend == "openai":
+            augmented = _with_json_nudge(messages)
+            response_format = {"type": "json_schema", "json_schema": {"name": tool_name, "strict": False, "schema": schema}}
+            response = await self._complete_openai(
+                model, augmented, max_tokens, system, temperature, response_format=response_format, **kwargs)
+            parsed = _parse_json_from_text(response.text)
+            return parsed if isinstance(parsed, dict) else {}
 
         # Anthropic/Bedrock: use tool_use
         tools = [{
@@ -549,6 +575,39 @@ class Relay:
                              output_tokens=output_tokens, model=model,
                              latency_ms=elapsed, backend="ollama")
 
+    def _complete_openai_sync(
+        self, model: str, messages: list[dict], max_tokens: int,
+        system: str | None = None, temperature: float | None = None,
+        **kwargs: Any,
+    ) -> RelayResponse:
+        """Sync twin of _complete_openai: same helpers, httpx.Client + with_retry_sync.
+
+        Like the other sync paths, on_usage (async) is not invoked.
+        """
+        import httpx
+
+        body = _openai_request_body(model, messages, max_tokens, system, temperature, self._reasoning_effort)
+        url = _openai_endpoint(self._gateway_url)
+        headers = {"Authorization": f"Bearer {self._gateway_api_key}"}
+        start = time.monotonic()
+
+        def _call() -> Any:
+            with httpx.Client(timeout=120.0 if self._timeout is None else self._timeout, transport=self._http_transport) as client:
+                resp = client.post(url, json=body, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+
+        try:
+            data = with_retry_sync(_call, max_retries=self._max_retries, base_delay=self._base_delay, max_delay=self._max_delay)
+        except Exception:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.error("failed model=%s backend=openai status=error latency=%.0fms", model, elapsed)
+            raise
+        elapsed = (time.monotonic() - start) * 1000
+        response = _openai_relay_response(data, model, elapsed, max_tokens)
+        logger.info("complete_sync model=%s backend=openai tokens=%d/%d latency=%.0fms", model, response.input_tokens, response.output_tokens, elapsed)
+        return response
+
     def complete_sync(
         self, model: str, messages: list[dict], max_tokens: int,
         system: str | None = None, temperature: float | None = None,
@@ -556,6 +615,8 @@ class Relay:
     ) -> RelayResponse:
         if self._backend == "ollama":
             return self._complete_ollama_sync(model, messages, max_tokens, system, temperature, **kwargs)
+        if self._backend == "openai":
+            return self._complete_openai_sync(model, messages, max_tokens, system, temperature, **kwargs)
         if self._sync_client is None:
             self._sync_client = create_sync_client(
                 backend=self._backend, gateway_url=self._gateway_url, gateway_api_key=self._gateway_api_key,

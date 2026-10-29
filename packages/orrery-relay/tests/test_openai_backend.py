@@ -248,3 +248,75 @@ def test_translate_does_not_mutate_input():
     msgs = [{"role": "user", "content": [{"type": "text", "text": "t", "cache_control": {"type": "ephemeral"}}]}]
     _anthropic_to_openai_messages(msgs, None)
     assert "cache_control" in msgs[0]["content"][0]
+
+
+# ---- Task 2: sync + structured -------------------------------------------
+
+def test_sync_request_shape_and_mapping():
+    seen, handler = _capture(_ok("sync hi", 3, 4))
+    r = _relay(handler).complete_sync("some/model", MSGS, 50, system="sys", temperature=0.2)
+    req = seen[0]
+    assert str(req.url) == "https://llm.test/v1/chat/completions"
+    assert req.headers["authorization"] == "Bearer sk-test"
+    body = json.loads(req.content)
+    assert body["max_tokens"] == 50 and body["temperature"] == 0.2
+    assert body["messages"][0] == {"role": "system", "content": "sys"}
+    assert (r.text, r.input_tokens, r.output_tokens, r.backend) == ("sync hi", 3, 4, "openai")
+
+
+def test_sync_retries_429_then_succeeds():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"error": "slow"})
+        return httpx.Response(200, json=_ok("ok"))
+
+    assert _relay(handler).complete_sync("m", MSGS, 5).text == "ok"
+    assert len(calls) == 2
+
+
+def test_sync_malformed_200_raises():
+    _, handler = _capture({"choices": []})
+    with pytest.raises(ValueError):
+        _relay(handler).complete_sync("m", MSGS, 5)
+
+
+SCHEMA = {"type": "object", "properties": {"a": {"type": "integer"}}}
+
+
+async def _structured(content, msgs=MSGS):
+    seen, handler = _capture(_ok(content))
+    out = await _relay(handler).complete_structured("m", msgs, 50, SCHEMA, tool_name="my_tool")
+    return out, json.loads(seen[0].content)
+
+
+@pytest.mark.asyncio
+async def test_structured_sends_response_format():
+    _, body = await _structured('{"a": 1}')
+    assert body["response_format"] == {
+        "type": "json_schema", "json_schema": {"name": "my_tool", "strict": False, "schema": SCHEMA}}
+    assert "tools" not in body
+
+
+@pytest.mark.asyncio
+async def test_structured_nudge_str_and_list():
+    _, body = await _structured('{"a": 1}')
+    assert body["messages"][-1]["content"].startswith("Hi\n\nReturn ONLY a JSON value")
+    _, body = await _structured('{"a": 1}', [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}])
+    assert "Return ONLY a JSON value" in json.dumps(body["messages"][-1]["content"])
+
+
+@pytest.mark.asyncio
+async def test_structured_parses_plain_fenced_and_garbage():
+    assert (await _structured('{"a": 1}'))[0] == {"a": 1}
+    assert (await _structured('```json\n{"a": 2}\n```'))[0] == {"a": 2}
+    assert (await _structured("not json at all"))[0] == {}
+
+
+@pytest.mark.asyncio
+async def test_complete_with_tools_raises():
+    _, handler = _capture()
+    with pytest.raises(NotImplementedError):
+        await _relay(handler).complete("m", MSGS, 5, tools=[{"name": "x"}])
