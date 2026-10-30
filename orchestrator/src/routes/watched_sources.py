@@ -46,6 +46,7 @@ class WatchedSourceCreate(BaseModel):
 class WatchedSourcePatch(BaseModel):
     enabled: bool | None = None
     cadence_hours: float | None = None
+    config: dict | None = None  # shallow-merged into config_json; a null value removes the key
 
 
 def _to_dict(row) -> dict:
@@ -146,6 +147,22 @@ def patch_watched_source(source_id: str, body: WatchedSourcePatch,
     if body.cadence_hours is not None:
         sets.append("cadence_hours = ?")
         params.append(body.cadence_hours)
+    if body.config is not None:
+        existing = store.conn.execute(
+            "SELECT config_json FROM watched_sources WHERE id = ?", (source_id,)).fetchone()[0]
+        try:
+            merged = json.loads(existing) if existing else {}
+        except (json.JSONDecodeError, TypeError):
+            merged = {}
+        if not isinstance(merged, dict):
+            merged = {}
+        for k, v in body.config.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        sets.append("config_json = ?")
+        params.append(json.dumps(merged))
     if sets:
         params.append(source_id)
         store.conn.execute(

@@ -76,6 +76,25 @@ async def test_sync_owns_docs_advances_cursor_and_enqueues_enrich(test_db, feed)
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='enrich_stretches'").fetchone()[0] == 1
 
 
-async def _run(conn, ws, sid):
+async def _run(conn, ws, sid, source_config=None):
     from src.config import get_settings
-    return await sync_horton(conn, FakeRelay(), get_settings(), ws, {}, sid)
+    return await sync_horton(conn, FakeRelay(), get_settings(), ws, source_config or {}, sid)
+
+
+@pytest.mark.asyncio
+async def test_min_window_start_in_source_config_skips_earlier_chunks(test_db, feed):
+    feed["items"] = [chunk(1, "2026-10-26"), chunk(2, "2026-10-26")]  # starts 19:01, 19:02
+    conn = get_connection(test_db)
+    sid, ws = make_ws(conn)
+    out = await _run(conn, ws, sid, {"min_window_start": "2026-10-26T19:02:00Z"})
+    assert out["actions"]["before_cutoff"] == 1 and out["actions"]["created"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", ["", None])
+async def test_empty_min_window_start_means_no_cutoff(test_db, feed, empty):
+    feed["items"] = [chunk(1, "2026-10-26"), chunk(2, "2026-10-26")]
+    conn = get_connection(test_db)
+    sid, ws = make_ws(conn)
+    out = await _run(conn, ws, sid, {"min_window_start": empty})
+    assert out["actions"]["created"] == 2 and out["actions"].get("before_cutoff", 0) == 0

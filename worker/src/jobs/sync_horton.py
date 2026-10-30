@@ -8,6 +8,8 @@ from .ingest_horton import ingest_horton_chunks
 
 
 async def sync_horton(conn, relay, settings, ws, source_config, source_id) -> dict:
+    cutoff = (source_config or {}).get("min_window_start") or None  # "" / None = unset
     out = await ingest_horton_chunks(
-        conn, relay, settings, server_url=ws["uri"], cursor_key=ws["uri"], source_id=source_id)
+        conn, relay, settings, server_url=ws["uri"], cursor_key=ws["uri"], source_id=source_id,
+        min_window_start=cutoff)
     return {"actions": out["actions"], "deleted": 0}

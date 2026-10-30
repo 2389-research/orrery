@@ -6,6 +6,7 @@ import json
 import sqlite3
 import traceback
 import uuid
+from datetime import datetime, timezone
 
 from orrery_relay import Relay
 from ..config import get_settings
@@ -43,8 +44,23 @@ def get_or_create_collection(conn, mic_id: str, day: str, server_url: str, cache
     return cid
 
 
+def parse_utc(ts) -> datetime:
+    """Parse an ISO-8601 timestamp into a tz-aware UTC datetime. Trailing `Z` = UTC, a naive
+    timestamp is taken as UTC, fractional seconds allowed. Raises ValueError if unparseable."""
+    if not isinstance(ts, str) or not ts.strip():
+        raise ValueError(f"unparseable timestamp: {ts!r}")
+    text = ts.strip()
+    if text[-1] in "zZ":
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)  # ValueError on garbage
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 async def ingest_horton_chunks(conn, relay, settings, *, server_url: str, cursor_key: str,
-                               source_id: str | None = None, spec_id: str | None = None) -> dict:
+                               source_id: str | None = None, spec_id: str | None = None,
+                               min_window_start: str | None = None) -> dict:
     """Shared core: drain the feed from the stored cursor, upsert each chunk as a transcript doc
     (per-chunk rollback + failure isolation), advance the cursor once iff nothing failed, and
     enqueue enrich_stretches when anything was created/updated.
@@ -52,10 +68,15 @@ async def ingest_horton_chunks(conn, relay, settings, *, server_url: str, cursor
     `source_id` makes a watched source OWN its documents (silo = the source); the one-shot job
     passes None (silo = the per-(mic,day) collection). `spec_id` is accepted for forward-compat
     but not read — upsert_document resolves the general spec itself.
-    Returns {"actions": {created,updated,skipped,conflict,empty}, "failed": n, "docs": n}.
+    `min_window_start` (ISO-8601, UTC) skips chunks whose `window.start` is earlier (counted as
+    `before_cutoff`; no upsert, no LLM). A chunk exactly at the cutoff is ingested. An
+    unparseable cutoff raises ValueError before anything is fetched or ingested.
+    Returns {"actions": {created,updated,skipped,conflict,empty,before_cutoff}, "failed": n, "docs": n}.
     """
+    cutoff = parse_utc(min_window_start) if min_window_start is not None else None
     fetch = make_fetch(server_url)
-    actions = {"created": 0, "updated": 0, "skipped": 0, "conflict": 0, "empty": 0}
+    actions = {"created": 0, "updated": 0, "skipped": 0, "conflict": 0, "empty": 0,
+               "before_cutoff": 0}
     failed = 0
     row = conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (cursor_key,)).fetchone()
     after = row[0] if row else None
@@ -64,6 +85,16 @@ async def ingest_horton_chunks(conn, relay, settings, *, server_url: str, cursor
     cache: dict = {}
     for item in items:
         try:
+            if cutoff is not None:
+                try:
+                    start = parse_utc(((item.get("window") or {}).get("start")))
+                except (ValueError, AttributeError, TypeError):
+                    start = None
+                    print(f"[ingest_horton] warning: chunk {item.get('id') if isinstance(item, dict) else item} "
+                          f"has missing/unparseable window.start; ingesting despite cutoff", flush=True)
+                if start is not None and start < cutoff:
+                    actions["before_cutoff"] += 1
+                    continue
             doc = chunk_to_doc(item)
             if doc is None:
                 actions["empty"] += 1
