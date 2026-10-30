@@ -298,6 +298,16 @@ schema-valid nonsense (a placeholder domain parroted from the surviving tail, 74
 call site can build. It is set at all for portability — older Ollama releases default to
 2048/4096 instead of auto-sizing.
 
+**One pinned `num_ctx` per process.** The relay pins ONE `num_ctx` (`OLLAMA_NUM_CTX`,
+default 32768) and sends `keep_alive` (`OLLAMA_KEEP_ALIVE`, default 30m) on every Ollama
+call. Ollama sizes the KV cache at load, so any change in `num_ctx` between requests forces
+a full model reload — measured on the Spark, a 189-token extraction took 12.7s on a reload
+versus 1.8s without one. Per-call `num_ctx` values (the classifier's 16384, tracksum's 8192)
+act as **floors** (`max(pin, caller)`). If something needs a bigger context, raise
+`OLLAMA_NUM_CTX` rather than pinning a larger per-call value (an oversized caller value
+still wins, but logs a warning because it re-triggers reloads). The server-wide
+`OLLAMA_CONTEXT_LENGTH` isn't enough on its own: a per-request `num_ctx` overrides it.
+
 Ollama-only kwargs (`ollama_options`, `format`) are stripped in `Relay.complete` /
 `complete_sync` before an Anthropic SDK call, since `messages.create()` raises on unknown
 keywords — so a caller can pass them unconditionally without knowing the backend.

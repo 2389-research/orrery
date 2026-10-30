@@ -27,6 +27,10 @@ class Settings:
     simmer_iterations: int = 3
     chunk_size: int = 2000
     ollama_url: str = "http://localhost:11434"
+    # One num_ctx per process + keep_alive: Ollama reloads the model whenever num_ctx
+    # changes between requests (see CLAUDE.md). Per-call values act as floors.
+    ollama_num_ctx: int = 32768
+    ollama_keep_alive: str = "30m"
     reasoning_effort: str = ""  # openai backend only; empty -> unset
     relay_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     worker_poll_interval: int = 5
@@ -100,6 +104,8 @@ _ENV_MAP = {
     "simmer_iterations": "SIMMER_ITERATIONS",
     "chunk_size": "CHUNK_SIZE",
     "ollama_url": "OLLAMA_URL",
+    "ollama_num_ctx": "OLLAMA_NUM_CTX",
+    "ollama_keep_alive": "OLLAMA_KEEP_ALIVE",
     "worker_poll_interval": "WORKER_POLL_INTERVAL",
     "judge_sweep_interval_seconds": "JUDGE_SWEEP_INTERVAL_SECONDS",
     "source_scan_interval_seconds": "SOURCE_SCAN_INTERVAL_SECONDS",

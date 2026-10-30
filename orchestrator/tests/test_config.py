@@ -114,3 +114,24 @@ def test_non_numeric_numeric_env_still_fails_loudly():
         from src.config import get_settings
         with pytest.raises(ValueError):
             get_settings()
+
+
+def _settings_from(env):
+    with mock.patch.dict(os.environ, env, clear=True):
+        from src.config import get_settings
+        return get_settings()
+
+
+def test_ollama_pin_defaults():
+    s = _settings_from({})
+    assert s.ollama_num_ctx == 32768
+    assert s.ollama_keep_alive == "30m"
+
+
+def test_ollama_pin_env_overrides():
+    s = _settings_from({"OLLAMA_NUM_CTX": "16384", "OLLAMA_KEEP_ALIVE": "1h"})
+    assert (s.ollama_num_ctx, s.ollama_keep_alive) == (16384, "1h")
+
+
+def test_ollama_num_ctx_empty_gives_default():
+    assert _settings_from({"OLLAMA_NUM_CTX": ""}).ollama_num_ctx == 32768
