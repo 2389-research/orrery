@@ -289,13 +289,26 @@ async def test_unparseable_cutoff_raises_before_fetch_or_ingest(test_db, feed, m
 
 
 @pytest.mark.asyncio
-async def test_missing_window_start_ingested_with_warning(test_db, feed, capsys):
+@pytest.mark.parametrize("window", [{"end": "2026-10-26T19:05:00Z"}, {"start": "garbage"}, {"start": None}])
+async def test_bad_chunk_start_fails_closed_with_cursor_held(test_db, feed, capsys, window):
     c = chunk_at("2026-10-26T19:00:00Z")
-    c["window"] = {"end": "2026-10-26T19:05:00Z"}
-    feed["items"] = [c]
+    c["window"] = window
+    feed["items"] = [c, chunk_at("2026-10-26T19:20:00Z")]
     conn, out = await run_cutoff(test_db, "2026-10-26T19:15:00Z")
-    assert out["actions"]["created"] == 1 and out["actions"]["before_cutoff"] == 0
+    assert out["failed"] == 1 and out["actions"]["created"] == 1  # only the good one
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone() is None
     assert "warning" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["2026-10-30", "not-a-date", 0, False, 12345])
+async def test_cutoff_parse_error_names_key(test_db, feed, bad):
+    conn = get_connection(test_db)
+    with pytest.raises(ValueError, match="invalid min_window_start"):
+        await ingest_horton.ingest_horton_chunks(
+            conn, FakeRelay(), ingest_horton.get_settings(), server_url=URL, cursor_key=URL,
+            min_window_start=bad)
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,8 @@ def parse_utc(ts) -> datetime:
     if not isinstance(ts, str) or not ts.strip():
         raise ValueError(f"unparseable timestamp: {ts!r}")
     text = ts.strip()
+    if "T" not in text.upper() and " " not in text:
+        raise ValueError(f"timestamp has no time component: {ts!r}")  # date-only = silent midnight
     if text[-1] in "zZ":
         text = text[:-1] + "+00:00"
     dt = datetime.fromisoformat(text)  # ValueError on garbage
@@ -73,7 +75,12 @@ async def ingest_horton_chunks(conn, relay, settings, *, server_url: str, cursor
     unparseable cutoff raises ValueError before anything is fetched or ingested.
     Returns {"actions": {created,updated,skipped,conflict,empty,before_cutoff}, "failed": n, "docs": n}.
     """
-    cutoff = parse_utc(min_window_start) if min_window_start is not None else None
+    cutoff = None
+    if min_window_start is not None:
+        try:
+            cutoff = parse_utc(min_window_start)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"invalid min_window_start {min_window_start!r}: {e}") from e
     fetch = make_fetch(server_url)
     actions = {"created": 0, "updated": 0, "skipped": 0, "conflict": 0, "empty": 0,
                "before_cutoff": 0}
@@ -88,11 +95,14 @@ async def ingest_horton_chunks(conn, relay, settings, *, server_url: str, cursor
             if cutoff is not None:
                 try:
                     start = parse_utc(((item.get("window") or {}).get("start")))
-                except (ValueError, AttributeError, TypeError):
-                    start = None
+                except (ValueError, AttributeError, TypeError) as e:
+                    # Fail closed: can't prove it is after the cutoff, so don't ingest; the
+                    # failure holds the cursor and the chunk is retried.
                     print(f"[ingest_horton] warning: chunk {item.get('id') if isinstance(item, dict) else item} "
-                          f"has missing/unparseable window.start; ingesting despite cutoff", flush=True)
-                if start is not None and start < cutoff:
+                          f"has missing/unparseable window.start while a cutoff is set; "
+                          f"treating as failed", flush=True)
+                    raise ValueError(f"bad window.start under cutoff: {e}") from e
+                if start < cutoff:
                     actions["before_cutoff"] += 1
                     continue
             doc = chunk_to_doc(item)

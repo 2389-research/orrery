@@ -153,9 +153,12 @@ def patch_watched_source(source_id: str, body: WatchedSourcePatch,
         try:
             merged = json.loads(existing) if existing else {}
         except (json.JSONDecodeError, TypeError):
-            merged = {}
+            merged = None
         if not isinstance(merged, dict):
-            merged = {}
+            store.close()
+            raise HTTPException(
+                status_code=422,
+                detail="existing config_json is not a JSON object; refusing to overwrite it")
         for k, v in body.config.items():
             if v is None:
                 merged.pop(k, None)

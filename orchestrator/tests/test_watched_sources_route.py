@@ -1,3 +1,4 @@
+import pytest
 def test_create_and_list_watched_source(test_client):
     r = test_client.post("/watched-sources", json={
         "type": "vault", "uri": "/vault", "noosphere": "ns",
@@ -103,3 +104,14 @@ def test_patch_without_config_leaves_config_alone(test_client):
     sid = _mk(test_client, keep=1)
     r = test_client.patch(f"/watched-sources/{sid}", json={"enabled": False})
     assert r.json()["config_json"] == {"keep": 1}
+
+
+@pytest.mark.parametrize("raw", ["not json{", "[1, 2]", '"str"'])
+def test_patch_config_refuses_to_clobber_unreadable_config(test_client, test_store, raw):
+    sid = _mk(test_client)
+    test_store.conn.execute("UPDATE watched_sources SET config_json = ? WHERE id = ?", (raw, sid))
+    test_store.conn.commit()
+    r = test_client.patch(f"/watched-sources/{sid}", json={"config": {"a": 1}, "enabled": False})
+    assert r.status_code == 422
+    row = test_store.conn.execute("SELECT config_json, enabled FROM watched_sources WHERE id=?", (sid,)).fetchone()
+    assert row[0] == raw and row[1] == 1  # untouched, nothing partially applied

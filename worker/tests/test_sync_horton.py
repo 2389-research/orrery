@@ -98,3 +98,88 @@ async def test_empty_min_window_start_means_no_cutoff(test_db, feed, empty):
     sid, ws = make_ws(conn)
     out = await _run(conn, ws, sid, {"min_window_start": empty})
     assert out["actions"]["created"] == 2 and out["actions"].get("before_cutoff", 0) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [0, False])
+async def test_falsy_non_empty_cutoff_is_not_treated_as_unset(test_db, feed, bad):
+    feed["items"] = [chunk(1, "2026-10-26")]
+    conn = get_connection(test_db)
+    sid, ws = make_ws(conn)
+    with pytest.raises(ValueError, match="min_window_start"):
+        await _run(conn, ws, sid, {"min_window_start": bad})
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_logs_effective_cutoff_and_warns_on_unknown_key(test_db, feed, capsys):
+    feed["items"] = []
+    conn = get_connection(test_db)
+    sid, ws = make_ws(conn)
+    await _run(conn, ws, sid, {"min_window_start": "2026-10-26T19:02:00Z", "minWindowStart ": "x"})
+    out = capsys.readouterr().out
+    assert "min_window_start='2026-10-26T19:02:00Z'" in out
+    assert "unknown" in out.lower() and "minWindowStart " in out
+    await _run(conn, ws, sid, {})
+    assert "min_window_start=None" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_failed_chunks_raise_after_ingest(test_db, feed):
+    bad = chunk(2, "2026-10-26")
+    del bad["id"]
+    feed["items"] = [chunk(1, "2026-10-26"), bad]
+    conn = get_connection(test_db)
+    sid, ws = make_ws(conn)
+    with pytest.raises(RuntimeError, match="1 horton chunk"):
+        await _run(conn, ws, sid)
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1  # others ingested
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone() is None
+
+
+def _scan_ws(conn, config_json):
+    conn.execute("INSERT INTO watched_sources (id, type, uri, noosphere, provenance_kind, config_json) "
+                 "VALUES ('h1', 'horton', ?, 'default', 'horton_transcript', ?)", (URL, config_json))
+    conn.commit()
+
+
+async def _scan(test_db):
+    import json
+    from src.jobs import scan_source
+    job = {"id": str(uuid.uuid4()), "type": "scan_source", "target": "h1",
+           "config": json.dumps({"source_id": "h1"})}
+    await scan_source.run_scan_source(job, test_db)
+
+
+@pytest.mark.asyncio
+async def test_run_scan_source_applies_config_json_cutoff(test_db, feed, monkeypatch):
+    import json
+    from src.jobs import scan_source
+    monkeypatch.setattr(scan_source, "Relay", type("R", (FakeRelay,), {
+        "from_settings": classmethod(lambda cls, settings, **kw: cls())}))
+    feed["items"] = [chunk(1, "2026-10-26"), chunk(2, "2026-10-26"), chunk(3, "2026-10-26")]
+    conn = get_connection(test_db)
+    _scan_ws(conn, json.dumps({"min_window_start": "2026-10-26T19:02:00Z"}))
+    await _scan(test_db)
+    conn = get_connection(test_db)
+    paths = sorted(r[0] for r in conn.execute("SELECT source_path FROM documents"))
+    assert len(paths) == 2 and not any("19:01:00" in p for p in paths)
+    row = conn.execute("SELECT last_status, last_error FROM watched_sources WHERE id='h1'").fetchone()
+    assert row[0] == "ok" and row[1] is None
+
+
+@pytest.mark.asyncio
+async def test_run_scan_source_bad_cutoff_records_error_naming_key(test_db, feed, monkeypatch):
+    import json
+    from src.jobs import scan_source
+    monkeypatch.setattr(scan_source, "Relay", type("R", (FakeRelay,), {
+        "from_settings": classmethod(lambda cls, settings, **kw: cls())}))
+    feed["items"] = [chunk(1, "2026-10-26")]
+    conn = get_connection(test_db)
+    _scan_ws(conn, json.dumps({"min_window_start": "2026-10-30"}))
+    with pytest.raises(ValueError):
+        await _scan(test_db)
+    conn = get_connection(test_db)
+    row = conn.execute("SELECT last_status, last_error FROM watched_sources WHERE id='h1'").fetchone()
+    assert row[0] == "error" and "min_window_start" in row[1]
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
