@@ -218,3 +218,101 @@ async def test_no_enrich_job_when_nothing_ingested(test_db, feed):
     feed["items"] = []
     conn, _ = await run(test_db)
     assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='enrich_stretches'").fetchone()[0] == 0
+
+
+# ---- window-start cutoff (Clover 15 -> 5 minute switch) ----
+
+def chunk_at(start, end=None, day="2026-10-26"):
+    c = chunk(1, day)
+    c["id"] = f"horton:chunk/{MIC}/{start}"
+    c["body"] = f"[{start}] line"
+    c["window"] = {"start": start, "end": end or start}
+    return c
+
+
+async def run_cutoff(test_db, cutoff, capsys=None):
+    conn = get_connection(test_db)
+    settings = ingest_horton.get_settings()
+    out = await ingest_horton.ingest_horton_chunks(
+        conn, FakeRelay(), settings, server_url=URL, cursor_key=URL, min_window_start=cutoff)
+    return conn, out
+
+
+@pytest.mark.asyncio
+async def test_cutoff_skips_earlier_keeps_boundary_and_later(test_db, feed):
+    feed["items"] = [chunk_at("2026-10-26T19:10:00Z"), chunk_at("2026-10-26T19:15:00Z"),
+                     chunk_at("2026-10-26T19:20:00Z")]
+    conn, out = await run_cutoff(test_db, "2026-10-26T19:15:00Z")
+    assert out["actions"]["before_cutoff"] == 1 and out["actions"]["created"] == 2
+    paths = sorted(r[0] for r in conn.execute("SELECT source_path FROM documents"))
+    assert len(paths) == 2 and not any("19:10:00" in p for p in paths)
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone()[0] == "c1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cutoff", ["2026-10-26T19:15:00Z", "2026-10-26T19:15:00+00:00",
+                                    "2026-10-26T19:15:00.000Z", "2026-10-26T19:15:00", "2026-10-26T20:15:00+01:00"])
+@pytest.mark.parametrize("start,expected_skipped", [
+    ("2026-10-26T19:15:00Z", 0), ("2026-10-26T19:15:00+00:00", 0), ("2026-10-26T19:15:00.000Z", 0),
+    ("2026-10-26T19:14:59.999Z", 1), ("2026-10-26T19:14:59+00:00", 1)])
+async def test_cutoff_format_equivalence(test_db, feed, cutoff, start, expected_skipped):
+    feed["items"] = [chunk_at(start)]
+    conn, out = await run_cutoff(test_db, cutoff)
+    assert out["actions"]["before_cutoff"] == expected_skipped
+    assert out["actions"]["created"] == 1 - expected_skipped
+
+
+@pytest.mark.asyncio
+async def test_all_before_cutoff_creates_nothing_no_enrich_cursor_advances(test_db, feed):
+    feed["items"] = [chunk_at("2026-10-26T19:00:00Z"), chunk_at("2026-10-26T19:05:00Z")]
+    conn, out = await run_cutoff(test_db, "2026-10-26T19:15:00Z")
+    assert out["actions"]["before_cutoff"] == 2 and out["failed"] == 0
+    assert out["actions"]["created"] == 0 and out["actions"]["updated"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs WHERE type='enrich_stretches'").fetchone()[0] == 0
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone()[0] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_unparseable_cutoff_raises_before_fetch_or_ingest(test_db, feed, monkeypatch):
+    called = []
+    monkeypatch.setattr(ingest_horton, "make_fetch", lambda url: called.append("fetch"))
+    feed["items"] = [chunk_at("2026-10-26T19:20:00Z")]
+    conn = get_connection(test_db)
+    with pytest.raises(ValueError):
+        await ingest_horton.ingest_horton_chunks(
+            conn, FakeRelay(), ingest_horton.get_settings(), server_url=URL, cursor_key=URL,
+            min_window_start="not-a-date")
+    assert called == []
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [{"end": "2026-10-26T19:05:00Z"}, {"start": "garbage"}, {"start": None}])
+async def test_bad_chunk_start_fails_closed_with_cursor_held(test_db, feed, capsys, window):
+    c = chunk_at("2026-10-26T19:00:00Z")
+    c["window"] = window
+    feed["items"] = [c, chunk_at("2026-10-26T19:20:00Z")]
+    conn, out = await run_cutoff(test_db, "2026-10-26T19:15:00Z")
+    assert out["failed"] == 1 and out["actions"]["created"] == 1  # only the good one
+    assert conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+    assert conn.execute("SELECT after FROM horton_cursor WHERE server_url=?", (URL,)).fetchone() is None
+    assert "warning" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["2026-10-30", "not-a-date", 0, False, 12345])
+async def test_cutoff_parse_error_names_key(test_db, feed, bad):
+    conn = get_connection(test_db)
+    with pytest.raises(ValueError, match="invalid min_window_start"):
+        await ingest_horton.ingest_horton_chunks(
+            conn, FakeRelay(), ingest_horton.get_settings(), server_url=URL, cursor_key=URL,
+            min_window_start=bad)
+
+
+@pytest.mark.asyncio
+async def test_no_cutoff_ingests_everything(test_db, feed):
+    feed["items"] = [chunk_at("2026-10-26T19:00:00Z"), chunk_at("2026-10-26T19:20:00Z")]
+    conn, out = await run_cutoff(test_db, None)
+    assert out["actions"]["created"] == 2 and out["actions"]["before_cutoff"] == 0

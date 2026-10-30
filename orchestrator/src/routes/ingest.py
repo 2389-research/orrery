@@ -724,6 +724,15 @@ async def ingest_horton(request: HortonIngestRequest, auth: AuthStore = Depends(
     """
     store = auth.store
     try:
+        want = (request.server_url or "").rstrip("/")
+        for (uri,) in store.conn.execute(
+                "SELECT uri FROM watched_sources WHERE type = 'horton'").fetchall():
+            if (uri or "").rstrip("/") == want:
+                raise HTTPException(
+                    status_code=409,
+                    detail="a horton watched source already covers this server_url: use the "
+                           "watched source; the one-shot path would bypass its min_window_start "
+                           "cutoff and share its cursor")
         spec_id = request.spec_id
         if not spec_id:
             spec = store.specs.get_general()
