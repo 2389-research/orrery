@@ -15,6 +15,10 @@ class Settings:
     aws_secret_key: str = ""
     aws_region: str = "us-east-1"
     ollama_url: str = "http://localhost:11434"
+    # One num_ctx per process + keep_alive: Ollama reloads the model whenever num_ctx
+    # changes between requests (see CLAUDE.md). Per-call values act as floors.
+    ollama_num_ctx: int = 32768
+    ollama_keep_alive: str = "30m"
     reasoning_effort: str = ""  # openai backend only; empty -> unset
     relay_timeout_seconds: float = 0.0  # openai backend only; 0 -> relay default
     classification_model: str = "claude-sonnet-4-6"

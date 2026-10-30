@@ -62,3 +62,19 @@ def test_non_numeric_numeric_env_still_fails_loudly():
     import pytest
     with pytest.raises(ValueError):
         _settings({"RELAY_TIMEOUT_SECONDS": "abc"})
+
+
+def test_ollama_pin_defaults():
+    s = _settings({})
+    assert s.ollama_num_ctx == 32768
+    assert s.ollama_keep_alive == "30m"
+
+
+def test_ollama_pin_env_overrides():
+    s = _settings({"OLLAMA_NUM_CTX": "16384", "OLLAMA_KEEP_ALIVE": "1h"})
+    assert s.ollama_num_ctx == 16384
+    assert s.ollama_keep_alive == "1h"
+
+
+def test_ollama_num_ctx_empty_gives_default():
+    assert _settings({"OLLAMA_NUM_CTX": ""}).ollama_num_ctx == 32768

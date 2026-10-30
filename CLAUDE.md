@@ -298,6 +298,25 @@ schema-valid nonsense (a placeholder domain parroted from the surviving tail, 74
 call site can build. It is set at all for portability — older Ollama releases default to
 2048/4096 instead of auto-sizing.
 
+**One pinned `num_ctx` for every client of an Ollama server.** The relay pins ONE
+`num_ctx` (`OLLAMA_NUM_CTX`, default 32768) and sends `keep_alive` (`OLLAMA_KEEP_ALIVE`,
+default 30m) on every Ollama call. Ollama sizes the KV cache at load, so any change in
+`num_ctx` between requests forces a full model reload — and reloads are per Ollama
+server + model, across ALL its clients (orchestrator, worker, any CLI), so the value must
+be identical across them; the shared `.env` keeps the compose services consistent.
+Measured on the Spark, a 189-token extraction took 12.7s on a reload versus 1.8s without
+one. Per-call `num_ctx` values (the classifier's 16384, tracksum's 8192) act as
+**floors** (`max(pin, caller)`). If something needs a bigger context, raise
+`OLLAMA_NUM_CTX` rather than pinning a larger per-call value (an oversized caller value
+still wins, but logs a warning because it re-triggers reloads). The server-wide
+`OLLAMA_CONTEXT_LENGTH` isn't enough on its own: a per-request `num_ctx` overrides it.
+Convention: empty = default; `OLLAMA_NUM_CTX=0` disables pinning. `OLLAMA_KEEP_ALIVE`
+intentionally shares the Ollama server's env name AND format (a duration string like
+`30m`, or seconds as a number; negative = forever; `0` = unload immediately), and numeric
+values go out as JSON numbers because Ollama rejects numeric strings. On small-memory
+hosts lower `OLLAMA_NUM_CTX` (two resident models each hold a 32k KV cache), but never
+below the largest prompt (the classifier needs ~16k).
+
 Ollama-only kwargs (`ollama_options`, `format`) are stripped in `Relay.complete` /
 `complete_sync` before an Anthropic SDK call, since `messages.create()` raises on unknown
 keywords — so a caller can pass them unconditionally without knowing the backend.

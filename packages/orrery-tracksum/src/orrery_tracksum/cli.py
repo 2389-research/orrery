@@ -39,6 +39,10 @@ def _relay(model: str):
         aws_access_key = os.environ.get("AWS_ACCESS_KEY", "")
         aws_secret_key = os.environ.get("AWS_SECRET_KEY", "")
         aws_region = os.environ.get("AWS_REGION", "us-east-1")
+        # Same pin as every other client of this Ollama server (empty -> default,
+        # OLLAMA_NUM_CTX=0 disables pinning), or the clients fight over the loaded context.
+        ollama_num_ctx = os.environ.get("OLLAMA_NUM_CTX", "").strip() or 32768
+        ollama_keep_alive = os.environ.get("OLLAMA_KEEP_ALIVE", "").strip() or "30m"
 
     return make_summarize_fn(Relay.from_settings(_S()), model)
 

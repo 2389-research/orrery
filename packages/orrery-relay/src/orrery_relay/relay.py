@@ -70,6 +70,102 @@ def _strip_ollama_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in _OLLAMA_ONLY_KWARGS}
 
 
+# Defaults shared by BOTH public factories (from_env and from_settings, via Settings).
+DEFAULT_OLLAMA_NUM_CTX = 32768
+DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+
+# Distinct oversized caller num_ctx values already warned about (once each). This is
+# module-global, so it warns once per distinct value per process, not once per Relay.
+_WARNED_NUM_CTX: set[int] = set()
+
+
+
+def _normalize_keep_alive(value: Any) -> str | int | float | None:
+    """Ollama rejects numeric strings ("-1", "3600" -> 400 `missing unit in duration`)
+    but accepts JSON numbers and duration strings ("30m"), so numerics must go out as
+    numbers. Empty/None -> None (not sent)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        num = value
+    else:
+        v = str(value).strip()
+        if not v:
+            return None
+        try:
+            num = float(v)  # any numeric spelling: "-1", "+3600", "1e3", "2.5"
+        except ValueError:
+            return v  # a duration string such as "30m"
+    if not math.isfinite(num):
+        raise ValueError(f"keep_alive must be finite (seconds or a duration like '30m'), got {value!r}")
+    return int(num) if float(num).is_integer() else num
+
+
+def _ollama_request_body(
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    system: str | None = None,
+    temperature: float | None = None,
+    *,
+    ollama_options: dict | None = None,
+    response_format: dict | None = None,
+    num_ctx_pin: int | None = None,
+    keep_alive: str | int | float | None = None,
+) -> dict[str, Any]:
+    """Build the native /api/chat body. Shared by the async and sync Ollama paths so
+    they differ only in transport.
+
+    `num_ctx_pin` / `keep_alive`: Ollama sizes the KV cache when it loads a model, so
+    any change in num_ctx between requests forces a full reload (per Ollama server +
+    model, across ALL its clients). Pinning one value for every client (caller values
+    act as floors via max()) and sending keep_alive stops that.
+    """
+    ollama_messages, _ = _anthropic_to_ollama_messages(messages, system)
+    if system:
+        ollama_messages.insert(0, {"role": "system", "content": system})
+
+    # Check if any message has images — num_predict option breaks vision on gemma4
+    has_images = any("images" in m for m in ollama_messages)
+
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": ollama_messages,
+        "stream": False,
+        # Disable reasoning: thinking-capable models (e.g. gemma4:26b) otherwise
+        # spend the entire num_predict budget on hidden "thinking" tokens, which
+        # Ollama returns in a separate `thinking` field — leaving message.content
+        # empty. Since we only read message.content, that yields blank responses.
+        # Ignored by non-thinking models.
+        "think": False,
+    }
+    if not has_images:
+        body["options"] = {"num_predict": max_tokens}
+    if temperature is not None:
+        body.setdefault("options", {})["temperature"] = temperature
+    # Extra native Ollama options (e.g. num_ctx). Ollama truncates an over-long
+    # prompt SILENTLY from the LEFT, so callers feeding long input must raise
+    # num_ctx. Merged last so an explicit caller value wins.
+    if ollama_options:
+        body.setdefault("options", {}).update(ollama_options)
+    if num_ctx_pin:
+        caller_ctx = int((ollama_options or {}).get("num_ctx") or 0)
+        if caller_ctx > num_ctx_pin and caller_ctx not in _WARNED_NUM_CTX:
+            _WARNED_NUM_CTX.add(caller_ctx)
+            logger.warning(
+                "Ollama caller num_ctx=%d exceeds pinned OLLAMA_NUM_CTX=%d; this forces an "
+                "Ollama model reload whenever the context size changes. Raise OLLAMA_NUM_CTX "
+                "to at least %d.", caller_ctx, num_ctx_pin, caller_ctx)
+        body.setdefault("options", {})["num_ctx"] = max(num_ctx_pin, caller_ctx)
+    if keep_alive is not None:
+        body["keep_alive"] = keep_alive
+    # Native structured output: a JSON schema in `format` makes Ollama do
+    # grammar-constrained decoding. Passed through from complete_structured.
+    if response_format is not None:
+        body["format"] = response_format
+    return body
+
+
 def _anthropic_to_openai_messages(messages: list[dict], system: str | None = None) -> list[dict]:
     """Translate Anthropic-format messages to OpenAI Chat Completions format.
 
@@ -244,6 +340,8 @@ class Relay:
         reasoning_effort: str | None = None,
         timeout: float | str | None = None,
         *,
+        ollama_num_ctx: int | str | None = None,
+        ollama_keep_alive: str | int | float | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """Build a relay.
@@ -252,7 +350,7 @@ class Relay:
         i.e. the backend default (there is no "no timeout" value). Both are only used
         by the `openai` backend. `timeout` is seconds; the ctor also accepts a numeric
         string (as read from env) and rejects negative or non-finite values.
-        `http_transport` is a test seam for the `openai` backend. It is handed to BOTH
+        `http_transport` is a test seam for the `openai` and `ollama` backends. It is handed to BOTH
         httpx.AsyncClient (complete) and httpx.Client (complete_sync), so it must
         implement both transport modes, as httpx.MockTransport does.
         """
@@ -276,6 +374,23 @@ class Relay:
             if self._timeout is not None and (self._timeout < 0 or not math.isfinite(self._timeout)):
                 raise ValueError(
                     f"timeout must be a finite, non-negative number of seconds, got {timeout!r}")
+        # Ollama pinning: the context size must be identical across EVERY client of an
+        # Ollama server (orchestrator, worker, CLIs), since reloads are per server+model.
+        # None/""/0 = disabled here (today's exact behaviour); this is the low-level API.
+        # Defaults live in the factories (from_env / from_settings), which map empty ->
+        # default before calling this.
+        if ollama_num_ctx is None or ollama_num_ctx == "" or ollama_num_ctx == 0:
+            self._ollama_num_ctx = None
+        else:
+            try:
+                self._ollama_num_ctx = int(ollama_num_ctx) or None
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"ollama_num_ctx must be a positive integer, got {ollama_num_ctx!r}") from None
+            if self._ollama_num_ctx is not None and self._ollama_num_ctx < 0:
+                raise ValueError(
+                    f"ollama_num_ctx must be a positive integer, got {ollama_num_ctx!r}")
+        self._ollama_keep_alive = _normalize_keep_alive(ollama_keep_alive)
         self._http_transport = http_transport
 
         if backend == "openai" and not (gateway_url or "").strip():
@@ -328,9 +443,22 @@ class Relay:
             "max_delay": float(os.environ.get("RELAY_MAX_DELAY", "30.0")),
             "reasoning_effort": os.environ.get("REASONING_EFFORT", ""),
             "timeout": os.environ.get("RELAY_TIMEOUT_SECONDS", ""),
+            # Unset/empty -> default; OLLAMA_NUM_CTX=0 disables pinning. OLLAMA_KEEP_ALIVE
+            # shares the Ollama server's env name AND format ("0" = unload immediately).
+            "ollama_num_ctx": os.environ.get("OLLAMA_NUM_CTX", "").strip() or DEFAULT_OLLAMA_NUM_CTX,
+            "ollama_keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE", "").strip() or DEFAULT_OLLAMA_KEEP_ALIVE,
         }
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @staticmethod
+    def _settings_default(settings: Any, name: str, default: Any) -> Any:
+        v = getattr(settings, name, None)
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return default
+        return v
 
     @classmethod
     def from_settings(cls, settings: Any, **overrides: Any) -> Relay:
@@ -344,9 +472,23 @@ class Relay:
             "ollama_url": getattr(settings, "ollama_url", "http://localhost:11434"),
             "reasoning_effort": getattr(settings, "reasoning_effort", ""),
             "timeout": getattr(settings, "relay_timeout_seconds", 0),
+            # Absent attribute -> no pinning; present-but-empty -> default.
+            "ollama_num_ctx": cls._settings_default(settings, "ollama_num_ctx", DEFAULT_OLLAMA_NUM_CTX),
+            "ollama_keep_alive": cls._settings_default(settings, "ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    def _ollama_body(self, model: str, messages: list[dict], max_tokens: int,
+                     system: str | None, temperature: float | None,
+                     kwargs: dict[str, Any]) -> dict[str, Any]:
+        return _ollama_request_body(
+            model, messages, max_tokens, system, temperature,
+            ollama_options=kwargs.get("ollama_options"),
+            response_format=kwargs.get("format"),
+            num_ctx_pin=self._ollama_num_ctx,
+            keep_alive=self._ollama_keep_alive,
+        )
 
     async def _complete_ollama(
         self, model: str, messages: list[dict], max_tokens: int,
@@ -362,49 +504,12 @@ class Relay:
         """
         import httpx
 
-        ollama_messages, _ = _anthropic_to_ollama_messages(messages, system)
-        if system:
-            ollama_messages.insert(0, {"role": "system", "content": system})
-
-        # Check if any message has images — num_predict option breaks vision on gemma4
-        has_images = any("images" in m for m in ollama_messages)
-
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": ollama_messages,
-            "stream": False,
-            # Disable reasoning: thinking-capable models (e.g. gemma4:26b) otherwise
-            # spend the entire num_predict budget on hidden "thinking" tokens, which
-            # Ollama returns in a separate `thinking` field — leaving message.content
-            # empty. Since we only read message.content, that yields blank responses
-            # (classification returned {} → no domains). Ignored by non-thinking models.
-            "think": False,
-        }
-        if not has_images:
-            body["options"] = {"num_predict": max_tokens}
-        if temperature is not None:
-            body.setdefault("options", {})["temperature"] = temperature
-        # Extra native Ollama options (e.g. num_ctx). Ollama's default context is
-        # small (4096) and it truncates the prompt SILENTLY from the LEFT, so a
-        # caller feeding long input (a rendered reference vocabulary, a whole file,
-        # a node trace) must raise num_ctx or the model answers from a prompt whose
-        # head — the instructions — has been cut off. There is no error and the
-        # output still looks well-formed, which is what makes it dangerous.
-        # Merged last so an explicit caller value wins.
-        ollama_options = kwargs.get("ollama_options")
-        if ollama_options:
-            body.setdefault("options", {}).update(ollama_options)
-        # Native structured output: a JSON schema in `format` makes Ollama do
-        # grammar-constrained decoding, so the model CANNOT emit tokens that break
-        # the schema. Passed through from complete_structured; ignored otherwise.
-        response_format = kwargs.get("format")
-        if response_format is not None:
-            body["format"] = response_format
+        body = self._ollama_body(model, messages, max_tokens, system, temperature, kwargs)
 
         start = time.monotonic()
 
         async def _call() -> Any:
-            async with httpx.AsyncClient(timeout=300) as client:
+            async with httpx.AsyncClient(timeout=300, transport=self._http_transport) as client:
                 resp = await client.post(f"{self._ollama_url}/api/chat", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -609,34 +714,12 @@ class Relay:
         """
         import httpx
 
-        ollama_messages, _ = _anthropic_to_ollama_messages(messages, system)
-        if system:
-            ollama_messages.insert(0, {"role": "system", "content": system})
-        has_images = any("images" in m for m in ollama_messages)
-
-        body: dict[str, Any] = {
-            "model": model, "messages": ollama_messages, "stream": False,
-            "think": False,   # the whole reason this path exists — see the docstring
-        }
-        if not has_images:
-            body["options"] = {"num_predict": max_tokens}
-        if temperature is not None:
-            body.setdefault("options", {})["temperature"] = temperature
-        # Same passthroughs as the async path. NOTE num_ctx is a CAP, not a floor:
-        # left unset, current Ollama sizes the context to the prompt (measured: a
-        # 15k-token prompt counted in full), so passing a value BELOW the prompt is
-        # what causes silent left-truncation. Only set it when you know the ceiling.
-        ollama_options = kwargs.get("ollama_options")
-        if ollama_options:
-            body.setdefault("options", {}).update(ollama_options)
-        response_format = kwargs.get("format")
-        if response_format is not None:
-            body["format"] = response_format
+        body = self._ollama_body(model, messages, max_tokens, system, temperature, kwargs)
 
         start = time.monotonic()
 
         def _call() -> Any:
-            with httpx.Client(timeout=300) as client:
+            with httpx.Client(timeout=300, transport=self._http_transport) as client:
                 resp = client.post(f"{self._ollama_url}/api/chat", json=body)
                 resp.raise_for_status()
                 return resp.json()

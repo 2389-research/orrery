@@ -209,9 +209,9 @@ async def classify_image(
     # Same schema as the text path, so the same caps apply: an image's secondary
     # domains become `document_domains` rows exactly like a document's, and nothing
     # downstream distinguishes the two. Deliberately NOT given `ollama_options` —
-    # this prompt omits the reference vocabulary (~1.4k tokens smaller), and the relay
-    # keeps extra options off the vision path on purpose (num_predict breaks gemma4
-    # vision), so raising num_ctx here would need its own verification.
+    # this prompt omits the reference vocabulary (~1.4k tokens smaller). The relay
+    # keeps `num_predict` off the vision path (it breaks gemma4 vision); it does apply
+    # the process-wide `num_ctx` pin (verified on gemma4:26b vision, 2026-10-30).
     result = await relay.complete_structured(
         model=model, max_tokens=1024,
         messages=[{"role": "user", "content": content}],
