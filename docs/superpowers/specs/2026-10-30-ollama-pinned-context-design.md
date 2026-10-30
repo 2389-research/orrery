@@ -18,19 +18,19 @@ On current Ollama, sending nothing means a hardware-dependent default, which is 
 Forcing every call to one context size, in an experiment on the same DB copy, cut **27.1s → 5.0s** (252-char chunk) and **31.0s → 7.1s** (2,064 chars). Extraction dropped to 1.8–2.5s. That's roughly a **4–5× increase in local-model ingest capacity** for every local job, not just Clover.
 
 ## Decision
-The relay owns **one Ollama context size per process** and a **keep-alive**:
-1. **`ollama_num_ctx`** (env `OLLAMA_NUM_CTX`, default **32768**). On every Ollama request (async and sync), `options.num_ctx = max(ollama_num_ctx, caller's num_ctx)`. Callers' existing pins (classifier 16384, tracksum 8192) remain as *floors*, but every call lands on the pinned value, so nothing reloads. If a caller asks for MORE than the pinned value, honour it (never truncate below what a caller says it needs) and log a WARNING once per distinct value. That case means a reload, and the operator should raise `OLLAMA_NUM_CTX`. `0`/empty disables pinning, which keeps today's behaviour (caller's value or Ollama's default).
+The relay owns **one Ollama context size for every client of an Ollama server** (reloads are per server + model, across ALL clients: orchestrator, worker, any CLI, so the value must be identical across them; the shared `.env` keeps the compose services consistent) and a **keep-alive**:
+1. **`ollama_num_ctx`** (env `OLLAMA_NUM_CTX`, default **32768**). On every Ollama request (async and sync), `options.num_ctx = max(ollama_num_ctx, caller's num_ctx)`. Callers' existing pins (classifier 16384, tracksum 8192) remain as *floors*, but every call lands on the pinned value, so nothing reloads. If a caller asks for MORE than the pinned value, honour it (never truncate below what a caller says it needs) and log a WARNING once per distinct value. That case means a reload, and the operator should raise `OLLAMA_NUM_CTX`. Convention: empty means the default (32768); `OLLAMA_NUM_CTX=0` disables pinning, which keeps today's behaviour (caller's value or Ollama's default). Both `Relay.from_env` and `from_settings` map empty to the default before calling the ctor; the ctor itself is the low-level API (None/""/0 = disabled).
    - **Why 32768:** it is above every capped prompt orrery builds:
-     - codesum: ≤16k chars per file, ≤24k chars at the root;
-     - session segments: ≤8k chars;
-     - extraction: 2k-char slices;
+     - codesum: ≤16k chars per file (~4k tokens), ≤24k chars at the root (~6k tokens);
+     - session segments: ≤8k chars (~2k tokens);
+     - extraction: 2k-char slices (~0.5k tokens);
      - classify: ~4–5k tokens;
      - facet batches: a few thousand tokens.
 
      So moving the uncapped calls off 262k can't truncate anything, and it leaves headroom. That matters because Ollama truncates silently from the LEFT (see CLAUDE.md).
-2. **`ollama_keep_alive`** (env `OLLAMA_KEEP_ALIVE`, default **`"30m"`**). It is sent as `keep_alive` on every Ollama request, so the model survives the 5-minute scan gaps. Empty means don't send it (Ollama's default applies).
+2. **`ollama_keep_alive`** (env `OLLAMA_KEEP_ALIVE`, default **`"30m"`**). It is sent as `keep_alive` on every Ollama request, so the model survives the 5-minute scan gaps. Empty means the default (`30m`). It shares the Ollama server's env name AND format: a duration string, or seconds as a number (negative = forever, `0` = unload immediately). Numeric values are sent as JSON numbers, because Ollama rejects numeric strings (400 `missing unit in duration`). In the ctor, None/"" means not sent.
 3. **Shared Ollama request building.** The async and sync Ollama paths currently duplicate body construction. Extract one pure `_ollama_request_body(...)` used by both, so the new logic lives in one place. This is the same principle as the openai helpers in #133. The existing Ollama behaviour must stay byte-identical apart from the two new fields.
-4. **Config:** the worker and orchestrator `Settings` both gain these fields. `Relay.from_settings` / `from_env` pass them through. CLAUDE.md's "`num_ctx` is a CAP" section gets a short note: the relay pins one value per process because a changing `num_ctx` forces an Ollama reload; raise `OLLAMA_NUM_CTX` rather than pinning a larger per-call value.
+4. **Config:** the worker and orchestrator `Settings` both gain these fields. `Relay.from_settings` / `from_env` pass them through, with the SAME defaults in both (the tracksum CLI's ad-hoc settings object carries them too). CLAUDE.md's "`num_ctx` is a CAP" section gets a short note: the relay pins one value for every client of the Ollama server because a changing `num_ctx` forces an Ollama reload; raise `OLLAMA_NUM_CTX` rather than pinning a larger per-call value.
 
 ## Non-goals
 - No change to the gateway/bedrock/openai backends.

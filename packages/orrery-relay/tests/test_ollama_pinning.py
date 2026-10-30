@@ -108,6 +108,53 @@ def test_ctor_num_ctx_rejects_bad(bad):
         Relay(backend="ollama", ollama_num_ctx=bad)
 
 
+@pytest.mark.parametrize("val,expected", [("-1", -1), ("3600", 3600), (-1, -1), ("30m", "30m"),
+                                          ("", None), ("1.5", 1.5), (0, 0), ("0", 0), (" 30m ", "30m")])
+def test_ctor_keep_alive_numeric_forms(val, expected):
+    got = Relay(backend="ollama", ollama_keep_alive=val)._ollama_keep_alive
+    assert got == expected and type(got) is type(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ka,expected", [("-1", -1), (3600, 3600), ("0", 0), ("30m", "30m")])
+async def test_numeric_keep_alive_is_json_number(ka, expected):
+    bodies = []
+    await _relay(bodies, ollama_keep_alive=ka).complete("m", MSGS, 10)
+    got = bodies[0]["keep_alive"]  # parsed from the wire JSON
+    assert got == expected and type(got) is type(expected)
+
+
+@pytest.mark.asyncio
+async def test_pin_applies_and_preserves_other_options():
+    bodies = []
+    await _relay(bodies, ollama_num_ctx=32768).complete("m", MSGS, 10, ollama_options={"top_k": 5})
+    assert bodies[0]["options"]["num_ctx"] == 32768 and bodies[0]["options"]["top_k"] == 5
+
+
+@pytest.mark.asyncio
+async def test_pin_applies_without_any_ollama_options():
+    bodies = []
+    await _relay(bodies, ollama_num_ctx=32768).complete("m", MSGS, 10)
+    assert bodies[0]["options"] == {"num_predict": 10, "num_ctx": 32768}
+
+
+@pytest.mark.asyncio
+async def test_pin_off_leaves_caller_num_ctx_alone():
+    bodies = []
+    await _relay(bodies).complete("m", MSGS, 10, ollama_options={"num_ctx": 16384})
+    assert bodies[0]["options"]["num_ctx"] == 16384 and "keep_alive" not in bodies[0]
+
+
+@pytest.mark.asyncio
+async def test_string_caller_num_ctx_is_coerced():
+    bodies = []
+    await _relay(bodies, ollama_num_ctx=32768).complete("m", MSGS, 10, ollama_options={"num_ctx": "16384"})
+    assert bodies[0]["options"]["num_ctx"] == 32768
+    bodies.clear()
+    await _relay(bodies, ollama_num_ctx=32768).complete("m", MSGS, 10, ollama_options={"num_ctx": "65536"})
+    assert bodies[0]["options"]["num_ctx"] == 65536
+
+
 def test_ctor_keep_alive_normalization():
     assert Relay(backend="ollama", ollama_keep_alive="  ")._ollama_keep_alive is None
     assert Relay(backend="ollama", ollama_keep_alive=" 30m ")._ollama_keep_alive == "30m"
@@ -128,17 +175,31 @@ def test_from_settings_plumbing_and_override():
         anthropic_backend = "ollama"
     r = Relay.from_settings(Bare())
     assert (r._ollama_num_ctx, r._ollama_keep_alive) == (None, None)
+    class Empty:
+        anthropic_backend = "ollama"
+        ollama_num_ctx = ""
+        ollama_keep_alive = ""
+    r = Relay.from_settings(Empty())  # empty -> default, mapped before the ctor
+    assert (r._ollama_num_ctx, r._ollama_keep_alive) == (32768, "30m")
 
 
 def test_from_env_plumbing_and_override(monkeypatch):
     for k in ("OLLAMA_NUM_CTX", "OLLAMA_KEEP_ALIVE"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("ANTHROPIC_BACKEND", "ollama")
-    r = Relay.from_env()
-    assert (r._ollama_num_ctx, r._ollama_keep_alive) == (None, None)
-    monkeypatch.setenv("OLLAMA_NUM_CTX", "32768")
-    monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "30m")
-    r = Relay.from_env()
+    r = Relay.from_env()  # unset -> same defaults as Settings
     assert (r._ollama_num_ctx, r._ollama_keep_alive) == (32768, "30m")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "")
+    monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "")
+    r = Relay.from_env()  # empty -> default
+    assert (r._ollama_num_ctx, r._ollama_keep_alive) == (32768, "30m")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "0")  # 0 disables pinning
+    monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "0")  # legit Ollama value: unload now
+    r = Relay.from_env()
+    assert (r._ollama_num_ctx, r._ollama_keep_alive) == (None, 0)
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "16384")
+    monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "-1")
+    r = Relay.from_env()
+    assert (r._ollama_num_ctx, r._ollama_keep_alive) == (16384, -1)
     r = Relay.from_env(ollama_num_ctx=4096)
     assert r._ollama_num_ctx == 4096

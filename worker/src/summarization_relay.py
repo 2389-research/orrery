@@ -19,6 +19,8 @@ def build_summarization_relay(settings) -> Relay | None:
             ollama_url=settings.ollama_url,
             reasoning_effort=settings.summarization_reasoning_effort,
             timeout=settings.summarization_timeout_seconds,
+            ollama_num_ctx=settings.ollama_num_ctx,
+            ollama_keep_alive=settings.ollama_keep_alive,
         )
     except Exception as e:
         # A typo'd SUMMARIZATION_BACKEND must not crash every summarization job: fall back

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Stop Ollama model reloads by pinning one `num_ctx` per process and sending `keep_alive`, with the Ollama request body built in one shared helper.
+**Goal:** Stop Ollama model reloads by pinning one `num_ctx` for every client of an Ollama server and sending `keep_alive`, with the Ollama request body built in one shared helper.
 
 **Architecture:**
 - A pure `_ollama_request_body(...)` in `orrery_relay/relay.py`, used by `_complete_ollama` and `_complete_ollama_sync`.
@@ -15,11 +15,11 @@
 
 ## Global Constraints
 - `options.num_ctx = max(ollama_num_ctx, caller_num_ctx)` when pinning is on.
-- The default `ollama_num_ctx` is **32768**. `0` or empty disables pinning, and the caller's value or Ollama's default applies.
+- The default `ollama_num_ctx` is **32768**. Empty = default; `OLLAMA_NUM_CTX=0` disables pinning, and the caller's value or Ollama's default applies.
 - If the caller's value exceeds the pin, it is honoured and a WARNING is logged once per distinct value.
-- `keep_alive` comes from `ollama_keep_alive`, default **`"30m"`**. An empty value means the field is omitted.
+- `keep_alive` comes from `ollama_keep_alive`, default **`"30m"`**. An empty value means the default; numeric values (`-1`, `3600`, `0`) are sent as JSON numbers.
 - Env names: `OLLAMA_NUM_CTX`, `OLLAMA_KEEP_ALIVE`. Settings fields: `ollama_num_ctx: int = 32768`, `ollama_keep_alive: str = "30m"`. Add them to BOTH worker and orchestrator config, plus the worker `_ENV_MAP`.
-- Existing Ollama request bodies are byte-identical when `OLLAMA_NUM_CTX=0` and `OLLAMA_KEEP_ALIVE=""`. The image path (no `num_predict`), temperature, and the `format`/structured passthrough are unchanged.
+- Existing Ollama request bodies are byte-identical when a relay built with pinning disabled (ctor None/0 and keep_alive None). The image path (no `num_predict`), temperature, and the `format`/structured passthrough are unchanged.
 - No change to the gateway/bedrock/openai request shapes.
 - Branch: `feat/ollama-pinned-context`, off `main`.
 

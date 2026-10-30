@@ -70,8 +70,31 @@ def _strip_ollama_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k not in _OLLAMA_ONLY_KWARGS}
 
 
-# Distinct oversized caller num_ctx values already warned about (once each).
+# Defaults shared by BOTH public factories (from_env and from_settings, via Settings).
+DEFAULT_OLLAMA_NUM_CTX = 32768
+DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+
+# Distinct oversized caller num_ctx values already warned about (once each). This is
+# module-global, so it warns once per distinct value per process, not once per Relay.
 _WARNED_NUM_CTX: set[int] = set()
+
+_NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def _normalize_keep_alive(value: Any) -> str | int | float | None:
+    """Ollama rejects numeric strings ("-1", "3600" -> 400 `missing unit in duration`)
+    but accepts JSON numbers and duration strings ("30m"), so numerics must go out as
+    numbers. Empty/None -> None (not sent)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    v = str(value).strip()
+    if not v:
+        return None
+    if _NUMERIC_RE.match(v):
+        return float(v) if "." in v else int(v)
+    return v
 
 
 def _ollama_request_body(
@@ -84,14 +107,15 @@ def _ollama_request_body(
     ollama_options: dict | None = None,
     response_format: dict | None = None,
     num_ctx_pin: int | None = None,
-    keep_alive: str | None = None,
+    keep_alive: str | int | float | None = None,
 ) -> dict[str, Any]:
     """Build the native /api/chat body. Shared by the async and sync Ollama paths so
     they differ only in transport.
 
     `num_ctx_pin` / `keep_alive`: Ollama sizes the KV cache when it loads a model, so
-    any change in num_ctx between requests forces a full reload. Pinning one value per
-    process (caller values act as floors via max()) and sending keep_alive stops that.
+    any change in num_ctx between requests forces a full reload (per Ollama server +
+    model, across ALL its clients). Pinning one value for every client (caller values
+    act as floors via max()) and sending keep_alive stops that.
     """
     ollama_messages, _ = _anthropic_to_ollama_messages(messages, system)
     if system:
@@ -121,7 +145,7 @@ def _ollama_request_body(
     if ollama_options:
         body.setdefault("options", {}).update(ollama_options)
     if num_ctx_pin:
-        caller_ctx = (ollama_options or {}).get("num_ctx") or 0
+        caller_ctx = int((ollama_options or {}).get("num_ctx") or 0)
         if caller_ctx > num_ctx_pin and caller_ctx not in _WARNED_NUM_CTX:
             _WARNED_NUM_CTX.add(caller_ctx)
             logger.warning(
@@ -129,7 +153,7 @@ def _ollama_request_body(
                 "Ollama model reload whenever the context size changes. Raise OLLAMA_NUM_CTX "
                 "to at least %d.", caller_ctx, num_ctx_pin, caller_ctx)
         body.setdefault("options", {})["num_ctx"] = max(num_ctx_pin, caller_ctx)
-    if keep_alive:
+    if keep_alive is not None:
         body["keep_alive"] = keep_alive
     # Native structured output: a JSON schema in `format` makes Ollama do
     # grammar-constrained decoding. Passed through from complete_structured.
@@ -313,7 +337,7 @@ class Relay:
         timeout: float | str | None = None,
         *,
         ollama_num_ctx: int | str | None = None,
-        ollama_keep_alive: str | None = None,
+        ollama_keep_alive: str | int | float | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """Build a relay.
@@ -346,8 +370,11 @@ class Relay:
             if self._timeout is not None and (self._timeout < 0 or not math.isfinite(self._timeout)):
                 raise ValueError(
                     f"timeout must be a finite, non-negative number of seconds, got {timeout!r}")
-        # Ollama pinning: None/""/0 = disabled (today's exact behaviour). Defaults live
-        # in config (Settings), not here.
+        # Ollama pinning: the context size must be identical across EVERY client of an
+        # Ollama server (orchestrator, worker, CLIs), since reloads are per server+model.
+        # None/""/0 = disabled here (today's exact behaviour); this is the low-level API.
+        # Defaults live in the factories (from_env / from_settings), which map empty ->
+        # default before calling this.
         if ollama_num_ctx is None or ollama_num_ctx == "" or ollama_num_ctx == 0:
             self._ollama_num_ctx = None
         else:
@@ -359,7 +386,7 @@ class Relay:
             if self._ollama_num_ctx is not None and self._ollama_num_ctx < 0:
                 raise ValueError(
                     f"ollama_num_ctx must be a positive integer, got {ollama_num_ctx!r}")
-        self._ollama_keep_alive = (ollama_keep_alive or "").strip() or None
+        self._ollama_keep_alive = _normalize_keep_alive(ollama_keep_alive)
         self._http_transport = http_transport
 
         if backend == "openai" and not (gateway_url or "").strip():
@@ -412,11 +439,22 @@ class Relay:
             "max_delay": float(os.environ.get("RELAY_MAX_DELAY", "30.0")),
             "reasoning_effort": os.environ.get("REASONING_EFFORT", ""),
             "timeout": os.environ.get("RELAY_TIMEOUT_SECONDS", ""),
-            "ollama_num_ctx": os.environ.get("OLLAMA_NUM_CTX") or None,
-            "ollama_keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE") or None,
+            # Unset/empty -> default; OLLAMA_NUM_CTX=0 disables pinning. OLLAMA_KEEP_ALIVE
+            # shares the Ollama server's env name AND format ("0" = unload immediately).
+            "ollama_num_ctx": os.environ.get("OLLAMA_NUM_CTX", "").strip() or DEFAULT_OLLAMA_NUM_CTX,
+            "ollama_keep_alive": os.environ.get("OLLAMA_KEEP_ALIVE", "").strip() or DEFAULT_OLLAMA_KEEP_ALIVE,
         }
         kwargs.update(overrides)
         return cls(**kwargs)
+
+    @staticmethod
+    def _settings_default(settings: Any, name: str, default: Any) -> Any:
+        v = getattr(settings, name, None)
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return default
+        return v
 
     @classmethod
     def from_settings(cls, settings: Any, **overrides: Any) -> Relay:
@@ -430,8 +468,9 @@ class Relay:
             "ollama_url": getattr(settings, "ollama_url", "http://localhost:11434"),
             "reasoning_effort": getattr(settings, "reasoning_effort", ""),
             "timeout": getattr(settings, "relay_timeout_seconds", 0),
-            "ollama_num_ctx": getattr(settings, "ollama_num_ctx", None),
-            "ollama_keep_alive": getattr(settings, "ollama_keep_alive", None),
+            # Absent attribute -> no pinning; present-but-empty -> default.
+            "ollama_num_ctx": cls._settings_default(settings, "ollama_num_ctx", DEFAULT_OLLAMA_NUM_CTX),
+            "ollama_keep_alive": cls._settings_default(settings, "ollama_keep_alive", DEFAULT_OLLAMA_KEEP_ALIVE),
         }
         kwargs.update(overrides)
         return cls(**kwargs)
