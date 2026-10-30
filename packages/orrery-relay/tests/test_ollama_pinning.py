@@ -203,3 +203,23 @@ def test_from_env_plumbing_and_override(monkeypatch):
     assert (r._ollama_num_ctx, r._ollama_keep_alive) == (16384, -1)
     r = Relay.from_env(ollama_num_ctx=4096)
     assert r._ollama_num_ctx == 4096
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("+3600", 3600), ("1e3", 1000), ("2.5", 2.5), ("-1", -1), ("0", 0), (3600.0, 3600),
+])
+def test_keep_alive_any_numeric_spelling_is_a_number(raw, expected):
+    # Ollama 400s on numeric STRINGS; every numeric spelling must go out as a JSON number.
+    r = Relay(backend="ollama", ollama_keep_alive=raw)
+    assert r._ollama_keep_alive == expected
+    assert type(r._ollama_keep_alive) is type(expected)
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", float("nan")])
+def test_keep_alive_non_finite_rejected(raw):
+    with pytest.raises(ValueError, match="finite"):
+        Relay(backend="ollama", ollama_keep_alive=raw)
+
+
+def test_keep_alive_duration_string_unchanged():
+    assert Relay(backend="ollama", ollama_keep_alive=" 30m ")._ollama_keep_alive == "30m"

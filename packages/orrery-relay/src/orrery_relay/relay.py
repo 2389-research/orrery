@@ -78,7 +78,6 @@ DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 # module-global, so it warns once per distinct value per process, not once per Relay.
 _WARNED_NUM_CTX: set[int] = set()
 
-_NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 
 
 def _normalize_keep_alive(value: Any) -> str | int | float | None:
@@ -88,13 +87,18 @@ def _normalize_keep_alive(value: Any) -> str | int | float | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return value
-    v = str(value).strip()
-    if not v:
-        return None
-    if _NUMERIC_RE.match(v):
-        return float(v) if "." in v else int(v)
-    return v
+        num = value
+    else:
+        v = str(value).strip()
+        if not v:
+            return None
+        try:
+            num = float(v)  # any numeric spelling: "-1", "+3600", "1e3", "2.5"
+        except ValueError:
+            return v  # a duration string such as "30m"
+    if not math.isfinite(num):
+        raise ValueError(f"keep_alive must be finite (seconds or a duration like '30m'), got {value!r}")
+    return int(num) if float(num).is_integer() else num
 
 
 def _ollama_request_body(
